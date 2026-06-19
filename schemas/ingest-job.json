@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IngestJob",
+  "type": "object",
+  "required": ["jobId", "kbId", "docId", "objectKey", "fileName", "mimeType"],
+  "properties": {
+    "jobId": { "type": "string", "format": "uuid" },
+    "kbId": { "type": "string", "format": "uuid" },
+    "docId": { "type": "string", "format": "uuid" },
+    "objectKey": { "type": "string" },
+    "fileName": { "type": "string" },
+    "mimeType": { "type": "string" },
+    "chunkSize": { "type": "integer", "default": 512 },
+    "chunkOverlap": { "type": "integer", "default": 64 },
+    "chunkStrategy": {
+      "type": "string",
+      "enum": ["recursive", "semantic"],
+      "default": "recursive"
+    },
+    "embeddingModel": { "type": "string", "default": "text-embedding-3-small" },
+    "embeddingDimension": { "type": "integer", "default": 1536 }
+  }
+}

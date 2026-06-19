@@ -1,0 +1,37 @@
+# Secrets & local environment (never commit real keys)
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.local
+
+# Build outputs
+target/
+**/target/
+dist/
+build/
+*.tsbuildinfo
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# IDE / OS
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Logs & local runtime artifacts
+*.log
+scripts/e2e-last-run.json
+handoff.md
+
+# Docker local overrides
+docker-compose.override.yml
