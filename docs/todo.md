@@ -6,6 +6,7 @@
 
 ## 待办
 
+- [ ] Chat 引用来源侧栏 snippet 支持 Markdown 摘要渲染
 - [ ] 知识库 embedding 配置：支持更新 API 或迁移旧库（当前旧库 `text-embedding-3-small` 会导致智谱 400）
 - [ ] 在 README 补充 Docker 启动排障章节（镜像加速 / pip 镜像 / 依赖锁定 / CORS / Milvus 维度重置）
 - [ ] Worker `embed_batch` 分批调用智谱（大文档单次 `input` 数组可能超限）
@@ -17,6 +18,10 @@
 
 ## 已完成
 
+- [x] Web 文档管理：批次上传（多选/拖拽，顺序单文件 API） — 2026-06-21
+- [x] Web 文档管理：单文档删除（对接 DELETE API） — 2026-06-21
+- [x] Canonical Markdown 摄入 + 结构感知分块（markdown_chunker） — 2026-06-20
+- [x] Web 智能问答 Markdown 渲染与自动换行（react-markdown + remark-gfm + remark-breaks） — 2026-06-20
 - [x] E2E 主流程 8/8 全绿（智谱 Embedding + DeepSeek Chat） — 2026-06-19
 - [x] Web 控制台 CORS 403 修复（`:8080` Origin） — 2026-06-19
 - [x] 智谱 Embedding 配置与新建 KB 默认维度/模型 — 2026-06-19

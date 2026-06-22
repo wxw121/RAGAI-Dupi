@@ -121,8 +121,12 @@ public class RetrievalService {
         int total = 0;
         for (int i = 0; i < hits.size(); i++) {
             RetrievalHit hit = hits.get(i);
-            String block = String.format("[%d] %s (source: %s)\n%s\n\n",
-                    i + 1, hit.getFileName(), hit.getDocId(), hit.getContent());
+            Map<String, Object> meta = hit.getMetadata() != null ? hit.getMetadata() : Map.of();
+            String section = String.valueOf(meta.getOrDefault("heading", ""));
+            String blockType = String.valueOf(meta.getOrDefault("block_type", "prose"));
+            String block = String.format(
+                    "[%d] %s | section: %s | type: %s\n%s\n\n",
+                    i + 1, hit.getFileName(), section, blockType, hit.getContent());
             if (total + block.length() > ragProperties.getMaxContextChars()) {
                 break;
             }

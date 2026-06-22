@@ -3,23 +3,32 @@ import { useDropzone } from '@/hooks/useDropzone'
 import { Upload } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
+export type UploadProgressFn = (current: number, total: number, fileName: string) => void
+
 interface UploadZoneProps {
-  onUpload: (file: File) => Promise<void>
+  onUpload: (files: File[], onProgress?: UploadProgressFn) => Promise<void>
   disabled?: boolean
 }
 
 export function UploadZone({ onUpload, disabled }: UploadZoneProps) {
   const [uploading, setUploading] = useState(false)
+  const [progress, setProgress] = useState<{
+    current: number
+    total: number
+    fileName: string
+  } | null>(null)
 
   const onDrop = useCallback(
     async (files: File[]) => {
-      const file = files[0]
-      if (!file || disabled || uploading) return
+      if (!files.length || disabled || uploading) return
       setUploading(true)
       try {
-        await onUpload(file)
+        await onUpload(files, (current, total, fileName) => {
+          setProgress({ current, total, fileName })
+        })
       } finally {
         setUploading(false)
+        setProgress(null)
       }
     },
     [disabled, onUpload, uploading],
@@ -28,6 +37,7 @@ export function UploadZone({ onUpload, disabled }: UploadZoneProps) {
   const {
     inputRef,
     isDragActive,
+    multiple,
     open,
     onInputChange,
     onDragOver,
@@ -36,6 +46,7 @@ export function UploadZone({ onUpload, disabled }: UploadZoneProps) {
   } = useDropzone({
     onDrop,
     disabled: disabled || uploading,
+    multiple: true,
     accept: {
       'application/pdf': ['.pdf'],
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
@@ -44,6 +55,14 @@ export function UploadZone({ onUpload, disabled }: UploadZoneProps) {
       'text/markdown': ['.md'],
     },
   })
+
+  const statusText = uploading
+    ? progress
+      ? `上传中 ${progress.current}/${progress.total}：${progress.fileName}`
+      : '上传中…'
+    : isDragActive
+      ? '松开以上传'
+      : '拖拽文件到此处，或点击选择'
 
   return (
     <div
@@ -60,15 +79,16 @@ export function UploadZone({ onUpload, disabled }: UploadZoneProps) {
       <input
         ref={inputRef}
         type="file"
+        multiple={multiple}
         className="hidden"
         disabled={disabled || uploading}
         onChange={onInputChange}
       />
       <Upload className="mb-2 h-8 w-8 text-muted-foreground" />
-      <p className="text-sm font-medium">
-        {uploading ? '上传中…' : isDragActive ? '松开以上传' : '拖拽文件到此处，或点击选择'}
+      <p className="text-sm font-medium">{statusText}</p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        支持 PDF、DOCX、TXT、MD、Excel，可多选或拖拽多个文件
       </p>
-      <p className="mt-1 text-xs text-muted-foreground">支持 PDF、DOCX、TXT、MD、Excel</p>
     </div>
   )
 }

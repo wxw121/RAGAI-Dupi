@@ -4,9 +4,11 @@ import tempfile
 from pathlib import Path
 
 from app.callback import download_object, post_status
+from app.canonical import canonicalize
 from app.chunker.recursive_chunker import chunk_nodes
 from app.embedder import Embedder
 from app.indexer import MilvusIndexer
+from app.models import DocumentNode
 from app.parser.document_parser import parse_document
 
 logger = logging.getLogger(__name__)
@@ -53,7 +55,20 @@ def process_ingest_job(job: dict):
         with tempfile.TemporaryDirectory() as tmp:
             local_path = Path(tmp) / f"doc{suffix}"
             download_object(object_key, str(local_path))
-            nodes = parse_document(local_path, mime_type, file_name)
+            try:
+                md_text = canonicalize(local_path, mime_type, file_name)
+                nodes = [
+                    DocumentNode(
+                        text=md_text,
+                        metadata={"source": file_name, "format": "canonical_md"},
+                    )
+                ]
+            except ValueError:
+                logger.warning(
+                    "canonicalize unsupported for %s, falling back to parse_document",
+                    file_name,
+                )
+                nodes = parse_document(local_path, mime_type, file_name)
 
         update("processing", "chunking")
         embedder = Embedder(model=embedding_model)

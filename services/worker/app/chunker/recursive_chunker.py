@@ -65,6 +65,10 @@ def chunk_nodes(
         from app.chunker.semantic_chunker import semantic_chunk_nodes
         return semantic_chunk_nodes(nodes, chunk_size, embed_fn)
 
+    if strategy in ("markdown", "recursive"):
+        from app.chunker.markdown_chunker import markdown_chunk_nodes
+        return markdown_chunk_nodes(nodes, chunk_size, chunk_overlap)
+
     chunks: list[TextChunk] = []
     index = 0
     for node in nodes:

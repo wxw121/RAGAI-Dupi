@@ -14,7 +14,7 @@
     "chunkOverlap": { "type": "integer", "default": 64 },
     "chunkStrategy": {
       "type": "string",
-      "enum": ["recursive", "semantic"],
+      "enum": ["recursive", "semantic", "markdown"],
       "default": "recursive"
     },
     "embeddingModel": { "type": "string", "default": "text-embedding-3-small" },

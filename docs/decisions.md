@@ -1,5 +1,28 @@
 # 技术决策
 
+## 2026-06-21 — 批次上传采用前端顺序单文件 API
+
+**背景**：用户需在文档管理页一次上传多个文件；摄入链路已是「一文件一 Document + 一 IngestJob」，Worker 无需 batch 契约。  
+**决策**：不新增 `POST .../documents/batch`；前端 `UploadZone` 开启 `multiple`，`KbDetailPage` 顺序调用现有 `uploadDocument`；单文件失败不中断其余文件，结束后汇总 toast。  
+**理由**：改动面最小，避免调整 Spring `max-request-size` 与批量错误语义；队列侧天然按文件并行消费。  
+**影响范围**：`useDropzone.ts`、`UploadZone.tsx`、`KbDetailPage.tsx`。  
+**遗留**：无上传队列取消；大量文件时 N 次 HTTP 往返（可接受）。
+
+## 2026-06-20 — 摄入统一 Canonical Markdown + 结构感知分块
+
+**背景**：`.md` 等文档摄入时仅 `read_text` + `recursive_split`，表格/标题/代码块在 chunk 边界被切断；Chat 乱格式根因在检索上下文结构丢失，非单纯前端渲染。  
+**决策**：Worker 摄入前 `canonicalize()` 将 PDF/DOCX/XLSX/TXT/MD 转为规范 Markdown；`markdown_chunker` 按 ATX 标题、GFM 表格、fenced code 边界切分，chunk 元数据含 `heading`、`block_type`；`recursive` 默认策略亦走 markdown chunker；PDF 用 `pymupdf4llm`。  
+**理由**：从源头保留可检索、可生成的结构，优于统一转 PDF（二次有损）或仅前端 normalize 兜底。  
+**影响范围**：`services/worker/app/canonical/`、`markdown_chunker.py`、`consumer.py`、`ChunkStrategy`、`RetrievalService.buildContext`、`ChatService` prompt、`requirements.txt`。  
+**遗留**：已索引文档需 re-ingest；semantic 分块仍基于 canonical 全文而非 MD 结构边界。
+
+## 2026-06-20 — Web 问答使用 react-markdown 渲染助手回复
+
+**背景**：RAG 问答助手返回 Markdown 格式文本（标题、列表、代码块），前端以纯文本展示，用户阅读困难；首版 `react-markdown` 后仍存在长文本不换行。  
+**决策**：助手消息统一经 `MarkdownContent` 组件渲染；栈为 `react-markdown` + `remark-gfm`（表格/任务列表）+ `remark-breaks`（单换行转 `<br>`）+ `@tailwindcss/typography`（`prose` 排版）；气泡与 flex 容器使用 `min-w-0` + `break-words` + `overflow-wrap:anywhere` 保证自动换行；代码块 `pre` 使用 `whitespace-pre-wrap` 软换行。  
+**理由**：展示层问题无需改后端 SSE；remark-breaks 改善 LLM 单换行输出；flex `min-w-0` 是 Web 聊天 UI 自动换行的常见必要条件。  
+**影响范围**：[`services/web/src/components/MarkdownContent.tsx`](services/web/src/components/MarkdownContent.tsx)、[`ChatPanel.tsx`](services/web/src/components/ChatPanel.tsx)、[`tailwind.config.js`](services/web/tailwind.config.js)、`package.json`。
+
 ## 2026-06-19 — Java 主服务 + Python Worker 拆分
 
 **背景**：技术栈要求 Go/Java + Python；需在企业 API 能力与 ML/解析生态间取舍。  

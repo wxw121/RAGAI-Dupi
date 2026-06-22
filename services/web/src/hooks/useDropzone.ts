@@ -4,9 +4,10 @@ interface DropzoneOptions {
   onDrop: (files: File[]) => void
   disabled?: boolean
   accept?: Record<string, string[]>
+  multiple?: boolean
 }
 
-export function useDropzone({ onDrop, disabled, accept }: DropzoneOptions) {
+export function useDropzone({ onDrop, disabled, accept, multiple }: DropzoneOptions) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [isDragActive, setIsDragActive] = useState(false)
 
@@ -55,6 +56,7 @@ export function useDropzone({ onDrop, disabled, accept }: DropzoneOptions) {
   return {
     inputRef,
     isDragActive,
+    multiple: multiple ?? false,
     open,
     onInputChange,
     onDragOver,

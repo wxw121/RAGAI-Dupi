@@ -1,0 +1,521 @@
+/**
+ * Normalize LLM output that uses Markdown-like syntax but omits required
+ * spaces, newlines, or uses context fragment numbers as list indices.
+ */
+
+const CODE_LANGS = 'bash|sh|shell|env|sql|json|javascript|js|nginx|yaml|yml|text'
+
+const SECTION_TITLES = [
+  '架构概览',
+  '系统架构',
+  '技术栈',
+  '模块划分',
+  '模块与边界',
+  '核心设计决策',
+  '核心设计',
+  '推荐生产部署架构',
+  '生产部署',
+  '项目结构',
+  '目录结构',
+  '本地开发环境搭建',
+  '本地部署',
+  '部署步骤',
+  '环境准备',
+  '初始化数据库',
+  '启动服务',
+]
+
+/** Split mashed shell/sql commands for readability inside code blocks. */
+function unmangleCommands(text: string): string {
+  return text
+    .replace(/\bcdserver\b/gi, 'cd server')
+    .replace(/\bcd\s*server\b/gi, 'cd server')
+    .replace(/\bnpminstall\b/gi, 'npm install')
+    .replace(/\bnodesrc\//gi, 'node src/')
+    .replace(/\bnode(src\/)/gi, 'node $1')
+    .replace(/\bnpm\s*install\b/gi, 'npm install')
+    .replace(/\bnpmrundb:migrate\b/gi, 'npm run db:migrate')
+    .replace(/\bnpmrundev\b/gi, 'npm run dev')
+    .replace(/\bnpmrun(\w+)\b/gi, 'npm run $1')
+    .replace(/\bnpm\s*run\s*(\w+)\b/gi, 'npm run $1')
+    .replace(/\bsqlCREATE\b/gi, 'CREATE')
+    .replace(/\bCREATE\s*DATABASE\b/gi, 'CREATE DATABASE')
+    .replace(/([;{}])([A-Za-z])/g, '$1\n$2')
+    .replace(/(\w)(cd\s)/gi, '$1\n$2')
+    .replace(/(server)(npm)/gi, '$1\n$2')
+    .replace(/(install)(node)/gi, '$1\n$2')
+    .replace(/(WSS)(Nginx)/gi, '$1\n$2')
+    .replace(/(代理)(Node)/gi, '$1\n$2')
+}
+
+function fixGluedCodeFences(text: string): string {
+  const openLang = new RegExp(`\`\`\`(${CODE_LANGS})`, 'gi')
+  let s = text
+    .replace(/([^\n`])(```(?:bash|sh|shell|env|sql|json|javascript|js|nginx|yaml|yml|text))/gi, '$1\n\n$2')
+    .replace(/([：:])\s*(```)/g, '$1\n\n$2')
+    .replace(openLang, '```$1\n')
+    .replace(/([^\n`])(```)(?!\w)/g, '$1\n$2')
+  return s
+}
+
+function fixCodeFences(text: string): string {
+  const gluedLine = new RegExp(`^\`\`\`(${CODE_LANGS})(\\S[^\\n]*)$`, 'gim')
+
+  let s = text.replace(gluedLine, (_, lang: string, body: string) => {
+    const cleaned = unmangleCommands(body.trim())
+    return `\`\`\`${lang.toLowerCase()}\n${cleaned}\n\`\`\``
+  })
+
+  s = s.replace(
+    new RegExp(`\`\`\`(${CODE_LANGS})\\s+([^\\n]+)`, 'gi'),
+    (_, lang: string, body: string) =>
+      `\`\`\`${lang.toLowerCase()}\n${unmangleCommands(body.trim())}\n\`\`\``,
+  )
+
+  return s
+}
+
+/** Pull headings / numbered prose out of fenced blocks that should be shell/env. */
+function splitMarkdownInsideCodeBlocks(text: string): string {
+  return text.replace(/```(\w+)\n([\s\S]*?)```/g, (match, lang, body) => {
+    if (!/##\s|^\d+\.\s/m.test(body)) return match
+
+    const codeLines: string[] = []
+    const proseLines: string[] = []
+
+    for (const line of body.split('\n')) {
+      const heading = line.match(/^\d+\.\s*(##\s.+)$/) || line.match(/^(##\s.+)$/)
+      if (heading) {
+        proseLines.push(heading[1])
+      } else if (/^\d+\.\s+[\u4e00-\u9fff]/.test(line) && !/[`$]/.test(line)) {
+        proseLines.push(line.replace(/^\d+\.\s+/, ''))
+      } else {
+        codeLines.push(line)
+      }
+    }
+
+    const code = unmangleCommands(codeLines.join('\n').trim())
+    const prose = proseLines.join('\n\n').trim()
+    const parts: string[] = []
+    if (prose) parts.push(prose)
+    if (code) parts.push(`\`\`\`${lang}\n${code}\n\`\`\``)
+    return parts.length ? parts.join('\n\n') : match
+  })
+}
+
+/** Remove stray #, fix [1]# citations, convert • bullets. */
+function stripArtifacts(text: string): string {
+  return text
+    .replace(/\[(\d+)\]#/g, '[$1]')
+    .replace(/([^\s#])#\s*$/gm, '$1')
+    .replace(/\s+#\s*$/gm, '')
+    .replace(/\/#\s*$/gm, '/')
+    .replace(/^-{3,}\s*#?\s*$/gm, '')
+    .replace(/^#\s*$/gm, '')
+    .replace(/。\s*#\s*/g, '。\n\n')
+    .replace(/•\s*/g, '- ')
+}
+
+/** Split glued section titles: "系统架构SpeakEasy" -> "## 系统架构" + body */
+function splitGluedSectionTitles(text: string): string {
+  let s = text
+  for (const title of SECTION_TITLES) {
+    const re = new RegExp(`(^|[^#\\n])(${title})(?=[A-Za-z\\u4e00-\\u9fff|])`, 'g')
+    s = s.replace(re, `$1\n\n## ${title}\n\n`)
+  }
+  return s
+}
+
+/**
+ * Expand one-line markdown tables: "技术栈|a|b||---|---||x|y"
+ * Optional glued title prefix before first pipe.
+ */
+function expandMashedTable(segment: string): string {
+  const trimmed = segment.trim()
+  if (!trimmed.includes('|')) return trimmed
+
+  const pipeCount = (trimmed.match(/\|/g) || []).length
+  if (pipeCount < 3) return trimmed
+
+  let title = ''
+  let preamble = ''
+  let tablePart = trimmed
+
+  const gluedTitle = trimmed.match(/^([\u4e00-\u9fffA-Za-z]{2,12})(\|.+)$/)
+  if (gluedTitle && (gluedTitle[2].includes('----') || gluedTitle[2].includes('||'))) {
+    title = gluedTitle[1]
+    tablePart = gluedTitle[2]
+  }
+
+  const preambleMatch = tablePart.match(/^(.+?[：:]\s*(?:\[\d+\]\s*)?)((?:\|[^|]*)+\|\|.+)$/)
+  if (preambleMatch) {
+    preamble = preambleMatch[1].trim()
+    tablePart = preambleMatch[2]
+  }
+
+  const rows = tablePart
+    .split(/\|\|/)
+    .map((row) => row.trim())
+    .filter(Boolean)
+    .map((row) => {
+      let r = row.replace(/\[(\d+)\]#?/g, '[$1]')
+      const cells = r
+        .replace(/^\|+/, '')
+        .replace(/\|+$/, '')
+        .split('|')
+        .map((cell) => sanitizeTableCell(cell.trim()))
+      return `| ${cells.join(' | ')} |`
+    })
+
+  if (rows.length < 2) return trimmed
+
+  const table = rows.join('\n')
+  const head = title ? `## ${title}\n\n` : ''
+  const intro = preamble ? `${preamble}\n\n` : ''
+  return `${head}${intro}${table}`
+}
+
+function sanitizeTableCell(cell: string): string {
+  let c = cell.replace(/`/g, '')
+  if (/^以上为/.test(c) || /^知识库/.test(c)) return ''
+  return c
+}
+
+/** Expand "##模块与边界|模块|职责|入口||---..." into heading + GFM table. */
+function fixHeadingPrefixedTables(text: string): string {
+  return text.replace(
+    /^(#{1,6})\s*([^|\n#]+)\|([^\n]+(?:\|\|[^\n]+)+)$/gm,
+    (_, hashes, title, tableBlob) => {
+      const table = expandMashedTable(`|${tableBlob}`)
+      return `${hashes} ${title.trim()}\n\n${table}`
+    },
+  )
+}
+
+/** Find and expand squashed table blobs in text. */
+function fixSquashedTables(text: string): string {
+  const tableBlob =
+    /[\u4e00-\u9fff\w][\u4e00-\u9fff\w\s]{0,14}\|[^|\n]+(?:\|\|[^|\n]+){2,}/g
+
+  return text.replace(tableBlob, (match) => expandMashedTable(match))
+}
+
+/** Merge split table rows and strip footer rows mixed into tables. */
+function fixBrokenTableRows(text: string): string {
+  const lines = text.split('\n')
+  const merged: string[] = []
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    const isTableRow = /^\|.+\|$/.test(trimmed)
+
+    if (isTableRow && merged.length > 0 && /^\|.+\|$/.test(merged[merged.length - 1].trim())) {
+      const prev = merged[merged.length - 1]
+      const prevCells = prev.split('|').map((c) => c.trim()).filter(Boolean)
+      const cells = line.split('|').map((c) => c.trim()).filter(Boolean)
+      const prevLast = prevCells[prevCells.length - 1] || ''
+      const openTick = (prevLast.match(/`/g) || []).length % 2 !== 0
+
+      if (
+        prevCells.length >= 2 &&
+        cells.length >= 1 &&
+        (openTick || /\/$/.test(prevLast)) &&
+        /^[a-zA-Z0-9_./`-]+$/.test(cells[0].replace(/`/g, '')) &&
+        !/^-+$/.test(cells[0])
+      ) {
+        const base = prev.replace(/\|\s*$/, '')
+        const lastIdx = base.lastIndexOf('|')
+        const prefix = base.slice(0, lastIdx + 1)
+        const lastCell = prevLast.replace(/`/g, '')
+        const nextPart = cells[0].replace(/`/g, '')
+        const joiner = lastCell.endsWith('/') ? '' : '/'
+        const tail = cells.length > 1 ? ` | ${cells.slice(1).join(' | ')} |` : ' |'
+        merged[merged.length - 1] = `${prefix} ${lastCell}${joiner}${nextPart}${tail}`
+        continue
+      }
+    }
+
+    if (!isTableRow && merged.length > 0 && /^\|.+\|$/.test(merged[merged.length - 1].trim())) {
+      const cells = line.split('|').map((c) => c.trim())
+      if (cells.some((c) => /^以上为/.test(c))) {
+        const footer = cells.find((c) => /以上为/.test(c)) || line.replace(/`/g, '').replace(/\|/g, '').trim()
+        merged.push('')
+        merged.push(footer)
+        continue
+      }
+    }
+
+    merged.push(line)
+  }
+
+  const out: string[] = []
+
+  for (const raw of merged) {
+    if (!/^\|.+\|$/.test(raw.trim())) {
+      out.push(raw)
+      continue
+    }
+
+    let line = raw
+      .split('|')
+      .map((part, idx, arr) => {
+        if (idx === 0 || idx === arr.length - 1) return part
+        return ` ${sanitizeTableCell(part.trim())} `
+      })
+      .join('|')
+
+    if (line.replace(/\|/g, '').trim() === '') continue
+    out.push(line)
+  }
+
+  for (let i = 0; i < out.length; i++) {
+    const line = out[i]
+    if (!line.includes('|')) continue
+    const cells = line.split('|').map((c) => c.trim())
+    if (cells.some((c) => /^以上为/.test(c))) {
+      const footer = cells.find((c) => /以上为/.test(c)) || ''
+      out[i] = ''
+      if (footer) out.splice(i + 1, 0, '', footer.replace(/`/g, ''))
+      break
+    }
+  }
+
+  return out.filter((l, i, arr) => !(l === '' && arr[i + 1] === '')).join('\n')
+}
+
+/** Wrap directory trees (├── / └──) in fenced code blocks. */
+function fixDirectoryTrees(text: string): string {
+  return text.replace(/([^\n`]*(?:├──|└──)[^\n`]+)/g, (block) => {
+    if (block.includes('```')) return block
+
+    let tree = block.replace(/([^\n])(├──|└──)/g, '$1\n$2')
+    tree = tree.replace(/(\S)(├──|└──)/g, '$1\n$2')
+    tree = tree
+      .split('\n')
+      .map((l) => l.replace(/#\s*$/, '').replace(/\[(\d+)\]#/g, '[$1]'))
+      .join('\n')
+
+    return `\n\`\`\`text\n${tree.trim()}\n\`\`\`\n`
+  })
+}
+
+/** Format arrow deployment flows as preformatted blocks. */
+function fixArrowFlows(text: string): string {
+  return text.replace(
+    /\*{0,2}([\u4e00-\u9fffA-Za-z]{2,20})\*{0,2}\s*([\u4e00-\u9fff\w][^\n。]{10,}?(?:→|↓)[^\n。]{5,})/g,
+    (_, heading, flow) => {
+      if (flow.includes('```') || (flow.includes('|') && flow.split('|').length > 4)) {
+        return `**${heading}**${flow}`
+      }
+
+      const formatted = flow
+        .replace(/\[(\d+)\]#?/g, '[$1]')
+        .replace(/\s*↓\s*/g, '\n↓\n')
+        .replace(/\s*→\s*/g, '\n→ ')
+
+      return `## ${heading}\n\n\`\`\`text\n${formatted.trim()}\n\`\`\``
+    },
+  )
+}
+
+function fixNestedSectionNumbers(text: string): string {
+  let s = text.replace(/^\d+\.\s+0([\u4e00-\u9fff].*)$/gm, '- 0$1')
+  s = s.replace(/^\d+\.\s*\d+\s+([^\n]+)/gm, '## $1')
+  return s
+}
+
+function fixShortHeadings(text: string): string {
+  return text
+    .replace(/^#{1,6}\s*([\u4e00-\u9fffA-Za-z]{1,10}[:：])\s*$/gm, '**$1**')
+    .replace(/^# ([^\n]+)$/gm, '### $1')
+    .replace(/\*\*([\u4e00-\u9fffA-Za-z]{2,20})\*\*(?=[\u4e00-\u9fff\w])/g, '## $1\n\n')
+}
+
+/** Fix "-**标题：" and orphan ** markers. */
+function fixListBoldMash(text: string): string {
+  return text
+    .replace(/([：:])-\*\*([^：\n]+)：/g, '$1\n\n- **$2**：')
+    .replace(/^-\*\*([^*\n]+)\*\*：/gm, '- **$1**：')
+    .replace(/^-\*\*([^：\n]+)：/gm, '- **$1**：')
+    .replace(/([^\n])-\*\*([^：\n]+)：/g, '$1\n\n- **$2**：')
+}
+
+function fixOrphanBold(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      const count = (line.match(/\*\*/g) || []).length
+      if (count % 2 === 0) return line
+      if (/\*\*([：:])/.test(line) && !line.includes('**', line.indexOf('**') + 2)) {
+        return line.replace(/\*\*([：:])/g, '$1')
+      }
+      if (line.endsWith('**')) return line.slice(0, -2)
+      return line
+    })
+    .join('\n')
+}
+
+/**
+ * Renumber ordered lists; LLM often emits "1." for every step.
+ * Blank lines and bullet sub-items stay inside the same list.
+ */
+function renumberOrderedLists(text: string): string {
+  const lines = text.split('\n')
+  const out: string[] = []
+  let counter = 0
+  let inList = false
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const ordered = line.match(/^(\d{1,2})\.\s+(.*)$/)
+
+    if (ordered) {
+      if (!inList) {
+        counter = 1
+        inList = true
+      } else {
+        counter += 1
+      }
+      out.push(`${counter}. ${ordered[2]}`)
+      continue
+    }
+
+    if (
+      inList &&
+      (line.trim() === '' ||
+        /^[-*]\s/.test(line) ||
+        /^  +/.test(line) ||
+        /^`/.test(line.trim()))
+    ) {
+      out.push(line)
+      continue
+    }
+
+    inList = false
+    counter = 0
+    out.push(line)
+  }
+
+  return out.join('\n')
+}
+
+function extractInlineCommands(text: string): string {
+  return text.replace(
+    /([：:])\s*(bash|npm|cd|sql|CREATE|export|pm2|nginx)([^\n。；]+)/gi,
+    (_, sep, cmd, rest) => {
+      const body = unmangleCommands(`${cmd}${rest}`.trim())
+      const lang = /^(sql|CREATE)/i.test(cmd) ? 'sql' : 'bash'
+      return `${sep}\n\n\`\`\`${lang}\n${body}\n\`\`\``
+    },
+  )
+}
+
+/** Trim spaces inside inline code; drop empty code spans. */
+function fixInlineCode(text: string): string {
+  const lines = text.split('\n')
+  return lines
+    .map((line) => {
+      if (line.trim().startsWith('```')) return line
+      return line.replace(/`([^`\n]+)`/g, (_, inner: string) => {
+        const trimmed = inner.trim()
+        return trimmed ? `\`${trimmed}\`` : trimmed
+      })
+    })
+    .join('\n')
+}
+
+/** Remove bold wrapping whole lines/paragraphs; keep short emphasis. */
+function fixExcessiveBold(text: string): string {
+  return text
+    .replace(/\*\*([^*\n]{40,})\*\*/g, '$1')
+    .replace(/\*\*([^*]+[。！？][^*]*)\*\*/g, '$1')
+}
+
+/** Close or strip unpaired backticks per line (outside fences). */
+function fixBrokenBackticks(text: string): string {
+  const lines = text.split('\n')
+  let inFence = false
+  const out: string[] = []
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('```')) {
+      out.push(line)
+      if (/^```\w+/.test(trimmed)) inFence = true
+      else if (trimmed === '```') inFence = false
+      continue
+    }
+    if (inFence) {
+      out.push(line)
+      continue
+    }
+
+    const count = (line.match(/`/g) || []).length
+    if (count % 2 === 0) {
+      out.push(line)
+      continue
+    }
+    const stripped = line.replace(/`([^`\n]+)$/, '$1').replace(/^([^`\n]+)`/, '$1')
+    if ((stripped.match(/`/g) || []).length % 2 === 0) {
+      out.push(stripped)
+    } else {
+      out.push(line.replace(/`/g, ''))
+    }
+  }
+
+  return out.join('\n')
+}
+
+/** Standalone mashed command lines outside code blocks. */
+function fixLooseCommandLines(text: string): string {
+  return text.replace(
+    /^(npminstall|nodesrc\/|cdserver|npmrun\w+)([^\n]*)$/gim,
+    (_, cmd, rest) => `\`\`\`bash\n${unmangleCommands(`${cmd}${rest}`)}\n\`\`\``,
+  )
+}
+
+export function normalizeMarkdown(text: string): string {
+  if (!text) return text
+
+  let s = text.replace(/\r\n/g, '\n')
+
+  s = stripArtifacts(s)
+  s = splitGluedSectionTitles(s)
+  s = fixListBoldMash(s)
+  s = fixOrphanBold(s)
+  s = fixShortHeadings(s)
+  s = fixNestedSectionNumbers(s)
+
+  s = s.replace(/([^\n#])(#{1,6})\s*([^\n#]+)/g, (_, before, hashes, title) => {
+    const trimmed = title.trim()
+    return trimmed ? `${before}\n\n${hashes} ${trimmed}` : `${before}\n\n${hashes}`
+  })
+
+  s = s.replace(/^(#{1,6})\s*([^\s#].*)$/gm, (_, hashes, title) => `${hashes} ${title.trim()}`)
+  s = fixHeadingPrefixedTables(s)
+  s = fixSquashedTables(s)
+  s = fixBrokenTableRows(s)
+
+  s = fixDirectoryTrees(s)
+  s = fixArrowFlows(s)
+  s = fixGluedCodeFences(s)
+  s = extractInlineCommands(s)
+  s = fixCodeFences(s)
+  s = splitMarkdownInsideCodeBlocks(s)
+  s = fixLooseCommandLines(s)
+  s = fixInlineCode(s)
+  s = fixBrokenBackticks(s)
+
+  s = s.replace(/([^\n\d])(\d{1,2})\.\s*/g, '$1\n$2. ')
+  s = s.replace(/^(\d{1,2})\.([^\s])/gm, '$1. $2')
+
+  s = s.replace(/([。）\]\w\u4e00-\u9fff])(-\s*)([^\s\-])/g, '$1\n$2$3')
+  s = s.replace(/^-([^\s\-])/gm, '- $1')
+
+  s = renumberOrderedLists(s)
+  s = fixExcessiveBold(s)
+  s = s.replace(/^#\s+([^#\n].*)$/gm, '## $1')
+  s = s.replace(/\n{3,}/g, '\n\n')
+
+  return s.trim()
+}
