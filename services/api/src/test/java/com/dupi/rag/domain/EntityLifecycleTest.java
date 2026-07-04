@@ -1,6 +1,8 @@
 package com.dupi.rag.domain;
 
 import com.dupi.rag.domain.entity.Chunk;
+import com.dupi.rag.domain.entity.ChatMessage;
+import com.dupi.rag.domain.entity.ChatSession;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.KnowledgeBase;
@@ -8,6 +10,7 @@ import com.dupi.rag.domain.enums.DocumentStatus;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -47,6 +50,30 @@ class EntityLifecycleTest {
         assertThat(chunk.getId()).isNotNull();
         assertThat(chunk.getCreatedAt()).isNotNull();
         assertThat(chunk.getTokenCount()).isZero();
+    }
+
+    @Test
+    void chatSessionAndMessageLifecycleDefaultsIdsAndTimestamps() throws Exception {
+        ChatSession session = ChatSession.builder()
+                .kbId(UUID.randomUUID())
+                .tenantId("default")
+                .title("First question")
+                .build();
+        invoke(session, "onCreate");
+
+        ChatMessage message = ChatMessage.builder()
+                .sessionId(session.getId())
+                .role("user")
+                .content("What is dupi-RAG?")
+                .status("completed")
+                .build();
+        invoke(message, "onCreate");
+
+        assertThat(session.getId()).isNotNull();
+        assertThat(session.getCreatedAt()).isNotNull();
+        assertThat(session.getUpdatedAt()).isNotNull();
+        assertThat(message.getId()).isNotNull();
+        assertThat(message.getCreatedAt()).isNotNull();
     }
 
     private static void invoke(Object target, String methodName) throws Exception {
