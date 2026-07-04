@@ -57,41 +57,63 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
 
     const controller = new AbortController()
     abortRef.current = controller
+    const sessionId = crypto.randomUUID()
+    sessionIdRef.current = sessionId
 
-    await streamChat(
-      kbId,
-      query,
-      {
-        onRetrieval: (cits) => setCitations(cits),
-        onToken: (token) => {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantId ? { ...m, content: m.content + token } : m,
-            ),
-          )
+    try {
+      await streamChat(
+        kbId,
+        query,
+        {
+          onRetrieval: (cits) => setCitations(cits),
+          onToken: (token) => {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId ? { ...m, content: m.content + token } : m,
+              ),
+            )
+          },
+          onDone: (sid) => {
+            sessionIdRef.current = sid || sessionId
+            setMessages((prev) =>
+              prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
+            )
+            setStreaming(false)
+          },
+          onError: (msg) => {
+            const formatted = formatChatError(msg)
+            showError(formatted)
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? { ...m, content: m.content || `错误：${formatted}`, streaming: false }
+                  : m,
+              ),
+            )
+            setStreaming(false)
+          },
+          onAbort: () => {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
+            )
+            setStreaming(false)
+          },
         },
-        onDone: (sid) => {
-          sessionIdRef.current = sid
-          setMessages((prev) =>
-            prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
-          )
-          setStreaming(false)
-        },
-        onError: (msg) => {
-          const formatted = formatChatError(msg)
-          showError(formatted)
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantId
-                ? { ...m, content: m.content || `错误：${formatted}`, streaming: false }
-                : m,
-            ),
-          )
-          setStreaming(false)
-        },
-      },
-      controller.signal,
-    )
+        controller.signal,
+        sessionId,
+      )
+    } catch (e) {
+      const formatted = formatChatError(e instanceof Error ? e.message : '问答请求失败')
+      showError(formatted)
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? { ...m, content: m.content || `错误：${formatted}`, streaming: false }
+            : m,
+        ),
+      )
+      setStreaming(false)
+    }
   }
 
   const stop = async () => {

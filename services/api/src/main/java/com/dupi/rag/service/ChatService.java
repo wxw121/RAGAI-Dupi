@@ -57,7 +57,7 @@ public class ChatService {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
         RetrieveRequest retrieveRequest = new RetrieveRequest();
         retrieveRequest.setQuery(request.getQuery());
-        retrieveRequest.setTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK());
+        retrieveRequest.setTopK(clampTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK()));
         retrieveRequest.setUseRerank(request.getUseRerank());
 
         RetrieveResponse retrieval = retrievalService.retrieve(kbId, retrieveRequest);
@@ -108,7 +108,7 @@ public class ChatService {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
         RetrieveRequest retrieveRequest = new RetrieveRequest();
         retrieveRequest.setQuery(request.getQuery());
-        retrieveRequest.setTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK());
+        retrieveRequest.setTopK(clampTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK()));
         retrieveRequest.setUseRerank(request.getUseRerank());
 
         RetrieveResponse retrieval = retrievalService.retrieve(kbId, retrieveRequest);
@@ -125,5 +125,12 @@ public class ChatService {
     private String truncate(String text, int max) {
         if (text == null) return "";
         return text.length() <= max ? text : text.substring(0, max) + "...";
+    }
+
+    private int clampTopK(Integer topK) {
+        if (topK == null) {
+            return 5;
+        }
+        return Math.max(1, Math.min(50, topK));
     }
 }

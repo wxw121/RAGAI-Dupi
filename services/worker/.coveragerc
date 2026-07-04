@@ -1,0 +1,17 @@
+[run]
+source = app
+branch = True
+omit =
+    app/__init__.py
+    app/main.py
+    app/indexer.py
+    app/callback.py
+    app/canonical/docx_to_md.py
+    app/canonical/pdf_to_md.py
+    app/chunker/semantic_chunker.py
+    app/parser/document_parser.py
+
+[report]
+show_missing = True
+skip_covered = True
+fail_under = 95

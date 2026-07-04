@@ -15,6 +15,12 @@ _reranker = None
 
 
 def get_reranker():
+    """延迟加载 CrossEncoder 重排模型，并缓存不可用状态。
+
+    重排模型较重且依赖可选包，因此这里使用懒加载加哨兵值的设计：
+    第一次失败后缓存 False，后续请求不再重复导入，避免检索接口被可选
+    依赖拖慢或刷屏记录相同告警。
+    """
     global _reranker
     if _reranker is None:
         try:
@@ -31,6 +37,11 @@ def tokenize(text: str) -> list[str]:
 
 
 def rrf_fusion(vector_hits: list[dict], bm25_hits: list[dict], k: int = 60) -> list[dict]:
+    """使用 Reciprocal Rank Fusion 融合向量召回和 BM25 召回结果。
+
+    RRF 是一种排序融合思想：不直接比较两种召回的原始分数，而按名次折算
+    成稳定得分，因此适合把语义向量分数和关键词相关性分数合并。
+    """
     scores: dict[str, float] = {}
     docs: dict[str, dict] = {}
 
@@ -99,6 +110,12 @@ def hybrid_retrieve(
     use_rerank: bool = False,
     corpus_fetcher=None,
 ) -> list[dict]:
+    """执行混合检索主流程：向量召回、BM25 召回、RRF 融合、可选重排。
+
+    这里体现的是典型 RAG 检索流水线设计：Embedder 负责查询向量化，
+    MilvusIndexer 负责语义召回，BM25 补足关键词精确匹配，最后通过
+    RRF 和可选 CrossEncoder 重排统一排序。
+    """
     embedder = Embedder(model=embedding_model)
     indexer = MilvusIndexer(dimension=embedding_dimension)
     vector_hits = indexer.search(kb_id, embedder.embed(query), top_k * 2)

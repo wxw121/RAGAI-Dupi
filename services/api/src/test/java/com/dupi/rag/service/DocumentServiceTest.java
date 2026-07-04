@@ -1,0 +1,156 @@
+package com.dupi.rag.service;
+
+import com.dupi.rag.client.MilvusVectorService;
+import com.dupi.rag.domain.entity.Document;
+import com.dupi.rag.domain.entity.IngestJob;
+import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.enums.DocumentStatus;
+import com.dupi.rag.domain.enums.IngestJobStatus;
+import com.dupi.rag.repository.ChunkRepository;
+import com.dupi.rag.repository.DocumentRepository;
+import com.dupi.rag.repository.IngestJobRepository;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.mock.web.MockMultipartFile;
+
+import java.io.IOException;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class DocumentServiceTest {
+
+    @Mock DocumentRepository documentRepository;
+    @Mock IngestJobRepository ingestJobRepository;
+    @Mock ChunkRepository chunkRepository;
+    @Mock KnowledgeBaseService knowledgeBaseService;
+    @Mock MinioStorageService minioStorageService;
+    @Mock MilvusVectorService milvusVectorService;
+    @Mock IngestJobProducer ingestJobProducer;
+
+    DocumentService service() {
+        return new DocumentService(
+                documentRepository,
+                ingestJobRepository,
+                chunkRepository,
+                knowledgeBaseService,
+                minioStorageService,
+                milvusVectorService,
+                ingestJobProducer
+        );
+    }
+
+    @Test
+    void uploadStoresFileCreatesJobAndMarksDocumentProcessing() {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).name("KB").build();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        MockMultipartFile file = new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes());
+
+        var response = service().upload(kbId, file);
+
+        assertThat(response.getStatus()).isEqualTo(DocumentStatus.PROCESSING);
+        verify(minioStorageService).upload(contains(kbId.toString()), any(), eq(5L), eq("text/markdown"));
+        verify(ingestJobRepository).save(any(IngestJob.class));
+        verify(ingestJobProducer).enqueue(any(IngestJob.class), eq(kb), contains("a.md"), eq("a.md"), eq("text/markdown"));
+        verify(documentRepository, atLeast(2)).save(any(Document.class));
+    }
+
+    @Test
+    void uploadMarksDocumentFailedWhenMinioUploadFails() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+        doThrow(new IllegalStateException("minio down"))
+                .when(minioStorageService).upload(any(), any(), anyLong(), any());
+
+        MockMultipartFile file = new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes());
+
+        assertThatThrownBy(() -> service().upload(kbId, file))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Upload failed");
+
+        ArgumentCaptor<Document> captor = ArgumentCaptor.forClass(Document.class);
+        verify(documentRepository, atLeast(2)).save(captor.capture());
+        assertThat(captor.getAllValues().get(captor.getAllValues().size() - 1).getStatus())
+                .isEqualTo(DocumentStatus.FAILED);
+    }
+
+    @Test
+    void uploadMarksDocumentAndJobFailedWhenQueueFails() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+        doThrow(new IllegalStateException("redis down"))
+                .when(ingestJobProducer).enqueue(any(), any(), any(), any(), any());
+        MockMultipartFile file = new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes());
+
+        var response = service().upload(kbId, file);
+
+        assertThat(response.getStatus()).isEqualTo(DocumentStatus.FAILED);
+        assertThat(response.getErrorMessage()).contains("Failed to enqueue ingest job");
+        verify(ingestJobRepository, times(2)).save(any(IngestJob.class));
+    }
+
+    @Test
+    void uploadRejectsEmptyFileBeforeStorageWork() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+        MockMultipartFile empty = new MockMultipartFile("file", "empty.txt", "text/plain", new byte[0]);
+
+        assertThatThrownBy(() -> service().upload(kbId, empty)).isInstanceOf(IllegalArgumentException.class);
+        verifyNoInteractions(minioStorageService, ingestJobRepository, ingestJobProducer);
+    }
+
+    @Test
+    void listAndGetValidateKnowledgeBaseAndDocumentOwnership() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        Document doc = doc(kbId, docId);
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        DocumentService service = service();
+
+        assertThat(service.listByKb(kbId)).hasSize(1);
+        assertThat(service.get(kbId, docId).getId()).isEqualTo(docId);
+        verify(knowledgeBaseService).findOrThrow(kbId);
+    }
+
+    @Test
+    void deleteContinuesWhenExternalStoresFail() throws IOException {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        Document doc = doc(kbId, docId);
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        doThrow(new IllegalStateException("milvus")).when(milvusVectorService).deleteByDocId(docId);
+        doThrow(new IllegalStateException("minio")).when(minioStorageService).delete(doc.getObjectKey());
+
+        service().delete(kbId, docId);
+
+        verify(chunkRepository).deleteByDocId(docId);
+        verify(documentRepository).delete(doc);
+    }
+
+    private static Document doc(UUID kbId, UUID docId) {
+        return Document.builder()
+                .id(docId)
+                .kbId(kbId)
+                .fileName("a.md")
+                .mimeType("text/markdown")
+                .objectKey("k/a.md")
+                .fileSize(1L)
+                .status(DocumentStatus.PENDING)
+                .createdAt(Instant.now())
+                .updatedAt(Instant.now())
+                .build();
+    }
+}

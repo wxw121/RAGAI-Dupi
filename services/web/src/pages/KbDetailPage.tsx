@@ -111,7 +111,12 @@ export function KbDetailPage() {
       const file = files[i]
       onProgress?.(i + 1, files.length, file.name)
       try {
-        await uploadDocument(kbId, file)
+        const doc = await uploadDocument(kbId, file)
+        if (doc.status === 'FAILED') {
+          failed++
+          showError(doc.errorMessage ?? `上传失败：${file.name}`)
+          continue
+        }
         succeeded++
       } catch (e) {
         failed++

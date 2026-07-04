@@ -1,6 +1,9 @@
 /**
- * Normalize LLM output that uses Markdown-like syntax but omits required
- * spaces, newlines, or uses context fragment numbers as list indices.
+ * 规范化 LLM 返回的“近似 Markdown”文本。
+ *
+ * 后端 RAG 会要求模型输出 Markdown，但模型常把标题空格、代码围栏、表格行、
+ * 引用编号和有序列表混在一起。本模块采用一组小型修复策略按顺序清洗文本，
+ * 让前端渲染层接收到更接近标准 Markdown 的内容。
  */
 
 const CODE_LANGS = 'bash|sh|shell|env|sql|json|javascript|js|nginx|yaml|yml|text'
@@ -25,7 +28,7 @@ const SECTION_TITLES = [
   '启动服务',
 ]
 
-/** Split mashed shell/sql commands for readability inside code blocks. */
+/** 拆开粘连的 shell/sql 命令，保证代码块中的命令逐行可读。 */
 function unmangleCommands(text: string): string {
   return text
     .replace(/\bcdserver\b/gi, 'cd server')
@@ -75,7 +78,7 @@ function fixCodeFences(text: string): string {
   return s
 }
 
-/** Pull headings / numbered prose out of fenced blocks that should be shell/env. */
+/** 将误塞进 shell/env 代码块里的标题和编号说明抽出，避免 prose 被当作命令渲染。 */
 function splitMarkdownInsideCodeBlocks(text: string): string {
   return text.replace(/```(\w+)\n([\s\S]*?)```/g, (match, lang, body) => {
     if (!/##\s|^\d+\.\s/m.test(body)) return match
@@ -103,7 +106,7 @@ function splitMarkdownInsideCodeBlocks(text: string): string {
   })
 }
 
-/** Remove stray #, fix [1]# citations, convert • bullets. */
+/** 清理游离 #、修复 [1]# 引用标记，并把项目符号统一成 Markdown 列表。 */
 function stripArtifacts(text: string): string {
   return text
     .replace(/\[(\d+)\]#/g, '[$1]')
@@ -116,7 +119,7 @@ function stripArtifacts(text: string): string {
     .replace(/•\s*/g, '- ')
 }
 
-/** Split glued section titles: "系统架构SpeakEasy" -> "## 系统架构" + body */
+/** 拆开粘连章节标题，例如“系统架构SpeakEasy”会被拆成二级标题和正文。 */
 function splitGluedSectionTitles(text: string): string {
   let s = text
   for (const title of SECTION_TITLES) {
@@ -127,8 +130,8 @@ function splitGluedSectionTitles(text: string): string {
 }
 
 /**
- * Expand one-line markdown tables: "技术栈|a|b||---|---||x|y"
- * Optional glued title prefix before first pipe.
+ * 展开单行压缩表格，例如“技术栈|a|b||---|---||x|y”。
+ * 如果第一个竖线前粘着标题，也会提取为独立标题。
  */
 function expandMashedTable(segment: string): string {
   const trimmed = segment.trim()
@@ -181,7 +184,7 @@ function sanitizeTableCell(cell: string): string {
   return c
 }
 
-/** Expand "##模块与边界|模块|职责|入口||---..." into heading + GFM table. */
+/** 把“##模块与边界|模块|职责|入口||---...”修复为标题 + GFM 表格。 */
 function fixHeadingPrefixedTables(text: string): string {
   return text.replace(
     /^(#{1,6})\s*([^|\n#]+)\|([^\n]+(?:\|\|[^\n]+)+)$/gm,
@@ -192,7 +195,7 @@ function fixHeadingPrefixedTables(text: string): string {
   )
 }
 
-/** Find and expand squashed table blobs in text. */
+/** 在普通文本中查找并展开被压缩成一行的表格片段。 */
 function fixSquashedTables(text: string): string {
   const tableBlob =
     /[\u4e00-\u9fff\w][\u4e00-\u9fff\w\s]{0,14}\|[^|\n]+(?:\|\|[^|\n]+){2,}/g
@@ -200,7 +203,7 @@ function fixSquashedTables(text: string): string {
   return text.replace(tableBlob, (match) => expandMashedTable(match))
 }
 
-/** Merge split table rows and strip footer rows mixed into tables. */
+/** 合并被错误断开的表格行，并把混入表格的尾注移出表格。 */
 function fixBrokenTableRows(text: string): string {
   const lines = text.split('\n')
   const merged: string[] = []
@@ -283,7 +286,7 @@ function fixBrokenTableRows(text: string): string {
   return out.filter((l, i, arr) => !(l === '' && arr[i + 1] === '')).join('\n')
 }
 
-/** Wrap directory trees (├── / └──) in fenced code blocks. */
+/** 将目录树符号（├── / └──）包进 text 代码块，保留层级缩进。 */
 function fixDirectoryTrees(text: string): string {
   return text.replace(/([^\n`]*(?:├──|└──)[^\n`]+)/g, (block) => {
     if (block.includes('```')) return block
@@ -299,7 +302,7 @@ function fixDirectoryTrees(text: string): string {
   })
 }
 
-/** Format arrow deployment flows as preformatted blocks. */
+/** 将带箭头的部署链路格式化为预排版文本块，保留流程方向。 */
 function fixArrowFlows(text: string): string {
   return text.replace(
     /\*{0,2}([\u4e00-\u9fffA-Za-z]{2,20})\*{0,2}\s*([\u4e00-\u9fff\w][^\n。]{10,}?(?:→|↓)[^\n。]{5,})/g,
@@ -331,7 +334,7 @@ function fixShortHeadings(text: string): string {
     .replace(/\*\*([\u4e00-\u9fffA-Za-z]{2,20})\*\*(?=[\u4e00-\u9fff\w])/g, '## $1\n\n')
 }
 
-/** Fix "-**标题：" and orphan ** markers. */
+/** 修复“-**标题：”这类列表加粗粘连，以及孤立的 ** 标记。 */
 function fixListBoldMash(text: string): string {
   return text
     .replace(/([：:])-\*\*([^：\n]+)：/g, '$1\n\n- **$2**：')
@@ -356,8 +359,8 @@ function fixOrphanBold(text: string): string {
 }
 
 /**
- * Renumber ordered lists; LLM often emits "1." for every step.
- * Blank lines and bullet sub-items stay inside the same list.
+ * 重新编号有序列表；LLM 经常把每一步都输出成“1.”。
+ * 空行和子项目符号仍保留在同一个列表语义块中。
  */
 function renumberOrderedLists(text: string): string {
   const lines = text.split('\n')
@@ -410,7 +413,7 @@ function extractInlineCommands(text: string): string {
   )
 }
 
-/** Trim spaces inside inline code; drop empty code spans. */
+/** 清理行内代码两侧空格，并删除空的行内代码片段。 */
 function fixInlineCode(text: string): string {
   const lines = text.split('\n')
   return lines
@@ -424,14 +427,14 @@ function fixInlineCode(text: string): string {
     .join('\n')
 }
 
-/** Remove bold wrapping whole lines/paragraphs; keep short emphasis. */
+/** 移除整行/整段加粗，只保留短关键词强调，避免回答整体过度加粗。 */
 function fixExcessiveBold(text: string): string {
   return text
     .replace(/\*\*([^*\n]{40,})\*\*/g, '$1')
     .replace(/\*\*([^*]+[。！？][^*]*)\*\*/g, '$1')
 }
 
-/** Close or strip unpaired backticks per line (outside fences). */
+/** 在非代码围栏区域逐行闭合或移除不成对反引号。 */
 function fixBrokenBackticks(text: string): string {
   const lines = text.split('\n')
   let inFence = false
@@ -466,7 +469,7 @@ function fixBrokenBackticks(text: string): string {
   return out.join('\n')
 }
 
-/** Standalone mashed command lines outside code blocks. */
+/** 将散落在正文中的粘连命令行包成 bash 代码块。 */
 function fixLooseCommandLines(text: string): string {
   return text.replace(
     /^(npminstall|nodesrc\/|cdserver|npmrun\w+)([^\n]*)$/gim,

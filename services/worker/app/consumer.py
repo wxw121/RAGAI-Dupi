@@ -25,7 +25,7 @@ def process_ingest_job(job: dict):
     chunk_overlap = job.get("chunkOverlap", 64)
     chunk_strategy = job.get("chunkStrategy", "recursive")
     embedding_model = job.get("embeddingModel")
-    embedding_dimension = job.get("embeddingDimension", 1536)
+    embedding_dimension = int(job.get("embeddingDimension", 1536))
 
     def update(status: str, stage: str, error: str | None = None, chunks=None):
         payload = {
@@ -85,6 +85,14 @@ def process_ingest_job(job: dict):
 
         update("processing", "embedding")
         vectors = embedder.embed_batch([c.content for c in chunks])
+        if len(vectors) != len(chunks):
+            raise ValueError(f"Embedding count mismatch: chunks={len(chunks)} vectors={len(vectors)}")
+
+        bad_dims = [len(v) for v in vectors if len(v) != embedding_dimension]
+        if bad_dims:
+            raise ValueError(
+                f"Embedding dimension mismatch: expected={embedding_dimension} actual={bad_dims[0]}"
+            )
 
         update("processing", "indexing")
         indexer = MilvusIndexer(dimension=embedding_dimension)

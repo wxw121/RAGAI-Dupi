@@ -13,7 +13,8 @@ def pdf_to_markdown(path: Path) -> str:
     except Exception:
         pass
 
-    # Fallback: plain text per page
+    # 降级策略：pymupdf4llm 不可用或没有解析出 Markdown 时，按页抽取纯文本。
+    # 这里体现适配器思想：上层只需要 Markdown 字符串，不关心底层 PDF 解析库是哪一个。
     import fitz
 
     pages: list[str] = []

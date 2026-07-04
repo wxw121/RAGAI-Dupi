@@ -37,6 +37,7 @@ public class IngestJobService {
     }
 
     public List<IngestJobResponse> listByKb(UUID kbId) {
+        knowledgeBaseService.findOrThrow(kbId);
         return ingestJobRepository.findByKbIdOrderByCreatedAtDesc(kbId).stream()
                 .map(this::toResponse)
                 .toList();
@@ -50,6 +51,9 @@ public class IngestJobService {
 
         Document doc = documentRepository.findById(UUID.fromString(update.getDocId()))
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
+        if (!job.getDocId().equals(doc.getId()) || !job.getKbId().equals(doc.getKbId())) {
+            throw new IllegalArgumentException("Ingest status update does not match job/document");
+        }
 
         if (update.getStage() != null) {
             job.setStage(IngestStage.valueOf(update.getStage().toUpperCase()));

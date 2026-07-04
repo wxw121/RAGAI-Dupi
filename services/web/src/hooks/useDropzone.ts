@@ -51,7 +51,10 @@ export function useDropzone({ onDrop, disabled, accept, multiple }: DropzoneOpti
     if (!disabled) inputRef.current?.click()
   }
 
-  const onInputChange = () => handleFiles(inputRef.current?.files ?? null)
+  const onInputChange = () => {
+    handleFiles(inputRef.current?.files ?? null)
+    if (inputRef.current) inputRef.current.value = ''
+  }
 
   return {
     inputRef,

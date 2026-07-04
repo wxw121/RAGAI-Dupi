@@ -1,6 +1,10 @@
 import httpx
+import logging
 
 from app.config import settings
+
+MAX_BATCH_SIZE = 32
+logger = logging.getLogger(__name__)
 
 
 class Embedder:
@@ -20,7 +24,33 @@ class Embedder:
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        response = self.client.post("/embeddings", json={"model": self.model, "input": texts})
-        response.raise_for_status()
-        data = response.json()["data"]
-        return [item["embedding"] for item in sorted(data, key=lambda x: x["index"])]
+
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), MAX_BATCH_SIZE):
+            batch = texts[start : start + MAX_BATCH_SIZE]
+            response = self.client.post(
+                "/embeddings",
+                json={"model": self.model, "input": batch},
+            )
+            response.raise_for_status()
+            data = response.json().get("data", [])
+            if len(data) != len(batch):
+                raise ValueError(
+                    f"Embedding response count mismatch for batch {start}-{start + len(batch) - 1}: "
+                    f"expected={len(batch)} actual={len(data)} model={self.model}"
+                )
+            if all("index" in item for item in data):
+                ordered = sorted(data, key=lambda x: x["index"])
+            else:
+                logger.warning("Embedding response missing index; using provider response order")
+                ordered = data
+
+            for offset, item in enumerate(ordered):
+                embedding = item.get("embedding")
+                if not isinstance(embedding, list):
+                    raise ValueError(
+                        f"Embedding missing for batch item {start + offset} model={self.model}"
+                    )
+                vectors.append(embedding)
+
+        return vectors

@@ -37,7 +37,7 @@ public class RetrievalService {
 
     public RetrieveResponse retrieve(UUID kbId, RetrieveRequest request) {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
-        int topK = request.getTopK() != null ? request.getTopK() : kb.getTopK();
+        int topK = clampTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK());
 
         if (kb.getRetrievalMode() == RetrievalMode.HYBRID || Boolean.TRUE.equals(request.getUseRerank())) {
             return hybridRetrieve(kb, request.getQuery(), topK, Boolean.TRUE.equals(request.getUseRerank()));
@@ -93,6 +93,13 @@ public class RetrievalService {
                 .retrievalMode(useRerank ? "hybrid_rerank" : "hybrid")
                 .hits(hits)
                 .build();
+    }
+
+    private int clampTopK(Integer topK) {
+        if (topK == null) {
+            return ragProperties.getDefaultTopK();
+        }
+        return Math.max(1, Math.min(50, topK));
     }
 
     private List<RetrievalHit> mapHits(UUID kbId, List<MilvusVectorService.SearchResult> results) {

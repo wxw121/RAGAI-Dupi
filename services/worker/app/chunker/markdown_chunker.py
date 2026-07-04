@@ -19,7 +19,12 @@ class Block:
 
 
 def _split_sections(md: str) -> list[tuple[str, str]]:
-    """Split markdown by ATX headings. Returns (heading, body) pairs."""
+    """按 ATX 标题切分 Markdown，返回 (标题, 正文) 元组。
+
+    这里采用“先按章节切、再按块切”的分层处理思想：章节标题会进入
+    chunk 元数据，后续表格/代码/正文块再分别使用不同策略切分，避免
+    检索结果丢失原文层级。
+    """
     lines = md.split("\n")
     sections: list[tuple[str, str]] = []
     current_heading = ""
@@ -54,7 +59,12 @@ def _is_table_separator(line: str) -> bool:
 
 
 def _split_section_blocks(body: str) -> list[Block]:
-    """Split section body into atomic blocks: code fences, tables, prose."""
+    """把一个章节正文切成代码、表格、普通文本三类原子块。
+
+    这是一个轻量的策略分发入口：代码块优先匹配围栏，表格保持整表结构，
+    其余文本才按正文处理。这样可以避免递归切分把代码围栏或 Markdown
+    表头拆坏，提升后续向量检索片段的可读性。
+    """
     if not body.strip():
         return []
 
@@ -103,6 +113,11 @@ def _split_section_blocks(body: str) -> list[Block]:
 
 
 def _split_code_block(text: str, chunk_size: int) -> list[str]:
+    """按行切分超长代码块，并为每个片段补齐代码围栏。
+
+    设计上把代码视为结构化块：即使内容被拆成多个 chunk，也保留开头
+    语言标识和闭合围栏，避免前端渲染或 LLM 上下文中出现未闭合代码块。
+    """
     lines = text.split("\n")
     if not lines:
         return []
@@ -133,6 +148,11 @@ def _split_code_block(text: str, chunk_size: int) -> list[str]:
 
 
 def _split_table_block(text: str, chunk_size: int) -> list[str]:
+    """按数据行拆分超长表格，并在每个片段重复表头和分隔线。
+
+    这里使用“表头复制”的信息保真策略：每个 chunk 都能独立表达列含义，
+    避免检索命中表格中段时丢失字段上下文。
+    """
     lines = [l for l in text.split("\n") if l.strip()]
     if len(lines) < 2:
         return [text]
@@ -168,7 +188,11 @@ def _split_table_block(text: str, chunk_size: int) -> list[str]:
 
 
 def _split_block(block: Block, heading: str, chunk_size: int, chunk_overlap: int) -> list[tuple[str, str]]:
-    """Return list of (content, block_type) after size splitting."""
+    """根据块类型路由到对应切分策略，返回 (内容, 块类型)。
+
+    该函数是分块器里的策略模式雏形：调用方只关心 Block，具体切分算法
+    由 block_type 决定，方便后续继续扩展图片说明、引用块等新类型。
+    """
     if block.block_type == "code":
         pieces = _split_code_block(block.text, chunk_size)
         return [(p, "code") for p in pieces]
@@ -177,7 +201,7 @@ def _split_block(block: Block, heading: str, chunk_size: int, chunk_overlap: int
         pieces = _split_table_block(block.text, chunk_size)
         return [(p, "table") for p in pieces]
 
-    # prose
+    # 普通正文走递归切分策略，尽量保留段落和句子边界，表格/代码则已在上方专门处理。
     if count_tokens(block.text) <= chunk_size:
         return [(block.text, "prose")]
 
@@ -199,6 +223,12 @@ def markdown_chunk_nodes(
     chunk_size: int = 512,
     chunk_overlap: int = 64,
 ) -> list[TextChunk]:
+    """把文档节点转换为可索引的 Markdown 感知 chunk。
+
+    流程遵循 RAG 索引流水线的分层设计：节点元数据作为基础上下文，
+    章节标题作为层级上下文，块类型作为检索特征写入 metadata。这样既能
+    让 Milvus 保存统一 TextChunk，又能让召回结果保留 Markdown 语义。
+    """
     chunks: list[TextChunk] = []
     index = 0
 

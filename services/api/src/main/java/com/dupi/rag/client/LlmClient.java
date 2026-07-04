@@ -61,8 +61,8 @@ public class LlmClient {
                         )
                 )))
                 .retrieve()
-                .bodyToMono(String.class)
-                .flatMapMany(body -> Flux.fromIterable(parseStreamTokens(body)));
+                .bodyToFlux(String.class)
+                .concatMap(chunk -> Flux.fromIterable(parseStreamTokens(chunk)));
     }
 
     private List<String> parseStreamTokens(String body) {
@@ -116,7 +116,11 @@ public class LlmClient {
         if (response == null) {
             throw new IllegalStateException("Empty chat response");
         }
-        return response.path("choices").get(0).path("message").path("content").asText();
+        JsonNode choices = response.path("choices");
+        if (!choices.isArray() || choices.isEmpty()) {
+            throw new IllegalStateException("Empty chat choices");
+        }
+        return choices.get(0).path("message").path("content").asText();
     }
 
     private WebClient buildChatClient() {

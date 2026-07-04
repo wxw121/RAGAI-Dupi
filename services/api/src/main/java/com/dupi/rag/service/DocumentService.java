@@ -13,6 +13,7 @@ import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -22,6 +23,7 @@ import java.util.List;
 import java.util.UUID;
 
 @Service
+@Slf4j
 @RequiredArgsConstructor
 public class DocumentService {
 
@@ -79,9 +81,18 @@ public class DocumentService {
                 .build();
         ingestJobRepository.save(job);
 
-        ingestJobProducer.enqueue(job, kb, objectKey, doc.getFileName(), doc.getMimeType());
+        try {
+            ingestJobProducer.enqueue(job, kb, objectKey, doc.getFileName(), doc.getMimeType());
+            doc.setStatus(DocumentStatus.PROCESSING);
+        } catch (Exception e) {
+            job.setStatus(IngestJobStatus.FAILED);
+            job.setStage(IngestStage.FAILED);
+            job.setErrorMessage(e.getMessage());
+            ingestJobRepository.save(job);
 
-        doc.setStatus(DocumentStatus.PROCESSING);
+            doc.setStatus(DocumentStatus.FAILED);
+            doc.setErrorMessage("Failed to enqueue ingest job: " + e.getMessage());
+        }
         documentRepository.save(doc);
 
         return toResponse(doc);
@@ -102,9 +113,21 @@ public class DocumentService {
     @Transactional
     public void delete(UUID kbId, UUID docId) {
         Document doc = findOrThrow(kbId, docId);
-        milvusVectorService.deleteByDocId(docId);
+        try {
+            milvusVectorService.deleteByDocId(docId);
+        } catch (Exception e) {
+            log.warn("Failed to delete Milvus vectors for doc {}", docId, e);
+            // 删除采用“数据库为最终事实源”的容错思想：即使向量库中记录已被提前删除，
+            // 也继续清理本地元数据，避免外部存储短暂不一致阻塞用户删除文档。
+        }
         chunkRepository.deleteByDocId(docId);
-        minioStorageService.delete(doc.getObjectKey());
+        try {
+            minioStorageService.delete(doc.getObjectKey());
+        } catch (Exception e) {
+            log.warn("Failed to delete object {} for doc {}", doc.getObjectKey(), docId, e);
+            // 对象存储删除失败只记录告警：业务删除链路以数据库状态为准，
+            // 这样可以支持幂等重试，也避免 MinIO 中对象缺失时反向阻塞主记录删除。
+        }
         documentRepository.delete(doc);
     }
 

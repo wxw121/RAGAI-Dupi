@@ -42,6 +42,7 @@ public class DocumentController {
 
     @GetMapping("/{docId}/ingest-job")
     public IngestJobResponse getIngestJob(@PathVariable UUID kbId, @PathVariable UUID docId) {
+        documentService.findOrThrow(kbId, docId);
         return ingestJobService.getLatestByDoc(docId);
     }
 }

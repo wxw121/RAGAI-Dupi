@@ -16,7 +16,7 @@ async function parseError(res: Response): Promise<HttpError> {
   try {
     body = await res.json()
   } catch {
-    /* ignore */
+    /* 响应体不是 JSON 时忽略解析失败，继续使用 HTTP 状态文本作为错误信息。 */
   }
   const message = body?.message ?? res.statusText ?? 'Request failed'
   return new HttpError(res.status, message, body)

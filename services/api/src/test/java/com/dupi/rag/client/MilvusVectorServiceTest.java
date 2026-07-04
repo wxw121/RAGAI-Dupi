@@ -1,0 +1,78 @@
+package com.dupi.rag.client;
+
+import com.dupi.rag.config.LlmProperties;
+import com.dupi.rag.config.MilvusProperties;
+import io.milvus.client.MilvusServiceClient;
+import io.milvus.grpc.SearchResults;
+import io.milvus.param.R;
+import io.milvus.param.collection.CreateCollectionParam;
+import io.milvus.param.dml.DeleteParam;
+import io.milvus.param.dml.SearchParam;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
+class MilvusVectorServiceTest {
+
+    @Test
+    void ensureCollectionReturnsWhenCollectionAlreadyExists() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        when(client.hasCollection(any())).thenReturn(R.success(true));
+
+        service(client).ensureCollection();
+
+        verify(client, never()).createCollection(any(CreateCollectionParam.class));
+        verify(client, never()).createIndex(any());
+        verify(client, never()).loadCollection(any());
+    }
+
+    @Test
+    void ensureCollectionCreatesSchemaIndexAndLoadsCollectionWhenMissing() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        when(client.hasCollection(any())).thenReturn(R.success(false));
+        when(client.createCollection(any(CreateCollectionParam.class))).thenReturn(R.success());
+
+        service(client).ensureCollection();
+
+        verify(client).createCollection(any(CreateCollectionParam.class));
+        verify(client).createIndex(any());
+        verify(client).loadCollection(any());
+    }
+
+    @Test
+    void searchThrowsWhenMilvusReturnsFailure() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        R<SearchResults> failed = R.failed(R.Status.Unknown, "boom");
+        when(client.search(any(SearchParam.class))).thenReturn(failed);
+
+        assertThatThrownBy(() -> service(client).search(UUID.randomUUID(), List.of(0.1f), 3))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Milvus search failed");
+    }
+
+    @Test
+    void deleteBuildsDocAndKnowledgeBaseExpressions() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        UUID docId = UUID.randomUUID();
+        UUID kbId = UUID.randomUUID();
+        MilvusVectorService service = service(client);
+
+        service.deleteByDocId(docId);
+        service.deleteByKbId(kbId);
+
+        verify(client, times(2)).delete(any(DeleteParam.class));
+    }
+
+    private static MilvusVectorService service(MilvusServiceClient client) {
+        MilvusProperties milvus = new MilvusProperties();
+        milvus.setCollection("chunks");
+        LlmProperties llm = new LlmProperties();
+        llm.getEmbedding().setDimension(1536);
+        return new MilvusVectorService(client, milvus, llm);
+    }
+}
