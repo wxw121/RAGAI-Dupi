@@ -66,8 +66,12 @@ class ControllerLayerTest {
         RetrievalService retrievalService = mock(RetrievalService.class);
         ChatService chatService = mock(ChatService.class);
         IngestJobService ingestJobService = mock(IngestJobService.class);
-        KnowledgeBaseController controller = new KnowledgeBaseController(kbService, retrievalService, chatService, ingestJobService);
+        ChatSessionService chatSessionService = mock(ChatSessionService.class);
+        KnowledgeBaseController controller = new KnowledgeBaseController(kbService, retrievalService, chatService,
+                ingestJobService, chatSessionService);
         UUID kbId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+        UUID secondSessionId = UUID.randomUUID();
         CreateKnowledgeBaseRequest create = new CreateKnowledgeBaseRequest();
         RetrieveRequest retrieve = new RetrieveRequest();
         retrieve.setQuery("q");
@@ -76,9 +80,20 @@ class ControllerLayerTest {
         ChatRequest syncChat = new ChatRequest();
         syncChat.setQuery("q");
         syncChat.setStream(false);
+        CreateChatSessionRequest createSession = new CreateChatSessionRequest();
+        createSession.setTitle("Session");
+        UpdateChatSessionRequest renameSession = new UpdateChatSessionRequest();
+        renameSession.setTitle("Renamed");
+        BatchDeleteChatSessionsRequest batchDeleteSessions = new BatchDeleteChatSessionsRequest();
+        batchDeleteSessions.setSessionIds(List.of(sessionId, secondSessionId));
         KnowledgeBaseResponse kbResponse = KnowledgeBaseResponse.builder().id(kbId).name("KB").build();
         RetrieveResponse retrieveResponse = RetrieveResponse.builder().query("q").hits(List.of()).build();
         IngestJobResponse jobResponse = IngestJobResponse.builder().kbId(kbId).build();
+        ChatSessionResponse sessionResponse = ChatSessionResponse.builder().id(sessionId).kbId(kbId).title("Session").build();
+        ChatSessionDetailResponse sessionDetail = ChatSessionDetailResponse.builder()
+                .session(sessionResponse)
+                .messages(List.of())
+                .build();
         when(kbService.create(create)).thenReturn(kbResponse);
         when(kbService.list()).thenReturn(List.of(kbResponse));
         when(kbService.get(kbId)).thenReturn(kbResponse);
@@ -86,6 +101,10 @@ class ControllerLayerTest {
         when(chatService.chatStream(kbId, streamChat)).thenReturn(Flux.just(ServerSentEvent.<String>builder().event("done").data("{}").build()));
         when(chatService.chat(kbId, syncChat)).thenReturn("answer");
         when(ingestJobService.listByKb(kbId)).thenReturn(List.of(jobResponse));
+        when(chatSessionService.list(kbId)).thenReturn(List.of(sessionResponse));
+        when(chatSessionService.create(kbId, createSession)).thenReturn(sessionResponse);
+        when(chatSessionService.getDetail(kbId, sessionId)).thenReturn(sessionDetail);
+        when(chatSessionService.rename(kbId, sessionId, renameSession)).thenReturn(sessionResponse);
 
         assertThat(controller.create(create)).isSameAs(kbResponse);
         assertThat(controller.list()).containsExactly(kbResponse);
@@ -97,10 +116,18 @@ class ControllerLayerTest {
         assertThat(controller.cancelChat(Map.of("sessionId", "s1"))).containsEntry("status", "cancel_requested");
         assertThat(controller.cancelChat(Map.of())).containsEntry("status", "cancel_requested");
         assertThat(controller.listJobs(kbId)).containsExactly(jobResponse);
+        assertThat(controller.listChatSessions(kbId)).containsExactly(sessionResponse);
+        assertThat(controller.createChatSession(kbId, createSession)).isSameAs(sessionResponse);
+        assertThat(controller.getChatSession(kbId, sessionId)).isSameAs(sessionDetail);
+        assertThat(controller.renameChatSession(kbId, sessionId, renameSession)).isSameAs(sessionResponse);
+        controller.deleteChatSession(kbId, sessionId);
+        controller.batchDeleteChatSessions(kbId, batchDeleteSessions);
 
         verify(kbService).delete(kbId);
         verify(chatService).cancel("s1");
         verify(chatService, never()).cancel(null);
+        verify(chatSessionService).delete(kbId, sessionId);
+        verify(chatSessionService).batchDelete(kbId, List.of(sessionId, secondSessionId));
     }
 
     @Test

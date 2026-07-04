@@ -2,6 +2,7 @@ package com.dupi.rag.controller;
 
 import com.dupi.rag.dto.*;
 import com.dupi.rag.service.ChatService;
+import com.dupi.rag.service.ChatSessionService;
 import com.dupi.rag.service.IngestJobService;
 import com.dupi.rag.service.KnowledgeBaseService;
 import com.dupi.rag.service.RetrievalService;
@@ -24,6 +25,7 @@ public class KnowledgeBaseController {
     private final RetrievalService retrievalService;
     private final ChatService chatService;
     private final IngestJobService ingestJobService;
+    private final ChatSessionService chatSessionService;
 
     @PostMapping
     public KnowledgeBaseResponse create(@Valid @RequestBody CreateKnowledgeBaseRequest request) {
@@ -67,6 +69,46 @@ public class KnowledgeBaseController {
             chatService.cancel(sessionId);
         }
         return Map.of("status", "cancel_requested");
+    }
+
+    @GetMapping("/{kbId}/chat-sessions")
+    public java.util.List<ChatSessionResponse> listChatSessions(@PathVariable UUID kbId) {
+        return chatSessionService.list(kbId);
+    }
+
+    @PostMapping("/{kbId}/chat-sessions")
+    public ChatSessionResponse createChatSession(
+            @PathVariable UUID kbId,
+            @Valid @RequestBody CreateChatSessionRequest request
+    ) {
+        return chatSessionService.create(kbId, request);
+    }
+
+    @GetMapping("/{kbId}/chat-sessions/{sessionId}")
+    public ChatSessionDetailResponse getChatSession(@PathVariable UUID kbId, @PathVariable UUID sessionId) {
+        return chatSessionService.getDetail(kbId, sessionId);
+    }
+
+    @PatchMapping("/{kbId}/chat-sessions/{sessionId}")
+    public ChatSessionResponse renameChatSession(
+            @PathVariable UUID kbId,
+            @PathVariable UUID sessionId,
+            @Valid @RequestBody UpdateChatSessionRequest request
+    ) {
+        return chatSessionService.rename(kbId, sessionId, request);
+    }
+
+    @DeleteMapping("/{kbId}/chat-sessions/{sessionId}")
+    public void deleteChatSession(@PathVariable UUID kbId, @PathVariable UUID sessionId) {
+        chatSessionService.delete(kbId, sessionId);
+    }
+
+    @PostMapping("/{kbId}/chat-sessions/batch-delete")
+    public void batchDeleteChatSessions(
+            @PathVariable UUID kbId,
+            @Valid @RequestBody BatchDeleteChatSessionsRequest request
+    ) {
+        chatSessionService.batchDelete(kbId, request.getSessionIds());
     }
 
     @GetMapping("/{kbId}/ingest-jobs")

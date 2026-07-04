@@ -50,6 +50,7 @@ public class ChatService {
     private final StringRedisTemplate redisTemplate;
     private final RedisQueueProperties queueProperties;
     private final ObjectMapper objectMapper;
+    private final ChatSessionService chatSessionService;
 
     private final Set<String> cancelledSessions = ConcurrentHashMap.newKeySet();
 
@@ -74,7 +75,9 @@ public class ChatService {
         String context = retrievalService.buildContext(retrieval.getHits());
         String userPrompt = "上下文：\n" + context + "\n\n问题：" + request.getQuery();
 
-        String sessionId = request.getSessionId() != null ? request.getSessionId() : UUID.randomUUID().toString();
+        UUID persistedSessionId = resolveSessionId(kbId, request);
+        String sessionId = persistedSessionId.toString();
+        chatSessionService.saveUserMessage(kbId, persistedSessionId, request.getQuery());
 
         Flux<ServerSentEvent<String>> retrievalEvent;
         try {
@@ -86,12 +89,23 @@ public class ChatService {
             retrievalEvent = Flux.empty();
         }
 
+        StringBuilder assistantBuffer = new StringBuilder();
+        java.util.concurrent.atomic.AtomicBoolean assistantSaved = new java.util.concurrent.atomic.AtomicBoolean(false);
+        Runnable saveAssistantIfPresent = () -> {
+            if (assistantSaved.compareAndSet(false, true) && !assistantBuffer.isEmpty()) {
+                chatSessionService.saveAssistantMessage(kbId, persistedSessionId, assistantBuffer.toString(), citations);
+            }
+        };
+
         Flux<ServerSentEvent<String>> tokenEvents = llmClient.chatStream(SYSTEM_PROMPT, userPrompt)
                 .takeWhile(token -> !cancelledSessions.contains(sessionId))
+                .doOnNext(assistantBuffer::append)
                 .map(token -> ServerSentEvent.<String>builder()
                         .event("token")
                         .data(token)
                         .build())
+                .doOnComplete(saveAssistantIfPresent)
+                .doOnError(ex -> saveAssistantIfPresent.run())
                 .doFinally(signal -> cancelledSessions.remove(sessionId));
 
         Flux<ServerSentEvent<String>> doneEvent = Flux.just(
@@ -132,5 +146,14 @@ public class ChatService {
             return 5;
         }
         return Math.max(1, Math.min(50, topK));
+    }
+
+    private UUID resolveSessionId(UUID kbId, ChatRequest request) {
+        if (request.getSessionId() == null || request.getSessionId().isBlank()) {
+            return chatSessionService.createForFirstQuestion(kbId, request.getQuery()).getId();
+        }
+        UUID sessionId = UUID.fromString(request.getSessionId());
+        chatSessionService.findOrThrow(kbId, sessionId);
+        return sessionId;
     }
 }
