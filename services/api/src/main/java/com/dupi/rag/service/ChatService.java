@@ -56,7 +56,7 @@ public class ChatService {
     private final ChatSessionService chatSessionService;
 
     private final Set<String> cancelledSessions = ConcurrentHashMap.newKeySet();
-    private final Map<String, Sinks.Empty<Void>> cancellationSignals = new ConcurrentHashMap<>();
+    private final Map<String, Set<Sinks.Empty<Void>>> cancellationSignals = new ConcurrentHashMap<>();
 
     public Flux<ServerSentEvent<String>> chatStream(UUID kbId, ChatRequest request) {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
@@ -100,7 +100,8 @@ public class ChatService {
                 chatSessionService.saveAssistantMessage(kbId, persistedSessionId, assistantBuffer.toString(), citations);
             }
         };
-        Sinks.Empty<Void> cancellationSignal = cancellationSignals.computeIfAbsent(sessionId, ignored -> Sinks.empty());
+        Sinks.Empty<Void> cancellationSignal = Sinks.empty();
+        cancellationSignals.computeIfAbsent(sessionId, ignored -> ConcurrentHashMap.newKeySet()).add(cancellationSignal);
 
         Flux<ServerSentEvent<String>> tokenEvents = llmClient.chatStream(SYSTEM_PROMPT, userPrompt)
                 .takeWhile(token -> !cancelledSessions.contains(sessionId))
@@ -126,7 +127,7 @@ public class ChatService {
                         saveAssistantIfPresent.run();
                     }
                     cancelledSessions.remove(sessionId);
-                    cancellationSignals.remove(sessionId, cancellationSignal);
+                    removeCancellationSignal(sessionId, cancellationSignal);
                 });
     }
 
@@ -145,8 +146,18 @@ public class ChatService {
 
     public void cancel(String sessionId) {
         cancelledSessions.add(sessionId);
-        cancellationSignals.computeIfAbsent(sessionId, ignored -> Sinks.empty()).tryEmitEmpty();
+        Set<Sinks.Empty<Void>> activeSignals = cancellationSignals.get(sessionId);
+        if (activeSignals != null) {
+            activeSignals.forEach(signal -> signal.tryEmitEmpty());
+        }
         redisTemplate.convertAndSend(queueProperties.getCancelChannel(), sessionId);
+    }
+
+    private void removeCancellationSignal(String sessionId, Sinks.Empty<Void> cancellationSignal) {
+        cancellationSignals.computeIfPresent(sessionId, (ignored, activeSignals) -> {
+            activeSignals.remove(cancellationSignal);
+            return activeSignals.isEmpty() ? null : activeSignals;
+        });
     }
 
     private String truncate(String text, int max) {

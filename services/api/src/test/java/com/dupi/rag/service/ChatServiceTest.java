@@ -19,7 +19,9 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 
+import java.lang.reflect.Field;
 import java.time.Duration;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -301,10 +303,61 @@ class ChatServiceTest {
     @Test
     void cancelStoresSessionAndPublishesRedisMessage() {
         RedisQueueProperties props = redisProps();
+        ChatService service = service(props);
 
-        service(props).cancel("session-1");
+        service.cancel("session-1");
 
         verify(redisTemplate).convertAndSend("cancel-channel", "session-1");
+        assertThat(activeCancellationSignals(service)).doesNotContainKey("session-1");
+    }
+
+    @Test
+    void cancelAfterOneSameSessionStreamFinishesStillTerminatesRemainingStream() {
+        UUID kbId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
+        when(chatSessionService.findOrThrow(kbId, sessionId)).thenReturn(ChatSession.builder()
+                .id(sessionId)
+                .kbId(kbId)
+                .build());
+        when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder().hits(List.of()).build());
+        when(retrievalService.buildContext(List.of())).thenReturn("");
+        Sinks.Many<String> firstTokens = Sinks.many().multicast().onBackpressureBuffer();
+        Sinks.Many<String> secondTokens = Sinks.many().multicast().onBackpressureBuffer();
+        when(llmClient.chatStream(anyString(), anyString()))
+                .thenReturn(firstTokens.asFlux(), secondTokens.asFlux());
+        ChatRequest request = new ChatRequest();
+        request.setQuery("闂");
+        request.setSessionId(sessionId.toString());
+        ChatService service = service(redisProps());
+        CountDownLatch firstCompleted = new CountDownLatch(1);
+        CountDownLatch secondCompleted = new CountDownLatch(1);
+        AtomicReference<List<String>> secondEvents = new AtomicReference<>();
+
+        service.chatStream(kbId, request)
+                .collectList()
+                .doFinally(signal -> firstCompleted.countDown())
+                .subscribe();
+        service.chatStream(kbId, request)
+                .map(event -> event.event())
+                .collectList()
+                .doOnNext(secondEvents::set)
+                .doFinally(signal -> secondCompleted.countDown())
+                .subscribe();
+        firstTokens.tryEmitNext("閮?");
+        secondTokens.tryEmitNext("鍓?");
+        firstTokens.tryEmitComplete();
+        awaitCompletion(firstCompleted);
+
+        service.cancel(sessionId.toString());
+        awaitCompletion(secondCompleted);
+
+        assertThat(secondEvents.get()).containsExactly("retrieval", "token", "done");
+        verify(chatSessionService, times(2)).saveUserMessage(kbId, sessionId, "闂");
+        verify(chatSessionService, times(1)).saveAssistantMessage(kbId, sessionId, "閮?", List.of());
+        verify(chatSessionService, times(1)).saveAssistantMessage(kbId, sessionId, "鍓?", List.of());
+        verify(redisTemplate).convertAndSend("cancel-channel", sessionId.toString());
+        assertThat(activeCancellationSignals(service)).doesNotContainKey(sessionId.toString());
     }
 
     private static RedisQueueProperties redisProps() {
@@ -319,6 +372,17 @@ class ChatServiceTest {
             assertThat(completed.await(Duration.ofMillis(500).toMillis(), TimeUnit.MILLISECONDS)).isTrue();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            throw new AssertionError(e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Collection<Sinks.Empty<Void>>> activeCancellationSignals(ChatService service) {
+        try {
+            Field field = ChatService.class.getDeclaredField("cancellationSignals");
+            field.setAccessible(true);
+            return (Map<String, Collection<Sinks.Empty<Void>>>) field.get(service);
+        } catch (ReflectiveOperationException e) {
             throw new AssertionError(e);
         }
     }
