@@ -6,6 +6,7 @@ import com.dupi.rag.domain.entity.ChatSession;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.enums.ChatMessageRole;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import org.junit.jupiter.api.Test;
 
@@ -65,7 +66,7 @@ class EntityLifecycleTest {
         ChatMessage message = ChatMessage.builder()
                 .sessionId(session.getId())
                 .sequenceNumber(0)
-                .role("user")
+                .role(ChatMessageRole.USER)
                 .content("What is dupi-RAG?")
                 .citations(Map.of("source", "a.md"))
                 .build();
@@ -77,6 +78,7 @@ class EntityLifecycleTest {
         assertThat(message.getId()).isNotNull();
         assertThat(message.getCreatedAt()).isNotNull();
         assertThat(message.getSequenceNumber()).isZero();
+        assertThat(message.getRole()).isEqualTo(ChatMessageRole.USER);
         assertThat(message.getCitations()).containsEntry("source", "a.md");
     }
 

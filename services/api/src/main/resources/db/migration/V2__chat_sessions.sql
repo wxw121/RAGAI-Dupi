@@ -17,7 +17,7 @@ CREATE TABLE chat_messages (
     content         TEXT NOT NULL,
     citations       JSONB,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ck_chat_messages_sequence_non_negative CHECK (sequence_number >= 0),
+    CONSTRAINT ck_chat_messages_role CHECK (role IN ('USER', 'ASSISTANT', 'SYSTEM')),
     CONSTRAINT uq_chat_messages_session_sequence UNIQUE (session_id, sequence_number)
 );
-
-CREATE INDEX idx_chat_messages_session_sequence ON chat_messages(session_id, sequence_number ASC);

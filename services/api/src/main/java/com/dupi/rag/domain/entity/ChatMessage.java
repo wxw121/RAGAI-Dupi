@@ -1,7 +1,10 @@
 package com.dupi.rag.domain.entity;
 
+import com.dupi.rag.domain.enums.ChatMessageRole;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
@@ -35,10 +38,11 @@ public class ChatMessage {
     @Column(name = "sequence_number", nullable = false)
     private Integer sequenceNumber;
 
+    @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    private String role;
+    private ChatMessageRole role;
 
-    @Column(nullable = false)
+    @Column(nullable = false, columnDefinition = "TEXT")
     private String content;
 
     @JdbcTypeCode(SqlTypes.JSON)
