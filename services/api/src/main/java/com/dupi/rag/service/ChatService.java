@@ -145,10 +145,18 @@ public class ChatService {
     }
 
     public void cancel(String sessionId) {
-        cancelledSessions.add(sessionId);
-        Set<Sinks.Empty<Void>> activeSignals = cancellationSignals.get(sessionId);
-        if (activeSignals != null) {
+        java.util.concurrent.atomic.AtomicBoolean emittedToActiveStream = new java.util.concurrent.atomic.AtomicBoolean(false);
+        cancellationSignals.computeIfPresent(sessionId, (ignored, activeSignals) -> {
+            if (activeSignals.isEmpty()) {
+                return null;
+            }
+            cancelledSessions.add(sessionId);
+            emittedToActiveStream.set(true);
             activeSignals.forEach(signal -> signal.tryEmitEmpty());
+            return activeSignals;
+        });
+        if (!emittedToActiveStream.get()) {
+            cancelledSessions.remove(sessionId);
         }
         redisTemplate.convertAndSend(queueProperties.getCancelChannel(), sessionId);
     }

@@ -24,6 +24,7 @@ import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -309,6 +310,34 @@ class ChatServiceTest {
 
         verify(redisTemplate).convertAndSend("cancel-channel", "session-1");
         assertThat(activeCancellationSignals(service)).doesNotContainKey("session-1");
+        assertThat(cancelledSessions(service)).doesNotContain("session-1");
+    }
+
+    @Test
+    void inactiveCancelDoesNotSuppressLaterStreamForSameSession() {
+        UUID kbId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
+        when(chatSessionService.findOrThrow(kbId, sessionId)).thenReturn(ChatSession.builder()
+                .id(sessionId)
+                .kbId(kbId)
+                .build());
+        when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder().hits(List.of()).build());
+        when(retrievalService.buildContext(List.of())).thenReturn("");
+        when(llmClient.chatStream(anyString(), anyString())).thenReturn(Flux.just("par", "tial"));
+        ChatRequest request = new ChatRequest();
+        request.setQuery("question");
+        request.setSessionId(sessionId.toString());
+        ChatService service = service(redisProps());
+
+        service.cancel(sessionId.toString());
+        var events = service.chatStream(kbId, request).collectList().block();
+
+        assertThat(events).extracting(e -> e.event()).containsExactly("retrieval", "token", "token", "done");
+        verify(redisTemplate).convertAndSend("cancel-channel", sessionId.toString());
+        verify(chatSessionService).saveUserMessage(kbId, sessionId, "question");
+        verify(chatSessionService, times(1)).saveAssistantMessage(kbId, sessionId, "partial", List.of());
+        assertThat(cancelledSessions(service)).doesNotContain(sessionId.toString());
     }
 
     @Test
@@ -382,6 +411,17 @@ class ChatServiceTest {
             Field field = ChatService.class.getDeclaredField("cancellationSignals");
             field.setAccessible(true);
             return (Map<String, Collection<Sinks.Empty<Void>>>) field.get(service);
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Set<String> cancelledSessions(ChatService service) {
+        try {
+            Field field = ChatService.class.getDeclaredField("cancelledSessions");
+            field.setAccessible(true);
+            return (Set<String>) field.get(service);
         } catch (ReflectiveOperationException e) {
             throw new AssertionError(e);
         }
