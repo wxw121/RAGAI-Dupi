@@ -61,7 +61,6 @@ class ChatSessionServiceTest {
 
         verify(knowledgeBaseService).findOrThrow(kbId);
         assertThat(response.getKbId()).isEqualTo(kbId);
-        assertThat(response.getTenantId()).isEqualTo("default");
         assertThat(response.getTitle()).isEqualTo("产品问答");
         verify(sessionRepository).save(argThat(session -> session.getKbId().equals(kbId)
                 && session.getTenantId().equals("default")
@@ -94,7 +93,7 @@ class ChatSessionServiceTest {
         Instant old = Instant.parse("2026-01-01T00:00:00Z");
         Instant recent = Instant.parse("2026-01-02T00:00:00Z");
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
-        when(sessionRepository.findByKbIdOrderByUpdatedAtDesc(kbId)).thenReturn(List.of(
+        when(sessionRepository.findByKbIdAndTenantIdOrderByUpdatedAtDesc(kbId, "default")).thenReturn(List.of(
                 session(kbId, "Recent", recent),
                 session(kbId, "Old", old)
         ));
@@ -102,6 +101,7 @@ class ChatSessionServiceTest {
         var responses = service.list(kbId);
 
         verify(knowledgeBaseService).findOrThrow(kbId);
+        verify(sessionRepository).findByKbIdAndTenantIdOrderByUpdatedAtDesc(kbId, "default");
         assertThat(responses).extracting("title").containsExactly("Recent", "Old");
         assertThat(responses).extracting("updatedAt").containsExactly(recent, old);
     }

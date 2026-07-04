@@ -89,11 +89,10 @@ class DtoCoverageTest {
         assertThat(hit.getMetadata()).containsEntry("k", "v");
 
         ChatSessionResponse session = ChatSessionResponse.builder()
-                .id(id).kbId(id).tenantId("t").title("chat")
+                .id(id).kbId(id).title("chat")
                 .createdAt(now).updatedAt(now).build();
         assertThat(session.getId()).isEqualTo(id);
         assertThat(session.getKbId()).isEqualTo(id);
-        assertThat(session.getTenantId()).isEqualTo("t");
         assertThat(session.getTitle()).isEqualTo("chat");
         assertThat(session.getCreatedAt()).isEqualTo(now);
         assertThat(session.getUpdatedAt()).isEqualTo(now);

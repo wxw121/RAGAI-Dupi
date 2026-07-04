@@ -11,7 +11,6 @@ import java.util.UUID;
 public class ChatSessionResponse {
     private UUID id;
     private UUID kbId;
-    private String tenantId;
     private String title;
     private Instant createdAt;
     private Instant updatedAt;

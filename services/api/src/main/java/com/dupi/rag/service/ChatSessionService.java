@@ -38,7 +38,7 @@ public class ChatSessionService {
     @Transactional(readOnly = true)
     public List<ChatSessionResponse> list(UUID kbId) {
         knowledgeBaseService.findOrThrow(kbId);
-        return sessionRepository.findByKbIdOrderByUpdatedAtDesc(kbId).stream()
+        return sessionRepository.findByKbIdAndTenantIdOrderByUpdatedAtDesc(kbId, DEFAULT_TENANT_ID).stream()
                 .map(this::toSessionResponse)
                 .toList();
     }
@@ -144,7 +144,6 @@ public class ChatSessionService {
         return ChatSessionResponse.builder()
                 .id(session.getId())
                 .kbId(session.getKbId())
-                .tenantId(session.getTenantId())
                 .title(session.getTitle())
                 .createdAt(session.getCreatedAt())
                 .updatedAt(session.getUpdatedAt())
