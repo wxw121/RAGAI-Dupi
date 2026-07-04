@@ -39,6 +39,9 @@ public class MilvusVectorService {
                 .withCollectionName(collection)
                 .build());
         if (Boolean.TRUE.equals(has.getData())) {
+            client.loadCollection(LoadCollectionParam.newBuilder()
+                    .withCollectionName(collection)
+                    .build());
             return;
         }
 
@@ -113,6 +116,10 @@ public class MilvusVectorService {
 
         R<SearchResults> response = client.search(param);
         if (response.getStatus() != R.Status.Success.getCode() || response.getData() == null) {
+            if (isCollectionLoading(response.getMessage())) {
+                log.warn("Milvus collection {} is still loading; returning empty search results", properties.getCollection());
+                return List.of();
+            }
             throw new IllegalStateException("Milvus search failed: " + response.getMessage());
         }
 
@@ -132,6 +139,16 @@ public class MilvusVectorService {
             ));
         }
         return results;
+    }
+
+    private boolean isCollectionLoading(String message) {
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("collection not loaded")
+                || normalized.contains("collection not fully loaded")
+                || normalized.contains("wait for loading collection timeout");
     }
 
     public void deleteByDocId(UUID docId) {

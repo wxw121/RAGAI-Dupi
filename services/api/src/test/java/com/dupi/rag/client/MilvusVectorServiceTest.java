@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
@@ -20,7 +21,7 @@ import static org.mockito.Mockito.*;
 class MilvusVectorServiceTest {
 
     @Test
-    void ensureCollectionReturnsWhenCollectionAlreadyExists() {
+    void ensureCollectionLoadsExistingCollection() {
         MilvusServiceClient client = mock(MilvusServiceClient.class);
         when(client.hasCollection(any())).thenReturn(R.success(true));
 
@@ -28,7 +29,7 @@ class MilvusVectorServiceTest {
 
         verify(client, never()).createCollection(any(CreateCollectionParam.class));
         verify(client, never()).createIndex(any());
-        verify(client, never()).loadCollection(any());
+        verify(client).loadCollection(any());
     }
 
     @Test
@@ -53,6 +54,17 @@ class MilvusVectorServiceTest {
         assertThatThrownBy(() -> service(client).search(UUID.randomUUID(), List.of(0.1f), 3))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Milvus search failed");
+    }
+
+    @Test
+    void searchReturnsEmptyWhenCollectionIsStillLoading() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        R<SearchResults> failed = R.failed(R.Status.Unknown, "collection not fully loaded");
+        when(client.search(any(SearchParam.class))).thenReturn(failed);
+
+        var results = service(client).search(UUID.randomUUID(), List.of(0.1f), 3);
+
+        assertThat(results).isEmpty();
     }
 
     @Test

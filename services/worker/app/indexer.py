@@ -6,9 +6,12 @@ from pymilvus import (
     connections,
     utility,
 )
+from pymilvus.exceptions import MilvusException
 
 from app.config import settings
 from app.models import TextChunk
+
+MILVUS_OPERATION_TIMEOUT_SECONDS = 10
 
 
 class MilvusIndexer:
@@ -21,7 +24,7 @@ class MilvusIndexer:
     def _ensure_collection(self):
         if utility.has_collection(self.collection_name):
             self.collection = Collection(self.collection_name)
-            self.collection.load()
+            self._validate_embedding_dimension()
             return
 
         fields = [
@@ -37,7 +40,21 @@ class MilvusIndexer:
             field_name="embedding",
             index_params={"index_type": "HNSW", "metric_type": "COSINE", "params": {"M": 16, "efConstruction": 200}},
         )
-        self.collection.load()
+
+    def _validate_embedding_dimension(self):
+        for field in self.collection.schema.fields:
+            if field.name == "embedding":
+                actual = int(field.params.get("dim", 0))
+                if actual != self.dimension:
+                    raise ValueError(
+                        f"Milvus collection {self.collection_name} dimension mismatch: "
+                        f"expected={self.dimension} actual={actual}"
+                    )
+                return
+        raise ValueError(f"Milvus collection {self.collection_name} missing embedding field")
+
+    def _load_collection(self):
+        self.collection.load(timeout=MILVUS_OPERATION_TIMEOUT_SECONDS)
 
     def index_chunks(
         self,
@@ -55,16 +72,22 @@ class MilvusIndexer:
         contents = [c.content[:65000] for c in chunks]
 
         self.collection.insert([chunk_ids, kb_ids, doc_ids, contents, vectors])
-        self.collection.flush()
 
         for chunk, cid in zip(chunks, chunk_ids):
             chunk.milvus_id = cid
         return chunk_ids
 
     def delete_by_doc(self, doc_id: str):
-        self.collection.delete(expr=f'doc_id == "{doc_id}"')
+        try:
+            self.collection.delete(expr=f'doc_id == "{doc_id}"', timeout=MILVUS_OPERATION_TIMEOUT_SECONDS)
+        except MilvusException as exc:
+            error = str(exc).lower()
+            if "collection not loaded" in error or "collection not fully loaded" in error:
+                return
+            raise
 
     def search(self, kb_id: str, vector: list[float], top_k: int) -> list[dict]:
+        self._load_collection()
         results = self.collection.search(
             data=[vector],
             anns_field="embedding",
@@ -72,6 +95,7 @@ class MilvusIndexer:
             limit=top_k,
             expr=f'kb_id == "{kb_id}"',
             output_fields=["chunk_id", "doc_id", "content"],
+            timeout=MILVUS_OPERATION_TIMEOUT_SECONDS,
         )
         hits = []
         for hit in results[0]:

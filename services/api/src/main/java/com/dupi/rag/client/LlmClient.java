@@ -72,10 +72,10 @@ public class LlmClient {
         }
         for (String line : body.split("\\r?\\n")) {
             String trimmed = line.trim();
-            if (!trimmed.startsWith("data:")) {
+            if (trimmed.isEmpty()) {
                 continue;
             }
-            String data = trimmed.substring(5).trim();
+            String data = trimmed.startsWith("data:") ? trimmed.substring(5).trim() : trimmed;
             if (data.isEmpty() || "[DONE]".equals(data)) {
                 continue;
             }

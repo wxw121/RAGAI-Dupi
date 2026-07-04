@@ -53,7 +53,7 @@ class LlmClientTest {
                 data: [DONE]
                 """);
 
-        assertThat(client.chatStream("system", "user").collectList().block()).isEmpty();
+        assertThat(client.chatStream("system", "user").collectList().block()).containsExactly("A");
     }
 
     @Test
@@ -71,6 +71,17 @@ class LlmClientTest {
 
         assertThat(parse(client, null)).isEmpty();
         assertThat(parse(client, "  ")).isEmpty();
+    }
+
+    @Test
+    void chatStreamParsesDecodedJsonEventChunks() {
+        LlmClient client = client();
+
+        assertThat(parse(client, """
+            {"choices":[{"delta":{"content":"A"}}]}
+            [DONE]
+            {"choices":[{"delta":{"content":"B"}}]}
+            """)).containsExactly("A", "B");
     }
 
     @SuppressWarnings("unchecked")

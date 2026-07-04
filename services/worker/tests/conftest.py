@@ -115,3 +115,7 @@ fake_pymilvus.FieldSchema = object
 fake_pymilvus.connections = types.SimpleNamespace(connect=lambda **kwargs: None)
 fake_pymilvus.utility = types.SimpleNamespace(has_collection=lambda name: False)
 sys.modules.setdefault("pymilvus", fake_pymilvus)
+
+fake_pymilvus_exceptions = types.ModuleType("pymilvus.exceptions")
+fake_pymilvus_exceptions.MilvusException = Exception
+sys.modules.setdefault("pymilvus.exceptions", fake_pymilvus_exceptions)
