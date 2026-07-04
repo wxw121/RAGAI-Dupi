@@ -8,6 +8,7 @@ import com.dupi.rag.domain.enums.RetrievalMode;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -86,6 +87,32 @@ class DtoCoverageTest {
         assertThat(hit.getContent()).isEqualTo("c");
         assertThat(hit.getScore()).isEqualTo(1.0);
         assertThat(hit.getMetadata()).containsEntry("k", "v");
+
+        ChatSessionResponse session = ChatSessionResponse.builder()
+                .id(id).kbId(id).tenantId("t").title("chat")
+                .createdAt(now).updatedAt(now).build();
+        assertThat(session.getId()).isEqualTo(id);
+        assertThat(session.getKbId()).isEqualTo(id);
+        assertThat(session.getTenantId()).isEqualTo("t");
+        assertThat(session.getTitle()).isEqualTo("chat");
+        assertThat(session.getCreatedAt()).isEqualTo(now);
+        assertThat(session.getUpdatedAt()).isEqualTo(now);
+
+        ChatMessageResponse message = ChatMessageResponse.builder()
+                .id(id).sessionId(id).sequenceNumber(1).role("USER").content("hello")
+                .citations(List.of(citation)).createdAt(now).build();
+        assertThat(message.getId()).isEqualTo(id);
+        assertThat(message.getSessionId()).isEqualTo(id);
+        assertThat(message.getSequenceNumber()).isEqualTo(1);
+        assertThat(message.getRole()).isEqualTo("USER");
+        assertThat(message.getContent()).isEqualTo("hello");
+        assertThat(message.getCitations()).containsExactly(citation);
+        assertThat(message.getCreatedAt()).isEqualTo(now);
+
+        ChatSessionDetailResponse detail = ChatSessionDetailResponse.builder()
+                .session(session).messages(List.of(message)).build();
+        assertThat(detail.getSession()).isSameAs(session);
+        assertThat(detail.getMessages()).containsExactly(message);
     }
 
     @Test
@@ -109,5 +136,22 @@ class DtoCoverageTest {
         assertThat(update.getJobId()).isEqualTo("j");
         assertThat(update.getMilvusIds()).containsExactly("m1");
         assertThat(update.getChunks().get(0).getMetadata()).containsEntry("h", "H");
+    }
+
+    @Test
+    void chatSessionRequestsExposeMutators() {
+        UUID sessionId = UUID.randomUUID();
+
+        CreateChatSessionRequest create = new CreateChatSessionRequest();
+        create.setTitle("new chat");
+        assertThat(create.getTitle()).isEqualTo("new chat");
+
+        UpdateChatSessionRequest update = new UpdateChatSessionRequest();
+        update.setTitle("renamed chat");
+        assertThat(update.getTitle()).isEqualTo("renamed chat");
+
+        BatchDeleteChatSessionsRequest batchDelete = new BatchDeleteChatSessionsRequest();
+        batchDelete.setSessionIds(List.of(sessionId));
+        assertThat(batchDelete.getSessionIds()).containsExactly(sessionId);
     }
 }

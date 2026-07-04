@@ -6,6 +6,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.data.jpa.repository.Query;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 public interface ChatMessageRepository extends JpaRepository<ChatMessage, UUID> {
@@ -34,4 +35,10 @@ public interface ChatMessageRepository extends JpaRepository<ChatMessage, UUID> 
             @Param("kbId") UUID kbId,
             @Param("tenantId") String tenantId
     );
+
+    @Query("""
+            select max(message.sequenceNumber) from ChatMessage message
+            where message.sessionId = :sessionId
+            """)
+    Optional<Integer> findMaxSequenceNumberBySessionId(@Param("sessionId") UUID sessionId);
 }
