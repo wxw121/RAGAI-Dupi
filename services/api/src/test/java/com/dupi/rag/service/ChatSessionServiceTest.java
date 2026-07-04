@@ -200,7 +200,7 @@ class ChatSessionServiceTest {
         UUID chunkId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         ChatSession session = session(kbId, sessionId, "Chat");
-        when(sessionRepository.findByIdAndKbIdAndTenantId(sessionId, kbId, "default")).thenReturn(Optional.of(session));
+        when(sessionRepository.findByIdAndKbIdAndTenantIdForUpdate(sessionId, kbId, "default")).thenReturn(Optional.of(session));
         when(messageRepository.findMaxSequenceNumberBySessionId(sessionId)).thenReturn(Optional.empty(), Optional.of(1));
         when(messageRepository.save(any(ChatMessage.class))).thenAnswer(invocation -> persistedMessage(invocation.getArgument(0)));
         when(sessionRepository.save(any(ChatSession.class))).thenAnswer(invocation -> invocation.getArgument(0));
@@ -229,6 +229,7 @@ class ChatSessionServiceTest {
             assertThat(item).containsEntry("snippet", "片段");
             assertThat(item).containsEntry("score", 0.88);
         });
+        verify(sessionRepository, times(2)).findByIdAndKbIdAndTenantIdForUpdate(sessionId, kbId, "default");
         verify(sessionRepository, times(2)).save(session);
     }
 

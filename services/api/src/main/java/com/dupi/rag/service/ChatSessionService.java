@@ -122,22 +122,25 @@ public class ChatSessionService {
 
     @Transactional
     public ChatMessage saveUserMessage(UUID kbId, UUID sessionId, String content) {
-        return saveUserMessage(findOrThrow(kbId, sessionId), content);
+        return saveUserMessage(findForUpdateOrThrow(kbId, sessionId, DEFAULT_TENANT_ID), content);
     }
 
-    @Transactional
-    public ChatMessage saveUserMessage(ChatSession session, String content) {
+    private ChatMessage saveUserMessage(ChatSession session, String content) {
         return saveMessage(session, ChatMessageRole.USER, content, null);
     }
 
     @Transactional
     public ChatMessage saveAssistantMessage(UUID kbId, UUID sessionId, String content, List<Citation> citations) {
-        return saveAssistantMessage(findOrThrow(kbId, sessionId), content, citations);
+        return saveAssistantMessage(findForUpdateOrThrow(kbId, sessionId, DEFAULT_TENANT_ID), content, citations);
     }
 
-    @Transactional
-    public ChatMessage saveAssistantMessage(ChatSession session, String content, List<Citation> citations) {
+    private ChatMessage saveAssistantMessage(ChatSession session, String content, List<Citation> citations) {
         return saveMessage(session, ChatMessageRole.ASSISTANT, content, toCitationSnapshot(citations));
+    }
+
+    private ChatSession findForUpdateOrThrow(UUID kbId, UUID sessionId, String tenantId) {
+        return sessionRepository.findByIdAndKbIdAndTenantIdForUpdate(sessionId, kbId, tenantId)
+                .orElseThrow(() -> new ResourceNotFoundException("Chat session not found: " + sessionId));
     }
 
     public ChatSessionResponse toSessionResponse(ChatSession session) {
