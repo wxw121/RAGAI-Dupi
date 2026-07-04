@@ -11,8 +11,11 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.SignalType;
+import reactor.core.publisher.Sinks;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -53,6 +56,7 @@ public class ChatService {
     private final ChatSessionService chatSessionService;
 
     private final Set<String> cancelledSessions = ConcurrentHashMap.newKeySet();
+    private final Map<String, Sinks.Empty<Void>> cancellationSignals = new ConcurrentHashMap<>();
 
     public Flux<ServerSentEvent<String>> chatStream(UUID kbId, ChatRequest request) {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
@@ -96,17 +100,18 @@ public class ChatService {
                 chatSessionService.saveAssistantMessage(kbId, persistedSessionId, assistantBuffer.toString(), citations);
             }
         };
+        Sinks.Empty<Void> cancellationSignal = cancellationSignals.computeIfAbsent(sessionId, ignored -> Sinks.empty());
 
         Flux<ServerSentEvent<String>> tokenEvents = llmClient.chatStream(SYSTEM_PROMPT, userPrompt)
                 .takeWhile(token -> !cancelledSessions.contains(sessionId))
+                .takeUntilOther(cancellationSignal.asMono())
                 .doOnNext(assistantBuffer::append)
                 .map(token -> ServerSentEvent.<String>builder()
                         .event("token")
                         .data(token)
                         .build())
                 .doOnComplete(saveAssistantIfPresent)
-                .doOnError(ex -> saveAssistantIfPresent.run())
-                .doFinally(signal -> cancelledSessions.remove(sessionId));
+                .doOnError(ex -> saveAssistantIfPresent.run());
 
         Flux<ServerSentEvent<String>> doneEvent = Flux.just(
                 ServerSentEvent.<String>builder().event("done").data("{\"sessionId\":\"" + sessionId + "\"}").build()
@@ -115,7 +120,14 @@ public class ChatService {
         return Flux.concat(retrievalEvent, tokenEvents, doneEvent)
                 .onErrorResume(ex -> Flux.just(
                         ServerSentEvent.<String>builder().event("error").data(ex.getMessage()).build()
-                ));
+                ))
+                .doFinally(signal -> {
+                    if (signal == SignalType.CANCEL) {
+                        saveAssistantIfPresent.run();
+                    }
+                    cancelledSessions.remove(sessionId);
+                    cancellationSignals.remove(sessionId, cancellationSignal);
+                });
     }
 
     public String chat(UUID kbId, ChatRequest request) {
@@ -133,6 +145,7 @@ public class ChatService {
 
     public void cancel(String sessionId) {
         cancelledSessions.add(sessionId);
+        cancellationSignals.computeIfAbsent(sessionId, ignored -> Sinks.empty()).tryEmitEmpty();
         redisTemplate.convertAndSend(queueProperties.getCancelChannel(), sessionId);
     }
 
@@ -152,7 +165,12 @@ public class ChatService {
         if (request.getSessionId() == null || request.getSessionId().isBlank()) {
             return chatSessionService.createForFirstQuestion(kbId, request.getQuery()).getId();
         }
-        UUID sessionId = UUID.fromString(request.getSessionId());
+        UUID sessionId;
+        try {
+            sessionId = UUID.fromString(request.getSessionId());
+        } catch (IllegalArgumentException ex) {
+            throw new IllegalArgumentException("Invalid sessionId", ex);
+        }
         chatSessionService.findOrThrow(kbId, sessionId);
         return sessionId;
     }

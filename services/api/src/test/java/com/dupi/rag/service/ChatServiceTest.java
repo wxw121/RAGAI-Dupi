@@ -17,12 +17,18 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Sinks;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -174,6 +180,112 @@ class ChatServiceTest {
     }
 
     @Test
+    void chatStreamPersistsPartialAssistantTextWhenSubscriberCancelsAfterTokens() throws Exception {
+        UUID kbId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
+        when(chatSessionService.findOrThrow(kbId, sessionId)).thenReturn(ChatSession.builder()
+                .id(sessionId)
+                .kbId(kbId)
+                .build());
+        when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder().hits(List.of()).build());
+        when(retrievalService.buildContext(List.of())).thenReturn("");
+        Sinks.Many<String> tokens = Sinks.many().multicast().onBackpressureBuffer();
+        when(llmClient.chatStream(anyString(), anyString())).thenReturn(tokens.asFlux());
+        ChatRequest request = new ChatRequest();
+        request.setQuery("闂");
+        request.setSessionId(sessionId.toString());
+
+        var subscription = service(redisProps()).chatStream(kbId, request).subscribe();
+        tokens.tryEmitNext("閮?");
+        subscription.dispose();
+        Thread.sleep(50);
+
+        verify(chatSessionService).saveUserMessage(kbId, sessionId, "闂");
+        verify(chatSessionService, timeout(200).times(1)).saveAssistantMessage(kbId, sessionId, "閮?", List.of());
+    }
+
+    @Test
+    void cancelTerminatesStreamPromptlyAndPersistsPartialAssistantText() {
+        UUID kbId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
+        when(chatSessionService.findOrThrow(kbId, sessionId)).thenReturn(ChatSession.builder()
+                .id(sessionId)
+                .kbId(kbId)
+                .build());
+        when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder().hits(List.of()).build());
+        when(retrievalService.buildContext(List.of())).thenReturn("");
+        Sinks.Many<String> tokens = Sinks.many().multicast().onBackpressureBuffer();
+        when(llmClient.chatStream(anyString(), anyString())).thenReturn(tokens.asFlux());
+        ChatRequest request = new ChatRequest();
+        request.setQuery("闂");
+        request.setSessionId(sessionId.toString());
+        AtomicReference<List<String>> events = new AtomicReference<>();
+        CountDownLatch completed = new CountDownLatch(1);
+        ChatService service = service(redisProps());
+
+        service.chatStream(kbId, request)
+                .map(event -> event.event())
+                .collectList()
+                .doOnNext(events::set)
+                .doFinally(signal -> completed.countDown())
+                .subscribe();
+        tokens.tryEmitNext("閮?");
+        service.cancel(sessionId.toString());
+        awaitCompletion(completed);
+
+        assertThat(events.get()).containsExactly("retrieval", "token", "done");
+        verify(chatSessionService).saveUserMessage(kbId, sessionId, "闂");
+        verify(chatSessionService, times(1)).saveAssistantMessage(kbId, sessionId, "閮?", List.of());
+        verify(redisTemplate).convertAndSend("cancel-channel", sessionId.toString());
+    }
+
+    @Test
+    void chatStreamRejectsInvalidNonblankSessionIdWithoutPersistingMessages() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
+        when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder().hits(List.of()).build());
+        when(retrievalService.buildContext(List.of())).thenReturn("");
+        ChatRequest request = new ChatRequest();
+        request.setQuery("闂");
+        request.setSessionId("not-a-uuid");
+
+        assertThatThrownBy(() -> service(redisProps()).chatStream(kbId, request))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Invalid sessionId");
+
+        verify(chatSessionService, never()).findOrThrow(any(), any());
+        verify(chatSessionService, never()).saveUserMessage(any(), any(), anyString());
+        verify(chatSessionService, never()).saveAssistantMessage(any(), any(), anyString(), anyList());
+    }
+
+    @Test
+    void chatStreamCreatesSessionForBlankSessionIdWithoutFindOrThrow() {
+        UUID kbId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
+        when(chatSessionService.createForFirstQuestion(kbId, "闂")).thenReturn(ChatSessionResponse.builder()
+                .id(sessionId)
+                .kbId(kbId)
+                .title("闂")
+                .build());
+        when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder().hits(List.of()).build());
+        when(retrievalService.buildContext(List.of())).thenReturn("");
+        when(llmClient.chatStream(anyString(), anyString())).thenReturn(Flux.empty());
+        ChatRequest request = new ChatRequest();
+        request.setQuery("闂");
+        request.setSessionId("   ");
+
+        var events = service(redisProps()).chatStream(kbId, request).collectList().block();
+
+        assertThat(events).extracting(e -> e.event()).containsExactly("retrieval", "done");
+        verify(chatSessionService).createForFirstQuestion(kbId, "闂");
+        verify(chatSessionService, never()).findOrThrow(any(), any());
+        verify(chatSessionService).saveUserMessage(kbId, sessionId, "闂");
+    }
+
+    @Test
     void chatReturnsNonStreamingLlmAnswer() {
         UUID kbId = UUID.randomUUID();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
@@ -200,5 +312,14 @@ class ChatServiceTest {
         props.setCancelChannel("cancel-channel");
         props.setIngestQueue("ingest");
         return props;
+    }
+
+    private static void awaitCompletion(CountDownLatch completed) {
+        try {
+            assertThat(completed.await(Duration.ofMillis(500).toMillis(), TimeUnit.MILLISECONDS)).isTrue();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(e);
+        }
     }
 }
