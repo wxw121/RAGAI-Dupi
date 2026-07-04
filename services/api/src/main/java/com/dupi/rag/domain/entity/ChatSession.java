@@ -37,10 +37,6 @@ public class ChatSession {
     @Column(nullable = false)
     private String title;
 
-    @Column(nullable = false)
-    @Builder.Default
-    private String status = "active";
-
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

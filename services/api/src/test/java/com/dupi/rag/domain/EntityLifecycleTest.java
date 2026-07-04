@@ -10,6 +10,7 @@ import com.dupi.rag.domain.enums.DocumentStatus;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -63,9 +64,10 @@ class EntityLifecycleTest {
 
         ChatMessage message = ChatMessage.builder()
                 .sessionId(session.getId())
+                .sequenceNumber(0)
                 .role("user")
                 .content("What is dupi-RAG?")
-                .status("completed")
+                .citations(Map.of("source", "a.md"))
                 .build();
         invoke(message, "onCreate");
 
@@ -74,6 +76,8 @@ class EntityLifecycleTest {
         assertThat(session.getUpdatedAt()).isNotNull();
         assertThat(message.getId()).isNotNull();
         assertThat(message.getCreatedAt()).isNotNull();
+        assertThat(message.getSequenceNumber()).isZero();
+        assertThat(message.getCitations()).containsEntry("source", "a.md");
     }
 
     private static void invoke(Object target, String methodName) throws Exception {

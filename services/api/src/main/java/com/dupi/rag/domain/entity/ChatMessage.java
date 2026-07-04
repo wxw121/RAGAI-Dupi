@@ -10,8 +10,11 @@ import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
+import java.util.Map;
 import java.util.UUID;
 
 @Entity
@@ -29,18 +32,18 @@ public class ChatMessage {
     @Column(name = "session_id", nullable = false)
     private UUID sessionId;
 
+    @Column(name = "sequence_number", nullable = false)
+    private Integer sequenceNumber;
+
     @Column(nullable = false)
     private String role;
 
     @Column(nullable = false)
     private String content;
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "jsonb")
-    private String citations;
-
-    @Column(nullable = false)
-    @Builder.Default
-    private String status = "completed";
+    private Map<String, Object> citations;
 
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
