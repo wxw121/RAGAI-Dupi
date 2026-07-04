@@ -15,18 +15,6 @@ public interface ChatMessageRepository extends JpaRepository<ChatMessage, UUID> 
             join ChatSession session on session.id = message.sessionId
             where message.sessionId = :sessionId
               and session.kbId = :kbId
-            order by message.sequenceNumber asc
-            """)
-    List<ChatMessage> findBySessionIdAndKbIdOrderBySequenceNumberAsc(
-            @Param("sessionId") UUID sessionId,
-            @Param("kbId") UUID kbId
-    );
-
-    @Query("""
-            select message from ChatMessage message
-            join ChatSession session on session.id = message.sessionId
-            where message.sessionId = :sessionId
-              and session.kbId = :kbId
               and session.tenantId = :tenantId
             order by message.sequenceNumber asc
             """)
