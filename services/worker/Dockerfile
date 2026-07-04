@@ -7,9 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_EXTRA_INDEX_URL=https://pypi.org/simple
 RUN pip install --no-cache-dir \
     --default-timeout=300 \
-    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    -i ${PIP_INDEX_URL} \
+    --extra-index-url ${PIP_EXTRA_INDEX_URL} \
     -r requirements.txt
 
 COPY app ./app
