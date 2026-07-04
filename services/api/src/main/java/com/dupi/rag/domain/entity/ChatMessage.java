@@ -39,7 +39,7 @@ public class ChatMessage {
     private Integer sequenceNumber;
 
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false)
+    @Column(nullable = false, length = 32)
     private ChatMessageRole role;
 
     @Column(nullable = false, columnDefinition = "TEXT")
