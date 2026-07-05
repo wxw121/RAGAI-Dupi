@@ -1,10 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createKnowledgeBase, deleteKnowledgeBase, getKnowledgeBase, listKnowledgeBases } from './knowledgeBase'
 import { deleteDocument, getIngestJob, listDocuments, uploadDocument } from './documents'
+import {
+  batchDeleteChatSessions,
+  createChatSession,
+  deleteChatSession,
+  getChatSession,
+  listChatSessions,
+  renameChatSession,
+} from './chatSessions'
 
 const apiClient = vi.hoisted(() => ({
   apiGet: vi.fn(),
   apiPost: vi.fn(),
+  apiPatch: vi.fn(),
   apiDelete: vi.fn(),
   apiUpload: vi.fn(),
 }))
@@ -47,5 +56,28 @@ describe('resource API wrappers', () => {
     expect(apiClient.apiUpload).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb/documents', file)
     expect(apiClient.apiDelete).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb/documents/doc')
     expect(apiClient.apiGet).toHaveBeenNthCalledWith(2, '/api/v1/knowledge-bases/kb/documents/doc/ingest-job')
+  })
+
+  it('builds chat session API paths', async () => {
+    apiClient.apiGet.mockResolvedValueOnce([{ id: 's1' }]).mockResolvedValueOnce({ session: { id: 's1' }, messages: [] })
+    apiClient.apiPost.mockResolvedValueOnce({ id: 's2' }).mockResolvedValueOnce(undefined)
+    apiClient.apiPatch.mockResolvedValue({ id: 's1', title: 'New' })
+    apiClient.apiDelete.mockResolvedValue(undefined)
+
+    await expect(listChatSessions('kb')).resolves.toEqual([{ id: 's1' }])
+    await expect(getChatSession('kb', 's1')).resolves.toEqual({ session: { id: 's1' }, messages: [] })
+    await expect(createChatSession('kb', 'Title')).resolves.toEqual({ id: 's2' })
+    await expect(renameChatSession('kb', 's1', 'New')).resolves.toEqual({ id: 's1', title: 'New' })
+    await expect(deleteChatSession('kb', 's1')).resolves.toBeUndefined()
+    await expect(batchDeleteChatSessions('kb', ['s1', 's2'])).resolves.toBeUndefined()
+
+    expect(apiClient.apiGet).toHaveBeenNthCalledWith(1, '/api/v1/knowledge-bases/kb/chat-sessions')
+    expect(apiClient.apiGet).toHaveBeenNthCalledWith(2, '/api/v1/knowledge-bases/kb/chat-sessions/s1')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(1, '/api/v1/knowledge-bases/kb/chat-sessions', { title: 'Title' })
+    expect(apiClient.apiPatch).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb/chat-sessions/s1', { title: 'New' })
+    expect(apiClient.apiDelete).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb/chat-sessions/s1')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(2, '/api/v1/knowledge-bases/kb/chat-sessions/batch-delete', {
+      sessionIds: ['s1', 's2'],
+    })
   })
 })

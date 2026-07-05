@@ -62,6 +62,29 @@ export interface ChatMessage {
   streaming?: boolean
 }
 
+export interface ChatSession {
+  id: string
+  kbId: string
+  title: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface PersistedChatMessage {
+  id: string
+  sessionId: string
+  sequenceNumber: number
+  role: 'USER' | 'ASSISTANT' | 'SYSTEM'
+  content: string
+  citations: Citation[]
+  createdAt: string
+}
+
+export interface ChatSessionDetail {
+  session: ChatSession
+  messages: PersistedChatMessage[]
+}
+
 export interface ApiError {
   error: string
   message: string

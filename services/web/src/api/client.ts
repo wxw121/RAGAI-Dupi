@@ -40,6 +40,17 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   return res.json()
 }
 
+export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  })
+  if (!res.ok) throw await parseError(res)
+  if (res.status === 204) return undefined as T
+  return res.json()
+}
+
 export async function apiDelete(path: string): Promise<void> {
   const res = await fetch(path, { method: 'DELETE' })
   if (!res.ok) throw await parseError(res)

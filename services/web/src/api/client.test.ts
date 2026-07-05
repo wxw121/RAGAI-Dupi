@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { apiDelete, apiGet, apiPost, apiUpload, checkHealth } from './client'
+import { apiDelete, apiGet, apiPatch, apiPost, apiUpload, checkHealth } from './client'
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), {
@@ -98,6 +98,18 @@ describe('api client', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: undefined,
+    })
+  })
+
+  it('sends PATCH requests and parses JSON responses', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 'x' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(apiPatch('/resource', { title: 'New' })).resolves.toEqual({ id: 'x' })
+    expect(fetchMock).toHaveBeenCalledWith('/resource', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'New' }),
     })
   })
 
