@@ -297,6 +297,7 @@ class ChatServiceTest {
         request.setSessionId(sessionId.toString());
         CountDownLatch secondRetrievalStarted = new CountDownLatch(1);
         CountDownLatch allowSecondRetrievalToFinish = new CountDownLatch(1);
+        CountDownLatch firstTokenSinkReady = new CountDownLatch(1);
         AtomicReference<Sinks.Many<String>> firstTokens = new AtomicReference<>();
         ChatService service = service(redisProps());
         when(retrievalService.retrieve(eq(kbId), any()))
@@ -310,6 +311,7 @@ class ChatServiceTest {
         when(llmClient.chatStream(anyString(), anyString())).thenAnswer(invocation -> {
             Sinks.Many<String> tokens = Sinks.many().multicast().onBackpressureBuffer();
             firstTokens.set(tokens);
+            firstTokenSinkReady.countDown();
             return tokens.asFlux();
         });
 
@@ -317,7 +319,8 @@ class ChatServiceTest {
                 .map(event -> event.event())
                 .collectList()
                 .block());
-        awaitUntilAsserted(() -> assertThat(firstTokens.get()).isNotNull());
+        awaitCompletion(firstTokenSinkReady);
+        assertThat(firstTokens.get()).isNotNull();
         CompletableFuture<List<String>> secondEvents = CompletableFuture.supplyAsync(() -> service.chatStream(kbId, request)
                 .map(event -> event.event())
                 .collectList()
@@ -518,24 +521,6 @@ class ChatServiceTest {
             Thread.currentThread().interrupt();
             throw new AssertionError(e);
         }
-    }
-
-    private static void awaitUntilAsserted(Runnable assertion) {
-        AssertionError lastFailure = null;
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(500);
-        while (System.nanoTime() < deadline) {
-            try {
-                assertion.run();
-                return;
-            } catch (AssertionError failure) {
-                lastFailure = failure;
-                Thread.yield();
-            }
-        }
-        if (lastFailure != null) {
-            throw lastFailure;
-        }
-        assertion.run();
     }
 
     @SuppressWarnings("unchecked")

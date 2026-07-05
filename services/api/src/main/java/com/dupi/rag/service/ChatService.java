@@ -14,6 +14,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.SignalType;
 import reactor.core.publisher.Sinks;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -66,7 +67,14 @@ public class ChatService {
 
         return Flux.defer(() -> {
             CancellationRegistration cancellation = new CancellationRegistration();
-            cancellationSignals.computeIfAbsent(sessionId, ignored -> ConcurrentHashMap.newKeySet()).add(cancellation);
+            cancellationSignals.compute(sessionId, (ignored, activeRegistrations) -> {
+                Set<CancellationRegistration> registrations = activeRegistrations;
+                if (registrations == null) {
+                    registrations = ConcurrentHashMap.newKeySet();
+                }
+                registrations.add(cancellation);
+                return registrations;
+            });
 
             try {
                 RetrieveRequest retrieveRequest = new RetrieveRequest();
@@ -156,6 +164,7 @@ public class ChatService {
 
     public void cancel(String sessionId) {
         AtomicBoolean emittedToActiveStream = new AtomicBoolean(false);
+        List<CancellationRegistration> registrationsToSignal = new ArrayList<>();
         cancellationSignals.computeIfPresent(sessionId, (ignored, activeRegistrations) -> {
             if (activeRegistrations.isEmpty()) {
                 return null;
@@ -164,10 +173,11 @@ public class ChatService {
             emittedToActiveStream.set(true);
             activeRegistrations.forEach(registration -> {
                 registration.cancelled.set(true);
-                registration.signal.tryEmitEmpty();
+                registrationsToSignal.add(registration);
             });
             return activeRegistrations;
         });
+        registrationsToSignal.forEach(registration -> registration.signal.tryEmitEmpty());
         if (!emittedToActiveStream.get()) {
             cancelledSessions.remove(sessionId);
         }
