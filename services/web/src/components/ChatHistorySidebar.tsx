@@ -56,7 +56,6 @@ export function ChatHistorySidebar({
       toggleSelected(sessionId)
       return
     }
-    if (streaming) return
     onSelectSession(sessionId)
   }
 
