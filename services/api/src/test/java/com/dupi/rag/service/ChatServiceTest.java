@@ -284,6 +284,84 @@ class ChatServiceTest {
     }
 
     @Test
+    void overlappingSameSessionStreamCompletionDoesNotClearCancelledRetrievalStream() throws Exception {
+        UUID kbId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
+        when(chatSessionService.findOrThrow(kbId, sessionId)).thenReturn(ChatSession.builder()
+                .id(sessionId)
+                .kbId(kbId)
+                .build());
+        ChatRequest request = new ChatRequest();
+        request.setQuery("question");
+        request.setSessionId(sessionId.toString());
+        CountDownLatch secondRetrievalStarted = new CountDownLatch(1);
+        CountDownLatch allowSecondRetrievalToFinish = new CountDownLatch(1);
+        AtomicReference<Sinks.Many<String>> firstTokens = new AtomicReference<>();
+        ChatService service = service(redisProps());
+        when(retrievalService.retrieve(eq(kbId), any()))
+                .thenReturn(RetrieveResponse.builder().hits(List.of()).build())
+                .thenAnswer(invocation -> {
+                    secondRetrievalStarted.countDown();
+                    assertThat(allowSecondRetrievalToFinish.await(Duration.ofMillis(500).toMillis(), TimeUnit.MILLISECONDS)).isTrue();
+                    return RetrieveResponse.builder().hits(List.of()).build();
+                });
+        when(retrievalService.buildContext(List.of())).thenReturn("");
+        when(llmClient.chatStream(anyString(), anyString())).thenAnswer(invocation -> {
+            Sinks.Many<String> tokens = Sinks.many().multicast().onBackpressureBuffer();
+            firstTokens.set(tokens);
+            return tokens.asFlux();
+        });
+
+        CompletableFuture<List<String>> firstEvents = CompletableFuture.supplyAsync(() -> service.chatStream(kbId, request)
+                .map(event -> event.event())
+                .collectList()
+                .block());
+        awaitUntilAsserted(() -> assertThat(firstTokens.get()).isNotNull());
+        CompletableFuture<List<String>> secondEvents = CompletableFuture.supplyAsync(() -> service.chatStream(kbId, request)
+                .map(event -> event.event())
+                .collectList()
+                .block());
+        awaitCompletion(secondRetrievalStarted);
+
+        service.cancel(sessionId.toString());
+        assertThat(firstEvents.get(1, TimeUnit.SECONDS)).containsExactly("retrieval", "done");
+        allowSecondRetrievalToFinish.countDown();
+
+        assertThat(secondEvents.get(1, TimeUnit.SECONDS)).containsExactly("retrieval", "done");
+        verify(llmClient, times(1)).chatStream(anyString(), anyString());
+        verify(chatSessionService, times(2)).saveUserMessage(kbId, sessionId, "question");
+        verify(chatSessionService, never()).saveAssistantMessage(any(), any(), anyString(), anyList());
+        assertThat(cancelledSessions(service)).doesNotContain(sessionId.toString());
+        assertThat(activeCancellationSignals(service)).doesNotContainKey(sessionId.toString());
+    }
+
+    @Test
+    void chatStreamCleansCancellationStateWhenRetrievalThrowsAfterRegistration() {
+        UUID kbId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
+        when(chatSessionService.findOrThrow(kbId, sessionId)).thenReturn(ChatSession.builder()
+                .id(sessionId)
+                .kbId(kbId)
+                .build());
+        when(retrievalService.retrieve(eq(kbId), any())).thenThrow(new IllegalStateException("retrieval down"));
+        ChatRequest request = new ChatRequest();
+        request.setQuery("question");
+        request.setSessionId(sessionId.toString());
+        ChatService service = service(redisProps());
+
+        assertThatThrownBy(() -> service.chatStream(kbId, request).collectList().block())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("retrieval down");
+
+        verify(chatSessionService, never()).saveUserMessage(any(), any(), anyString());
+        verify(llmClient, never()).chatStream(anyString(), anyString());
+        assertThat(cancelledSessions(service)).doesNotContain(sessionId.toString());
+        assertThat(activeCancellationSignals(service)).doesNotContainKey(sessionId.toString());
+    }
+
+    @Test
     void chatStreamRejectsInvalidNonblankSessionIdWithoutPersistingMessages() {
         UUID kbId = UUID.randomUUID();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
@@ -442,12 +520,30 @@ class ChatServiceTest {
         }
     }
 
+    private static void awaitUntilAsserted(Runnable assertion) {
+        AssertionError lastFailure = null;
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(500);
+        while (System.nanoTime() < deadline) {
+            try {
+                assertion.run();
+                return;
+            } catch (AssertionError failure) {
+                lastFailure = failure;
+                Thread.yield();
+            }
+        }
+        if (lastFailure != null) {
+            throw lastFailure;
+        }
+        assertion.run();
+    }
+
     @SuppressWarnings("unchecked")
-    private static Map<String, Collection<Sinks.Empty<Void>>> activeCancellationSignals(ChatService service) {
+    private static Map<String, Collection<?>> activeCancellationSignals(ChatService service) {
         try {
             Field field = ChatService.class.getDeclaredField("cancellationSignals");
             field.setAccessible(true);
-            return (Map<String, Collection<Sinks.Empty<Void>>>) field.get(service);
+            return (Map<String, Collection<?>>) field.get(service);
         } catch (ReflectiveOperationException e) {
             throw new AssertionError(e);
         }

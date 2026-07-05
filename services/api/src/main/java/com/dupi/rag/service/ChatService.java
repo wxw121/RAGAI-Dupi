@@ -19,6 +19,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -56,7 +57,7 @@ public class ChatService {
     private final ChatSessionService chatSessionService;
 
     private final Set<String> cancelledSessions = ConcurrentHashMap.newKeySet();
-    private final Map<String, Set<Sinks.Empty<Void>>> cancellationSignals = new ConcurrentHashMap<>();
+    private final Map<String, Set<CancellationRegistration>> cancellationSignals = new ConcurrentHashMap<>();
 
     public Flux<ServerSentEvent<String>> chatStream(UUID kbId, ChatRequest request) {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
@@ -64,81 +65,79 @@ public class ChatService {
         String sessionId = persistedSessionId.toString();
 
         return Flux.defer(() -> {
-        Sinks.Empty<Void> cancellationSignal = Sinks.empty();
-        cancellationSignals.computeIfAbsent(sessionId, ignored -> ConcurrentHashMap.newKeySet()).add(cancellationSignal);
+            CancellationRegistration cancellation = new CancellationRegistration();
+            cancellationSignals.computeIfAbsent(sessionId, ignored -> ConcurrentHashMap.newKeySet()).add(cancellation);
 
-        try {
-        RetrieveRequest retrieveRequest = new RetrieveRequest();
-        retrieveRequest.setQuery(request.getQuery());
-        retrieveRequest.setTopK(clampTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK()));
-        retrieveRequest.setUseRerank(request.getUseRerank());
+            try {
+                RetrieveRequest retrieveRequest = new RetrieveRequest();
+                retrieveRequest.setQuery(request.getQuery());
+                retrieveRequest.setTopK(clampTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK()));
+                retrieveRequest.setUseRerank(request.getUseRerank());
 
-        RetrieveResponse retrieval = retrievalService.retrieve(kbId, retrieveRequest);
-        List<Citation> citations = retrieval.getHits().stream()
-                .map(hit -> Citation.builder()
-                        .chunkId(hit.getChunkId())
-                        .docId(hit.getDocId())
-                        .fileName(hit.getFileName())
-                        .snippet(truncate(hit.getContent(), 200))
-                        .score(hit.getScore())
-                        .build())
-                .collect(Collectors.toList());
-
-        String context = retrievalService.buildContext(retrieval.getHits());
-        String userPrompt = "上下文：\n" + context + "\n\n问题：" + request.getQuery();
-
-        chatSessionService.saveUserMessage(kbId, persistedSessionId, request.getQuery());
-
-        Flux<ServerSentEvent<String>> retrievalEvent;
-        try {
-            retrievalEvent = Flux.just(ServerSentEvent.<String>builder()
-                    .event("retrieval")
-                    .data(objectMapper.writeValueAsString(citations))
-                    .build());
-        } catch (Exception e) {
-            retrievalEvent = Flux.empty();
-        }
-
-        StringBuilder assistantBuffer = new StringBuilder();
-        java.util.concurrent.atomic.AtomicBoolean assistantSaved = new java.util.concurrent.atomic.AtomicBoolean(false);
-        Runnable saveAssistantIfPresent = () -> {
-            if (assistantSaved.compareAndSet(false, true) && !assistantBuffer.isEmpty()) {
-                chatSessionService.saveAssistantMessage(kbId, persistedSessionId, assistantBuffer.toString(), citations);
-            }
-        };
-        Flux<ServerSentEvent<String>> tokenEvents = cancelledSessions.contains(sessionId)
-                ? Flux.empty()
-                : llmClient.chatStream(SYSTEM_PROMPT, userPrompt)
-                        .takeWhile(token -> !cancelledSessions.contains(sessionId))
-                        .takeUntilOther(cancellationSignal.asMono())
-                        .doOnNext(assistantBuffer::append)
-                        .map(token -> ServerSentEvent.<String>builder()
-                                .event("token")
-                                .data(token)
+                RetrieveResponse retrieval = retrievalService.retrieve(kbId, retrieveRequest);
+                List<Citation> citations = retrieval.getHits().stream()
+                        .map(hit -> Citation.builder()
+                                .chunkId(hit.getChunkId())
+                                .docId(hit.getDocId())
+                                .fileName(hit.getFileName())
+                                .snippet(truncate(hit.getContent(), 200))
+                                .score(hit.getScore())
                                 .build())
-                        .doOnComplete(saveAssistantIfPresent)
-                        .doOnError(ex -> saveAssistantIfPresent.run());
+                        .collect(Collectors.toList());
 
-        Flux<ServerSentEvent<String>> doneEvent = Flux.just(
-                ServerSentEvent.<String>builder().event("done").data("{\"sessionId\":\"" + sessionId + "\"}").build()
-        );
+                String context = retrievalService.buildContext(retrieval.getHits());
+                String userPrompt = "上下文：\n" + context + "\n\n问题：" + request.getQuery();
 
-        return Flux.concat(retrievalEvent, tokenEvents, doneEvent)
-                .onErrorResume(ex -> Flux.just(
-                        ServerSentEvent.<String>builder().event("error").data(ex.getMessage()).build()
-                ))
-                .doFinally(signal -> {
-                    if (signal == SignalType.CANCEL) {
-                        saveAssistantIfPresent.run();
+                chatSessionService.saveUserMessage(kbId, persistedSessionId, request.getQuery());
+
+                Flux<ServerSentEvent<String>> retrievalEvent;
+                try {
+                    retrievalEvent = Flux.just(ServerSentEvent.<String>builder()
+                            .event("retrieval")
+                            .data(objectMapper.writeValueAsString(citations))
+                            .build());
+                } catch (Exception e) {
+                    retrievalEvent = Flux.empty();
+                }
+
+                StringBuilder assistantBuffer = new StringBuilder();
+                AtomicBoolean assistantSaved = new AtomicBoolean(false);
+                Runnable saveAssistantIfPresent = () -> {
+                    if (assistantSaved.compareAndSet(false, true) && !assistantBuffer.isEmpty()) {
+                        chatSessionService.saveAssistantMessage(kbId, persistedSessionId, assistantBuffer.toString(), citations);
                     }
-                    cancelledSessions.remove(sessionId);
-                    removeCancellationSignal(sessionId, cancellationSignal);
-                });
-        } catch (Exception ex) {
-            cancelledSessions.remove(sessionId);
-            removeCancellationSignal(sessionId, cancellationSignal);
-            return Flux.error(ex);
-        }
+                };
+                Flux<ServerSentEvent<String>> tokenEvents = cancellation.cancelled.get()
+                        ? Flux.empty()
+                        : llmClient.chatStream(SYSTEM_PROMPT, userPrompt)
+                                .takeWhile(token -> !cancellation.cancelled.get())
+                                .takeUntilOther(cancellation.signal.asMono())
+                                .doOnNext(assistantBuffer::append)
+                                .map(token -> ServerSentEvent.<String>builder()
+                                        .event("token")
+                                        .data(token)
+                                        .build())
+                                .doOnComplete(saveAssistantIfPresent)
+                                .doOnError(ex -> saveAssistantIfPresent.run());
+
+                Flux<ServerSentEvent<String>> doneEvent = Flux.just(
+                        ServerSentEvent.<String>builder().event("done").data("{\"sessionId\":\"" + sessionId + "\"}").build()
+                );
+
+                return Flux.concat(retrievalEvent, tokenEvents, doneEvent)
+                        .onErrorResume(ex -> Flux.just(
+                                ServerSentEvent.<String>builder().event("error").data(ex.getMessage()).build()
+                        ))
+                        .doFinally(signal -> {
+                            if (signal == SignalType.CANCEL) {
+                                saveAssistantIfPresent.run();
+                            }
+                            removeCancellationRegistration(sessionId, cancellation);
+                        });
+            } catch (Exception ex) {
+                removeCancellationRegistration(sessionId, cancellation);
+                return Flux.error(ex);
+            }
         });
     }
 
@@ -156,15 +155,18 @@ public class ChatService {
     }
 
     public void cancel(String sessionId) {
-        java.util.concurrent.atomic.AtomicBoolean emittedToActiveStream = new java.util.concurrent.atomic.AtomicBoolean(false);
-        cancellationSignals.computeIfPresent(sessionId, (ignored, activeSignals) -> {
-            if (activeSignals.isEmpty()) {
+        AtomicBoolean emittedToActiveStream = new AtomicBoolean(false);
+        cancellationSignals.computeIfPresent(sessionId, (ignored, activeRegistrations) -> {
+            if (activeRegistrations.isEmpty()) {
                 return null;
             }
             cancelledSessions.add(sessionId);
             emittedToActiveStream.set(true);
-            activeSignals.forEach(signal -> signal.tryEmitEmpty());
-            return activeSignals;
+            activeRegistrations.forEach(registration -> {
+                registration.cancelled.set(true);
+                registration.signal.tryEmitEmpty();
+            });
+            return activeRegistrations;
         });
         if (!emittedToActiveStream.get()) {
             cancelledSessions.remove(sessionId);
@@ -172,11 +174,25 @@ public class ChatService {
         redisTemplate.convertAndSend(queueProperties.getCancelChannel(), sessionId);
     }
 
-    private void removeCancellationSignal(String sessionId, Sinks.Empty<Void> cancellationSignal) {
-        cancellationSignals.computeIfPresent(sessionId, (ignored, activeSignals) -> {
-            activeSignals.remove(cancellationSignal);
-            return activeSignals.isEmpty() ? null : activeSignals;
+    private void removeCancellationRegistration(String sessionId, CancellationRegistration cancellation) {
+        AtomicBoolean hasRemainingCancelledRegistration = new AtomicBoolean(false);
+        cancellationSignals.computeIfPresent(sessionId, (ignored, activeRegistrations) -> {
+            activeRegistrations.remove(cancellation);
+            activeRegistrations.forEach(registration -> {
+                if (registration.cancelled.get()) {
+                    hasRemainingCancelledRegistration.set(true);
+                }
+            });
+            return activeRegistrations.isEmpty() ? null : activeRegistrations;
         });
+        if (!hasRemainingCancelledRegistration.get()) {
+            cancelledSessions.remove(sessionId);
+        }
+    }
+
+    private static final class CancellationRegistration {
+        private final Sinks.Empty<Void> signal = Sinks.empty();
+        private final AtomicBoolean cancelled = new AtomicBoolean(false);
     }
 
     private String truncate(String text, int max) {
