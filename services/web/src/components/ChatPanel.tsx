@@ -1,12 +1,21 @@
-import { useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { cancelChat, streamChat } from '@/api/chat'
-import type { ChatMessage, Citation } from '@/types'
+import {
+  batchDeleteChatSessions,
+  deleteChatSession,
+  getChatSession,
+  listChatSessions,
+  renameChatSession,
+} from '@/api/chatSessions'
+import type { ChatMessage, ChatSession, Citation } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/components/Toast'
 import { Loader2, Send, Square } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { MarkdownContent } from '@/components/MarkdownContent'
+import { ChatHistorySidebar } from '@/components/ChatHistorySidebar'
+import { ChatHistoryDrawer } from '@/components/ChatHistoryDrawer'
 
 interface ChatPanelProps {
   kbId: string
@@ -34,11 +43,178 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [citations, setCitations] = useState<Citation[]>([])
+  const [sessions, setSessions] = useState<ChatSession[]>([])
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const messagesRef = useRef<ChatMessage[]>([])
+  const streamingRef = useRef(false)
   const sessionIdRef = useRef<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const { showError } = useToast()
 
   const canChat = completedDocCount > 0
+
+  useEffect(() => {
+    messagesRef.current = messages
+  }, [messages])
+
+  useEffect(() => {
+    streamingRef.current = streaming
+  }, [streaming])
+
+  const loadSessionDetail = useCallback(
+    async (sessionId: string) => {
+      const detail = await getChatSession(kbId, sessionId)
+      const persistedMessages: ChatMessage[] = detail.messages.map((message) => ({
+        id: message.id,
+        role: message.role === 'USER' ? 'user' : 'assistant',
+        content: message.content,
+        citations: message.citations,
+        streaming: false,
+      }))
+      const lastAssistant = [...detail.messages]
+        .reverse()
+        .find((message) => message.role === 'ASSISTANT' || message.role === 'SYSTEM')
+
+      setActiveSessionId(sessionId)
+      sessionIdRef.current = sessionId
+      setMessages(persistedMessages)
+      setCitations(lastAssistant?.citations ?? [])
+    },
+    [kbId],
+  )
+
+  const refreshSessions = useCallback(async () => {
+    const nextSessions = await listChatSessions(kbId)
+    setSessions(nextSessions)
+    return nextSessions
+  }, [kbId])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadSessions() {
+      try {
+        const nextSessions = await listChatSessions(kbId)
+        if (cancelled) return
+        setSessions(nextSessions)
+
+        if (
+          !sessionIdRef.current &&
+          nextSessions.length > 0 &&
+          messagesRef.current.length === 0 &&
+          !streamingRef.current
+        ) {
+          await loadSessionDetail(nextSessions[0].id)
+        }
+      } catch (e) {
+        if (!cancelled) {
+          showError(e instanceof Error ? e.message : '加载历史会话失败')
+        }
+      }
+    }
+
+    setHistoryOpen(false)
+    loadSessions()
+
+    return () => {
+      cancelled = true
+    }
+  }, [kbId, loadSessionDetail, showError])
+
+  const startNewSession = useCallback(() => {
+    if (streamingRef.current) return
+    setActiveSessionId(null)
+    sessionIdRef.current = null
+    setMessages([])
+    setCitations([])
+  }, [])
+
+  const selectSession = useCallback(
+    async (sessionId: string) => {
+      if (streamingRef.current) {
+        showError('当前回答仍在生成中，请先停止后再切换会话')
+        return
+      }
+
+      try {
+        await loadSessionDetail(sessionId)
+        setHistoryOpen(false)
+      } catch (e) {
+        showError(e instanceof Error ? e.message : '加载历史会话失败')
+      }
+    },
+    [loadSessionDetail, showError],
+  )
+
+  const renameSession = useCallback(
+    async (sessionId: string, title: string) => {
+      const nextTitle = title.trim()
+      if (!nextTitle) {
+        showError('会话标题不能为空')
+        return
+      }
+
+      try {
+        const updated = await renameChatSession(kbId, sessionId, nextTitle)
+        setSessions((prev) =>
+          prev.map((session) => (session.id === sessionId ? updated : session)),
+        )
+      } catch (e) {
+        showError(e instanceof Error ? e.message : '重命名会话失败')
+      }
+    },
+    [kbId, showError],
+  )
+
+  const loadAfterDelete = useCallback(
+    async (nextSessions: ChatSession[]) => {
+      const nextSession = nextSessions[0]
+      if (nextSession) {
+        await loadSessionDetail(nextSession.id)
+        return
+      }
+      startNewSession()
+    },
+    [loadSessionDetail, startNewSession],
+  )
+
+  const removeSession = useCallback(
+    async (sessionId: string) => {
+      try {
+        await deleteChatSession(kbId, sessionId)
+        const nextSessions = sessions.filter((session) => session.id !== sessionId)
+        setSessions(nextSessions)
+
+        if (activeSessionId === sessionId) {
+          await loadAfterDelete(nextSessions)
+        }
+      } catch (e) {
+        showError(e instanceof Error ? e.message : '删除会话失败')
+      }
+    },
+    [activeSessionId, kbId, loadAfterDelete, sessions, showError],
+  )
+
+  const removeSessions = useCallback(
+    async (sessionIds: string[]) => {
+      if (sessionIds.length === 0) return
+
+      try {
+        await batchDeleteChatSessions(kbId, sessionIds)
+        const deletedIds = new Set(sessionIds)
+        const nextSessions = sessions.filter((session) => !deletedIds.has(session.id))
+        setSessions(nextSessions)
+
+        if (activeSessionId && deletedIds.has(activeSessionId)) {
+          await loadAfterDelete(nextSessions)
+        }
+      } catch (e) {
+        showError(e instanceof Error ? e.message : '批量删除会话失败')
+      }
+    },
+    [activeSessionId, kbId, loadAfterDelete, sessions, showError],
+  )
 
   const send = async () => {
     const query = input.trim()
@@ -57,7 +233,7 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
 
     const controller = new AbortController()
     abortRef.current = controller
-    const sessionId = crypto.randomUUID()
+    const sessionId = activeSessionId
     sessionIdRef.current = sessionId
 
     try {
@@ -74,7 +250,14 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
             )
           },
           onDone: (sid) => {
-            sessionIdRef.current = sid || sessionId
+            const resolvedSessionId = sid || sessionId
+            if (resolvedSessionId) {
+              sessionIdRef.current = resolvedSessionId
+              setActiveSessionId(resolvedSessionId)
+              refreshSessions().catch((e) => {
+                showError(e instanceof Error ? e.message : '刷新历史会话失败')
+              })
+            }
             setMessages((prev) =>
               prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
             )
@@ -100,7 +283,7 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
           },
         },
         controller.signal,
-        sessionId,
+        sessionId ?? undefined,
       )
     } catch (e) {
       const formatted = formatChatError(e instanceof Error ? e.message : '问答请求失败')
@@ -124,93 +307,115 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
     setStreaming(false)
   }
 
+  const history = (
+    <ChatHistorySidebar
+      sessions={sessions}
+      activeSessionId={activeSessionId}
+      streaming={streaming}
+      onNewSession={startNewSession}
+      onSelectSession={selectSession}
+      onRenameSession={renameSession}
+      onDeleteSession={removeSession}
+      onBatchDelete={removeSessions}
+    />
+  )
+
   return (
-    <div className="flex min-w-0 gap-4">
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="mb-4 min-h-[400px] flex-1 space-y-4 overflow-y-auto overflow-x-hidden rounded-lg border bg-card p-4">
-          {messages.length === 0 && (
-            <p className="text-center text-sm text-muted-foreground">
-              {canChat
-                ? '向知识库提问，将基于已摄入的文档进行 RAG 问答'
-                : '暂无已完成摄入的文档，请先在「文档管理」上传并等待处理完成'}
-            </p>
-          )}
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={cn(
-                'flex min-w-0',
-                msg.role === 'user' ? 'justify-end' : 'justify-start',
-              )}
-            >
+    <>
+      <div className="mb-3 md:hidden">
+        <ChatHistoryDrawer open={historyOpen} onOpenChange={setHistoryOpen}>
+          {history}
+        </ChatHistoryDrawer>
+      </div>
+      <div className="flex min-w-0 gap-4">
+        <div className="hidden w-72 shrink-0 md:block">{history}</div>
+
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="mb-4 min-h-[400px] flex-1 space-y-4 overflow-y-auto overflow-x-hidden rounded-lg border bg-card p-4">
+            {messages.length === 0 && (
+              <p className="text-center text-sm text-muted-foreground">
+                {canChat
+                  ? '向知识库提问，将基于已摄入的文档进行 RAG 问答'
+                  : `暂无已完成摄入的文档，请先在“文档管理”上传并等待处理完成`}
+              </p>
+            )}
+            {messages.map((msg) => (
               <div
+                key={msg.id}
                 className={cn(
-                  'min-w-0 rounded-lg px-4 py-2 text-sm break-words [overflow-wrap:anywhere]',
-                  msg.role === 'user' ? 'max-w-[85%]' : 'max-w-[90%]',
-                  msg.role === 'user'
-                    ? 'bg-primary text-primary-foreground'
-                    : 'bg-muted',
+                  'flex min-w-0',
+                  msg.role === 'user' ? 'justify-end' : 'justify-start',
                 )}
               >
-                {msg.role === 'user' ? (
-                  <p className="whitespace-pre-wrap">{msg.content}</p>
-                ) : (
-                  <MarkdownContent content={msg.content} />
-                )}
-                {msg.streaming && (
-                  <Loader2 className="mt-1 h-3 w-3 animate-spin opacity-60" />
-                )}
+                <div
+                  className={cn(
+                    'min-w-0 rounded-lg px-4 py-2 text-sm break-words [overflow-wrap:anywhere]',
+                    msg.role === 'user' ? 'max-w-[85%]' : 'max-w-[90%]',
+                    msg.role === 'user'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-muted',
+                  )}
+                >
+                  {msg.role === 'user' ? (
+                    <p className="whitespace-pre-wrap">{msg.content}</p>
+                  ) : (
+                    <MarkdownContent content={msg.content} />
+                  )}
+                  {msg.streaming && (
+                    <Loader2 className="mt-1 h-3 w-3 animate-spin opacity-60" />
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
-
-        {!canChat && (
-          <p className="mb-2 text-sm text-amber-600">
-            需要至少 1 份已完成摄入的文档才能问答（当前 {completedDocCount} 份可用）
-          </p>
-        )}
-
-        <div className="flex gap-2">
-          <Textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={canChat ? '输入你的问题…' : '请先上传文档并等待处理完成…'}
-            rows={2}
-            disabled={streaming || !canChat}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault()
-                send()
-              }
-            }}
-          />
-          {streaming ? (
-            <Button variant="destructive" size="lg" onClick={stop}>
-              <Square className="h-4 w-4" />
-            </Button>
-          ) : (
-            <Button size="lg" onClick={send} disabled={!input.trim() || !canChat}>
-              <Send className="h-4 w-4" />
-            </Button>
-          )}
-        </div>
-      </div>
-
-      {citations.length > 0 && (
-        <aside className="w-72 shrink-0 rounded-lg border bg-card p-4">
-          <h3 className="mb-3 text-sm font-semibold">引用来源</h3>
-          <ul className="space-y-3">
-            {citations.map((c) => (
-              <li key={c.chunkId} className="text-xs">
-                <p className="font-medium text-primary">{c.fileName}</p>
-                <p className="mt-1 text-muted-foreground line-clamp-3">{c.snippet}</p>
-                <p className="mt-1 text-muted-foreground">相关度: {c.score.toFixed(3)}</p>
-              </li>
             ))}
-          </ul>
-        </aside>
-      )}
-    </div>
+          </div>
+
+          {!canChat && (
+            <p className="mb-2 text-sm text-amber-600">
+              需要至少 1 份已完成摄入的文档才能问答（当前 {completedDocCount} 份可用）
+            </p>
+          )}
+
+          <div className="flex gap-2">
+            <Textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder={canChat ? '输入你的问题…' : '请先上传文档并等待处理完成…'}
+              rows={2}
+              disabled={streaming || !canChat}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  send()
+                }
+              }}
+            />
+            {streaming ? (
+              <Button variant="destructive" size="lg" onClick={stop}>
+                <Square className="h-4 w-4" />
+              </Button>
+            ) : (
+              <Button size="lg" onClick={send} disabled={!input.trim() || !canChat}>
+                <Send className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {citations.length > 0 && (
+          <aside className="w-72 shrink-0 rounded-lg border bg-card p-4">
+            <h3 className="mb-3 text-sm font-semibold">引用来源</h3>
+            <ul className="space-y-3">
+              {citations.map((c) => (
+                <li key={c.chunkId} className="text-xs">
+                  <p className="font-medium text-primary">{c.fileName}</p>
+                  <p className="mt-1 text-muted-foreground line-clamp-3">{c.snippet}</p>
+                  <p className="mt-1 text-muted-foreground">相关度 {c.score.toFixed(3)}</p>
+                </li>
+              ))}
+            </ul>
+          </aside>
+        )}
+      </div>
+    </>
   )
 }
