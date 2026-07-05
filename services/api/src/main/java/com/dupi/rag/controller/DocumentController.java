@@ -25,6 +25,11 @@ public class DocumentController {
         return documentService.upload(kbId, file);
     }
 
+    @PostMapping(value = "/batch", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public List<DocumentResponse> uploadBatch(@PathVariable UUID kbId, @RequestParam("files") List<MultipartFile> files) {
+        return documentService.uploadBatch(kbId, files);
+    }
+
     @GetMapping
     public List<DocumentResponse> list(@PathVariable UUID kbId) {
         return documentService.listByKb(kbId);

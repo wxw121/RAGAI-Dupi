@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { getKnowledgeBase } from '@/api/knowledgeBase'
-import { getIngestJob, listDocuments, uploadDocument, deleteDocument } from '@/api/documents'
+import { deleteDocument, getIngestJob, listDocuments, uploadDocuments } from '@/api/documents'
 import type { Document, KnowledgeBase } from '@/types'
 import { AppLayout } from '@/components/AppLayout'
 import { ChatPanel } from '@/components/ChatPanel'
@@ -104,26 +104,25 @@ export function KbDetailPage() {
     onProgress?: (current: number, total: number, fileName: string) => void,
   ) => {
     if (!kbId || files.length === 0) return
+
     let succeeded = 0
     let failed = 0
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i]
-      onProgress?.(i + 1, files.length, file.name)
-      try {
-        const doc = await uploadDocument(kbId, file)
-        if (doc.status === 'FAILED') {
-          failed++
-          showError(doc.errorMessage ?? `上传失败：${file.name}`)
-          continue
-        }
-        succeeded++
-      } catch (e) {
-        failed++
-        showError(
-          e instanceof Error ? e.message : `上传失败：${file.name}`,
-        )
-      }
+    try {
+      onProgress?.(
+        1,
+        files.length,
+        files.length === 1 ? files[0].name : `${files.length} 个文件`,
+      )
+      const uploaded = await uploadDocuments(kbId, files)
+      failed = uploaded.filter((doc) => doc.status === 'FAILED').length
+      succeeded = uploaded.length - failed
+      uploaded
+        .filter((doc) => doc.status === 'FAILED')
+        .forEach((doc) => showError(doc.errorMessage ?? `上传失败：${doc.fileName}`))
+    } catch (e) {
+      failed = files.length
+      showError(e instanceof Error ? e.message : '批量上传失败')
     }
 
     await loadDocs()
@@ -131,8 +130,8 @@ export function KbDetailPage() {
     if (failed === 0) {
       showSuccess(
         files.length === 1
-          ? `${files[0].name} 上传成功，正在处理…`
-          : `成功上传 ${succeeded} 个文件，正在处理…`,
+          ? `${files[0].name} 上传成功，正在处理...`
+          : `成功上传 ${succeeded} 个文件，正在处理...`,
       )
     } else if (succeeded > 0) {
       showSuccess(`成功 ${succeeded} 个，失败 ${failed} 个`)

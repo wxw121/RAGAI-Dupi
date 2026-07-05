@@ -38,6 +38,21 @@ public class DocumentService {
     @Transactional
     public DocumentResponse upload(UUID kbId, MultipartFile file) {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
+        return upload(kb, kbId, file);
+    }
+
+    @Transactional
+    public List<DocumentResponse> uploadBatch(UUID kbId, List<MultipartFile> files) {
+        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
+        if (files == null || files.isEmpty()) {
+            throw new IllegalArgumentException("Files are empty");
+        }
+        return files.stream()
+                .map(file -> upload(kb, kbId, file))
+                .toList();
+    }
+
+    private DocumentResponse upload(KnowledgeBase kb, UUID kbId, MultipartFile file) {
         if (file.isEmpty()) {
             throw new IllegalArgumentException("File is empty");
         }

@@ -64,6 +64,14 @@ export async function apiUpload<T>(path: string, file: File): Promise<T> {
   return res.json()
 }
 
+export async function apiUploadMany<T>(path: string, files: File[]): Promise<T> {
+  const form = new FormData()
+  files.forEach((file) => form.append('files', file))
+  const res = await fetch(path, { method: 'POST', body: form })
+  if (!res.ok) throw await parseError(res)
+  return res.json()
+}
+
 export async function checkHealth(): Promise<boolean> {
   try {
     const res = await fetch('/actuator/health')

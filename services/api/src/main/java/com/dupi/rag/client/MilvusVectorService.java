@@ -4,6 +4,9 @@ import com.dupi.rag.config.MilvusProperties;
 import com.dupi.rag.config.LlmProperties;
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.grpc.DataType;
+import io.milvus.grpc.GetLoadingProgressResponse;
+import io.milvus.grpc.GetLoadStateResponse;
+import io.milvus.grpc.LoadState;
 import io.milvus.grpc.MutationResult;
 import io.milvus.grpc.SearchResults;
 import io.milvus.param.IndexType;
@@ -101,6 +104,8 @@ public class MilvusVectorService {
     }
 
     public List<SearchResult> search(UUID kbId, List<Float> queryVector, int topK) {
+        ensureSearchableCollection();
+
         List<String> outputFields = List.of("chunk_id", "doc_id", "content");
         String expr = "kb_id == \"" + kbId + "\"";
 
@@ -117,8 +122,9 @@ public class MilvusVectorService {
         R<SearchResults> response = client.search(param);
         if (response.getStatus() != R.Status.Success.getCode() || response.getData() == null) {
             if (isCollectionLoading(response.getMessage())) {
-                log.warn("Milvus collection {} is still loading; returning empty search results", properties.getCollection());
-                return List.of();
+                // Milvus 集合未加载属于检索基础设施故障，不能降级为空命中。
+                // 如果这里返回空列表，聊天层会误以为知识库缺少资料，并输出“根据现有知识库资料无法回答”。
+                throw new IllegalStateException("Milvus collection is not ready for search: " + response.getMessage());
             }
             throw new IllegalStateException("Milvus search failed: " + response.getMessage());
         }
@@ -141,6 +147,37 @@ public class MilvusVectorService {
         return results;
     }
 
+    private void ensureSearchableCollection() {
+        String collection = properties.getCollection();
+        R<GetLoadStateResponse> loadState = client.getLoadState(GetLoadStateParam.newBuilder()
+                .withCollectionName(collection)
+                .build());
+        if (loadState == null || loadState.getStatus() != R.Status.Success.getCode() || loadState.getData() == null) {
+            throw new IllegalStateException("Milvus collection is not ready for search: state=unknown progress=unknown message="
+                    + (loadState != null ? loadState.getMessage() : "empty load state response"));
+        }
+
+        LoadState state = loadState.getData().getState();
+        if (state == LoadState.LoadStateLoaded) {
+            return;
+        }
+
+        // 先查询 Milvus 的加载状态再搜索，避免集合卡在 Loading 时让 search 请求阻塞到超时。
+        // 这里暴露真实基础设施状态，方便页面和日志区分“检索不可用”和“知识库没有命中”。
+        throw new IllegalStateException("Milvus collection is not ready for search: state="
+                + state + " progress=" + loadingProgress(collection) + "%");
+    }
+
+    private long loadingProgress(String collection) {
+        R<GetLoadingProgressResponse> progress = client.getLoadingProgress(GetLoadingProgressParam.newBuilder()
+                .withCollectionName(collection)
+                .build());
+        if (progress == null || progress.getStatus() != R.Status.Success.getCode() || progress.getData() == null) {
+            return -1;
+        }
+        return progress.getData().getProgress();
+    }
+
     private boolean isCollectionLoading(String message) {
         if (message == null) {
             return false;
@@ -156,7 +193,7 @@ public class MilvusVectorService {
                 .withCollectionName(properties.getCollection())
                 .withExpr("doc_id == \"" + docId + "\"")
                 .build();
-        client.delete(param);
+        deleteIgnoringUnloadedCollection(param, "doc", docId);
     }
 
     public void deleteByKbId(UUID kbId) {
@@ -164,7 +201,63 @@ public class MilvusVectorService {
                 .withCollectionName(properties.getCollection())
                 .withExpr("kb_id == \"" + kbId + "\"")
                 .build();
-        client.delete(param);
+        deleteIgnoringUnloadedCollection(param, "kb", kbId);
+    }
+
+    private void deleteIgnoringUnloadedCollection(DeleteParam param, String scope, UUID id) {
+        if (!isCollectionLoadedForDelete(scope, id)) {
+            return;
+        }
+        try {
+            R<MutationResult> response = client.delete(param);
+            if (response != null
+                    && response.getStatus() != R.Status.Success.getCode()
+                    && isCollectionLoading(response.getMessage())) {
+                // 删除采用“业务主库优先”的容错策略：Milvus 集合处于未加载/半加载状态时，
+                // 向量残留只影响后续后台清理，不应该阻塞用户删除文档或知识库主记录。
+                log.warn("Skip Milvus vector delete because collection is not ready, scope={} id={} message={}",
+                        scope, id, response.getMessage());
+            }
+        } catch (Exception e) {
+            if (isCollectionLoading(e.getMessage())) {
+                // Milvus Java SDK 在集合未完全加载时可能直接抛异常，而不是返回失败响应。
+                // 这里把该基础设施瞬时状态降级为告警，保持删除接口对用户可用。
+                log.warn("Skip Milvus vector delete because collection is not ready, scope={} id={} message={}",
+                        scope, id, e.getMessage());
+                return;
+            }
+            throw e;
+        }
+    }
+
+    private boolean isCollectionLoadedForDelete(String scope, UUID id) {
+        try {
+            R<GetLoadStateResponse> loadState = client.getLoadState(GetLoadStateParam.newBuilder()
+                    .withCollectionName(properties.getCollection())
+                    .build());
+            if (loadState == null || loadState.getStatus() != R.Status.Success.getCode() || loadState.getData() == null) {
+                // 删除入口不能依赖 Milvus 一定可用：状态查询失败时跳过向量清理，
+                // 让文档/知识库主记录删除先完成，避免用户界面被基础设施瞬时故障卡住。
+                log.warn("Skip Milvus vector delete because load state is unavailable, scope={} id={} message={}",
+                        scope, id, loadState != null ? loadState.getMessage() : "empty load state response");
+                return false;
+            }
+
+            LoadState state = loadState.getData().getState();
+            if (state == LoadState.LoadStateLoaded) {
+                return true;
+            }
+
+            // Milvus 对未加载集合执行 delete 会等待并最终抛出 collection not fully loaded。
+            // 这里在调用 delete 前提前短路，保证存量文档删除接口快速返回。
+            log.warn("Skip Milvus vector delete because collection is not loaded, scope={} id={} state={}",
+                    scope, id, state);
+            return false;
+        } catch (Exception e) {
+            log.warn("Skip Milvus vector delete because load state check failed, scope={} id={} message={}",
+                    scope, id, e.getMessage());
+            return false;
+        }
     }
 
     public record SearchResult(String chunkId, String docId, String content, double score) {}

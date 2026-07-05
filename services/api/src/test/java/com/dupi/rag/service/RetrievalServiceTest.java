@@ -121,6 +121,158 @@ class RetrievalServiceTest {
     }
 
     @Test
+    void retrieveFallsBackToLocalChunkTextWhenMilvusIsUnavailable() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID matchingChunkId = UUID.randomUUID();
+        UUID weakChunkId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(1)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(5);
+        rag.setMaxContextChars(2000);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(llmClient.embed("asyncio 并发", "embed")).thenReturn(List.of(0.1f));
+        when(milvusVectorService.search(eq(kbId), anyList(), eq(1)))
+                .thenThrow(new IllegalStateException("Milvus collection is not ready for search"));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
+                Chunk.builder()
+                        .id(weakChunkId)
+                        .kbId(kbId)
+                        .docId(docId)
+                        .chunkIndex(0)
+                        .content("虚拟环境用于隔离项目依赖")
+                        .metadata(Map.of("heading", "venv"))
+                        .build(),
+                Chunk.builder()
+                        .id(matchingChunkId)
+                        .kbId(kbId)
+                        .docId(docId)
+                        .chunkIndex(1)
+                        .content("asyncio 可以通过 async 和 await 管理并发 I/O 任务")
+                        .metadata(Map.of("heading", "asyncio"))
+                        .build()
+        ));
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("asyncio 并发");
+
+        var response = service(rag).retrieve(kbId, request);
+
+        assertThat(response.getRetrievalMode()).isEqualTo("local_text_fallback");
+        assertThat(response.getHits()).singleElement().satisfies(hit -> {
+            assertThat(hit.getChunkId()).isEqualTo(matchingChunkId);
+            assertThat(hit.getFileName()).isEqualTo("doc.md");
+            assertThat(hit.getContent()).contains("asyncio");
+            assertThat(hit.getMetadata()).containsEntry("heading", "asyncio");
+        });
+    }
+
+    @Test
+    void retrieveLocalFallbackMatchesChineseQueryWithoutSpaces() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID matchingChunkId = UUID.randomUUID();
+        UUID otherChunkId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(3)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(5);
+        rag.setMaxContextChars(2000);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(llmClient.embed("虚拟环境怎么创建", "embed")).thenReturn(List.of(0.1f));
+        when(milvusVectorService.search(eq(kbId), anyList(), eq(3)))
+                .thenThrow(new IllegalStateException("Milvus collection is not ready for search"));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
+                Chunk.builder()
+                        .id(otherChunkId)
+                        .kbId(kbId)
+                        .docId(docId)
+                        .chunkIndex(0)
+                        .content("asyncio 使用事件循环调度协程任务")
+                        .metadata(Map.of("heading", "asyncio"))
+                        .build(),
+                Chunk.builder()
+                        .id(matchingChunkId)
+                        .kbId(kbId)
+                        .docId(docId)
+                        .chunkIndex(1)
+                        .content("可以通过 python -m venv .venv 创建虚拟环境，并隔离项目依赖")
+                        .metadata(Map.of("heading", "虚拟环境"))
+                        .build()
+        ));
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("虚拟环境怎么创建");
+
+        var response = service(rag).retrieve(kbId, request);
+
+        assertThat(response.getRetrievalMode()).isEqualTo("local_text_fallback");
+        assertThat(response.getHits()).first().satisfies(hit -> {
+            assertThat(hit.getChunkId()).isEqualTo(matchingChunkId);
+            assertThat(hit.getContent()).contains("虚拟环境");
+        });
+    }
+
+    @Test
+    void retrieveLocalFallbackReturnsEarlyChunksForOverviewQueryWhenNoTermMatches() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID firstChunkId = UUID.randomUUID();
+        UUID secondChunkId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(2)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(5);
+        rag.setMaxContextChars(2000);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(llmClient.embed("这个知识库讲了什么", "embed")).thenReturn(List.of(0.1f));
+        when(milvusVectorService.search(eq(kbId), anyList(), eq(2)))
+                .thenThrow(new IllegalStateException("Milvus collection is not ready for search"));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
+                Chunk.builder()
+                        .id(firstChunkId)
+                        .kbId(kbId)
+                        .docId(docId)
+                        .chunkIndex(0)
+                        .content("venv isolates Python project dependencies.")
+                        .metadata(Map.of("heading", "venv"))
+                        .build(),
+                Chunk.builder()
+                        .id(secondChunkId)
+                        .kbId(kbId)
+                        .docId(docId)
+                        .chunkIndex(1)
+                        .content("async and await manage concurrent I/O.")
+                        .metadata(Map.of("heading", "asyncio"))
+                        .build()
+        ));
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("这个知识库讲了什么");
+
+        var response = service(rag).retrieve(kbId, request);
+
+        assertThat(response.getRetrievalMode()).isEqualTo("local_text_fallback");
+        assertThat(response.getHits()).extracting(RetrievalHit::getChunkId)
+                .containsExactly(firstChunkId, secondChunkId);
+        assertThat(response.getHits()).extracting(RetrievalHit::getScore)
+                .containsOnly(0.1);
+    }
+
+    @Test
     void retrieveClampsTopKToMinimumOne() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { apiDelete, apiGet, apiPatch, apiPost, apiUpload, checkHealth } from './client'
+import { apiDelete, apiGet, apiPatch, apiPost, apiUpload, apiUploadMany, checkHealth } from './client'
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), {
@@ -123,6 +123,20 @@ describe('api client', () => {
     const [, init] = fetchMock.mock.calls[0]
     expect(init.method).toBe('POST')
     expect(init.body).toBeInstanceOf(FormData)
+  })
+
+  it('uploads multiple files through the batch FormData field', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse([{ uploaded: true }]))
+    vi.stubGlobal('fetch', fetchMock)
+    const files = [new File(['abc'], 'a.txt'), new File(['def'], 'b.txt')]
+
+    const result = await apiUploadMany('/upload/batch', files)
+
+    expect(result).toEqual([{ uploaded: true }])
+    const [, init] = fetchMock.mock.calls[0]
+    expect(init.method).toBe('POST')
+    expect(init.body).toBeInstanceOf(FormData)
+    expect((init.body as FormData).getAll('files')).toHaveLength(2)
   })
 
   it('checks health status and treats network failures as unhealthy', async () => {

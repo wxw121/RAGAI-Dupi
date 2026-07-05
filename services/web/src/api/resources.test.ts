@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createKnowledgeBase, deleteKnowledgeBase, getKnowledgeBase, listKnowledgeBases } from './knowledgeBase'
-import { deleteDocument, getIngestJob, listDocuments, uploadDocument } from './documents'
+import { deleteDocument, getIngestJob, listDocuments, uploadDocument, uploadDocuments } from './documents'
 import {
   batchDeleteChatSessions,
   createChatSession,
@@ -16,6 +16,7 @@ const apiClient = vi.hoisted(() => ({
   apiPatch: vi.fn(),
   apiDelete: vi.fn(),
   apiUpload: vi.fn(),
+  apiUploadMany: vi.fn(),
 }))
 
 vi.mock('./client', () => apiClient)
@@ -43,17 +44,21 @@ describe('resource API wrappers', () => {
 
   it('builds document API paths', async () => {
     const file = new File(['abc'], 'a.txt')
+    const secondFile = new File(['def'], 'b.txt')
     apiClient.apiGet.mockResolvedValueOnce([{ id: 'd1' }]).mockResolvedValueOnce({ id: 'j1' })
     apiClient.apiUpload.mockResolvedValue({ id: 'd2' })
+    apiClient.apiUploadMany.mockResolvedValue([{ id: 'd3' }])
     apiClient.apiDelete.mockResolvedValue(undefined)
 
     await expect(listDocuments('kb')).resolves.toEqual([{ id: 'd1' }])
     await expect(uploadDocument('kb', file)).resolves.toEqual({ id: 'd2' })
+    await expect(uploadDocuments('kb', [file, secondFile])).resolves.toEqual([{ id: 'd3' }])
     await expect(deleteDocument('kb', 'doc')).resolves.toBeUndefined()
     await expect(getIngestJob('kb', 'doc')).resolves.toEqual({ id: 'j1' })
 
     expect(apiClient.apiGet).toHaveBeenNthCalledWith(1, '/api/v1/knowledge-bases/kb/documents')
     expect(apiClient.apiUpload).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb/documents', file)
+    expect(apiClient.apiUploadMany).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb/documents/batch', [file, secondFile])
     expect(apiClient.apiDelete).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb/documents/doc')
     expect(apiClient.apiGet).toHaveBeenNthCalledWith(2, '/api/v1/knowledge-bases/kb/documents/doc/ingest-job')
   })

@@ -29,14 +29,18 @@ class ControllerLayerTest {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         MockMultipartFile file = new MockMultipartFile("file", "a.txt", "text/plain", "x".getBytes());
+        MockMultipartFile batchFile = new MockMultipartFile("files", "b.txt", "text/plain", "y".getBytes());
         DocumentResponse docResponse = DocumentResponse.builder().id(docId).kbId(kbId).fileName("a.txt").build();
+        DocumentResponse batchResponse = DocumentResponse.builder().id(UUID.randomUUID()).kbId(kbId).fileName("b.txt").build();
         IngestJobResponse jobResponse = IngestJobResponse.builder().docId(docId).build();
         when(documentService.upload(kbId, file)).thenReturn(docResponse);
+        when(documentService.uploadBatch(kbId, List.of(batchFile))).thenReturn(List.of(batchResponse));
         when(documentService.listByKb(kbId)).thenReturn(List.of(docResponse));
         when(documentService.get(kbId, docId)).thenReturn(docResponse);
         when(ingestJobService.getLatestByDoc(docId)).thenReturn(jobResponse);
 
         assertThat(controller.upload(kbId, file)).isSameAs(docResponse);
+        assertThat(controller.uploadBatch(kbId, List.of(batchFile))).containsExactly(batchResponse);
         assertThat(controller.list(kbId)).containsExactly(docResponse);
         assertThat(controller.get(kbId, docId)).isSameAs(docResponse);
         controller.delete(kbId, docId);

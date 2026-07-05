@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiUpload } from './client'
+import { apiDelete, apiGet, apiUpload, apiUploadMany } from './client'
 import type { Document, IngestJob } from '@/types'
 
 export function listDocuments(kbId: string): Promise<Document[]> {
@@ -7,6 +7,10 @@ export function listDocuments(kbId: string): Promise<Document[]> {
 
 export function uploadDocument(kbId: string, file: File): Promise<Document> {
   return apiUpload<Document>(`/api/v1/knowledge-bases/${kbId}/documents`, file)
+}
+
+export function uploadDocuments(kbId: string, files: File[]): Promise<Document[]> {
+  return apiUploadMany<Document[]>(`/api/v1/knowledge-bases/${kbId}/documents/batch`, files)
 }
 
 export function deleteDocument(kbId: string, docId: string): Promise<void> {

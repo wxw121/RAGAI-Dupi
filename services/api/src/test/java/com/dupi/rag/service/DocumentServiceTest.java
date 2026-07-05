@@ -6,6 +6,7 @@ import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
+import com.dupi.rag.dto.DocumentResponse;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
@@ -64,6 +65,37 @@ class DocumentServiceTest {
         verify(ingestJobRepository).save(any(IngestJob.class));
         verify(ingestJobProducer).enqueue(any(IngestJob.class), eq(kb), contains("a.md"), eq("a.md"), eq("text/markdown"));
         verify(documentRepository, atLeast(2)).save(any(Document.class));
+    }
+
+    @Test
+    void uploadBatchStoresEveryFileAfterSingleKnowledgeBaseLookup() {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).name("KB").build();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        MockMultipartFile first = new MockMultipartFile("files", "a.md", "text/markdown", "hello".getBytes());
+        MockMultipartFile second = new MockMultipartFile("files", "b.md", "text/markdown", "world".getBytes());
+
+        var responses = service().uploadBatch(kbId, List.of(first, second));
+
+        assertThat(responses).hasSize(2);
+        assertThat(responses).extracting(DocumentResponse::getStatus)
+                .containsExactly(DocumentStatus.PROCESSING, DocumentStatus.PROCESSING);
+        verify(knowledgeBaseService, times(1)).findOrThrow(kbId);
+        verify(minioStorageService).upload(contains("a.md"), any(), eq(5L), eq("text/markdown"));
+        verify(minioStorageService).upload(contains("b.md"), any(), eq(5L), eq("text/markdown"));
+        verify(ingestJobProducer, times(2)).enqueue(any(IngestJob.class), eq(kb), anyString(), anyString(), eq("text/markdown"));
+    }
+
+    @Test
+    void uploadBatchRejectsEmptyFileListBeforeStorageWork() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+
+        assertThatThrownBy(() -> service().uploadBatch(kbId, List.of()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Files are empty");
+
+        verifyNoInteractions(minioStorageService, ingestJobRepository, ingestJobProducer);
     }
 
     @Test
