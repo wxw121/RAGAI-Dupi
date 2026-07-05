@@ -98,7 +98,7 @@ export async function streamChat(
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
       },
-      body: JSON.stringify({ query, stream: true, sessionId }),
+      body: JSON.stringify(sessionId ? { query, stream: true, sessionId } : { query, stream: true }),
       signal,
     })
   } catch (e) {

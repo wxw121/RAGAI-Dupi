@@ -40,6 +40,22 @@ describe('streamChat', () => {
     }))
   })
 
+  it('omits session id for new conversations', async () => {
+    const onDone = vi.fn()
+    const fetchMock = vi.fn().mockResolvedValue(streamResponse([
+      'event: done\ndata: {"sessionId":"new-session"}\n\n',
+    ]))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await streamChat('kb', 'new question', { onDone })
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb/chat', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ query: 'new question', stream: true }),
+    }))
+    expect(onDone).toHaveBeenCalledWith('new-session')
+  })
+
   it('preserves multiline data payloads and finalizes when done is missing', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamResponse([
       'event: token\ndata: 第一行\ndata: 第二行',
