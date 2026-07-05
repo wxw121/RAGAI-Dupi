@@ -60,6 +60,14 @@ public class ChatService {
 
     public Flux<ServerSentEvent<String>> chatStream(UUID kbId, ChatRequest request) {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
+        UUID persistedSessionId = resolveSessionId(kbId, request);
+        String sessionId = persistedSessionId.toString();
+
+        return Flux.defer(() -> {
+        Sinks.Empty<Void> cancellationSignal = Sinks.empty();
+        cancellationSignals.computeIfAbsent(sessionId, ignored -> ConcurrentHashMap.newKeySet()).add(cancellationSignal);
+
+        try {
         RetrieveRequest retrieveRequest = new RetrieveRequest();
         retrieveRequest.setQuery(request.getQuery());
         retrieveRequest.setTopK(clampTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK()));
@@ -79,8 +87,6 @@ public class ChatService {
         String context = retrievalService.buildContext(retrieval.getHits());
         String userPrompt = "上下文：\n" + context + "\n\n问题：" + request.getQuery();
 
-        UUID persistedSessionId = resolveSessionId(kbId, request);
-        String sessionId = persistedSessionId.toString();
         chatSessionService.saveUserMessage(kbId, persistedSessionId, request.getQuery());
 
         Flux<ServerSentEvent<String>> retrievalEvent;
@@ -100,19 +106,18 @@ public class ChatService {
                 chatSessionService.saveAssistantMessage(kbId, persistedSessionId, assistantBuffer.toString(), citations);
             }
         };
-        Sinks.Empty<Void> cancellationSignal = Sinks.empty();
-        cancellationSignals.computeIfAbsent(sessionId, ignored -> ConcurrentHashMap.newKeySet()).add(cancellationSignal);
-
-        Flux<ServerSentEvent<String>> tokenEvents = llmClient.chatStream(SYSTEM_PROMPT, userPrompt)
-                .takeWhile(token -> !cancelledSessions.contains(sessionId))
-                .takeUntilOther(cancellationSignal.asMono())
-                .doOnNext(assistantBuffer::append)
-                .map(token -> ServerSentEvent.<String>builder()
-                        .event("token")
-                        .data(token)
-                        .build())
-                .doOnComplete(saveAssistantIfPresent)
-                .doOnError(ex -> saveAssistantIfPresent.run());
+        Flux<ServerSentEvent<String>> tokenEvents = cancelledSessions.contains(sessionId)
+                ? Flux.empty()
+                : llmClient.chatStream(SYSTEM_PROMPT, userPrompt)
+                        .takeWhile(token -> !cancelledSessions.contains(sessionId))
+                        .takeUntilOther(cancellationSignal.asMono())
+                        .doOnNext(assistantBuffer::append)
+                        .map(token -> ServerSentEvent.<String>builder()
+                                .event("token")
+                                .data(token)
+                                .build())
+                        .doOnComplete(saveAssistantIfPresent)
+                        .doOnError(ex -> saveAssistantIfPresent.run());
 
         Flux<ServerSentEvent<String>> doneEvent = Flux.just(
                 ServerSentEvent.<String>builder().event("done").data("{\"sessionId\":\"" + sessionId + "\"}").build()
@@ -129,6 +134,12 @@ public class ChatService {
                     cancelledSessions.remove(sessionId);
                     removeCancellationSignal(sessionId, cancellationSignal);
                 });
+        } catch (Exception ex) {
+            cancelledSessions.remove(sessionId);
+            removeCancellationSignal(sessionId, cancellationSignal);
+            return Flux.error(ex);
+        }
+        });
     }
 
     public String chat(UUID kbId, ChatRequest request) {

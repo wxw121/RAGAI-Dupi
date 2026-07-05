@@ -22,6 +22,7 @@ import reactor.core.publisher.Sinks;
 import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.Collection;
+import java.util.concurrent.CompletableFuture;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -245,11 +246,47 @@ class ChatServiceTest {
     }
 
     @Test
+    void cancelDuringRetrievalPreventsLaterLlmStreaming() throws Exception {
+        UUID kbId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
+        when(chatSessionService.findOrThrow(kbId, sessionId)).thenReturn(ChatSession.builder()
+                .id(sessionId)
+                .kbId(kbId)
+                .build());
+        ChatRequest request = new ChatRequest();
+        request.setQuery("question");
+        request.setSessionId(sessionId.toString());
+        CountDownLatch retrievalStarted = new CountDownLatch(1);
+        CountDownLatch allowRetrievalToFinish = new CountDownLatch(1);
+        ChatService service = service(redisProps());
+        when(retrievalService.retrieve(eq(kbId), any())).thenAnswer(invocation -> {
+            retrievalStarted.countDown();
+            assertThat(allowRetrievalToFinish.await(Duration.ofMillis(500).toMillis(), TimeUnit.MILLISECONDS)).isTrue();
+            return RetrieveResponse.builder().hits(List.of()).build();
+        });
+        when(retrievalService.buildContext(List.of())).thenReturn("");
+        CompletableFuture<List<String>> events = CompletableFuture.supplyAsync(() -> service.chatStream(kbId, request)
+                .map(event -> event.event())
+                .collectList()
+                .block());
+        awaitCompletion(retrievalStarted);
+        service.cancel(sessionId.toString());
+        allowRetrievalToFinish.countDown();
+
+        assertThat(events.get(1, TimeUnit.SECONDS)).containsExactly("retrieval", "done");
+        verify(llmClient, never()).chatStream(anyString(), anyString());
+        verify(chatSessionService).saveUserMessage(kbId, sessionId, "question");
+        verify(chatSessionService, never()).saveAssistantMessage(any(), any(), anyString(), anyList());
+        verify(redisTemplate).convertAndSend("cancel-channel", sessionId.toString());
+        assertThat(cancelledSessions(service)).doesNotContain(sessionId.toString());
+        assertThat(activeCancellationSignals(service)).doesNotContainKey(sessionId.toString());
+    }
+
+    @Test
     void chatStreamRejectsInvalidNonblankSessionIdWithoutPersistingMessages() {
         UUID kbId = UUID.randomUUID();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
-        when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder().hits(List.of()).build());
-        when(retrievalService.buildContext(List.of())).thenReturn("");
         ChatRequest request = new ChatRequest();
         request.setQuery("闂");
         request.setSessionId("not-a-uuid");
