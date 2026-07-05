@@ -49,7 +49,10 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
   const messagesRef = useRef<ChatMessage[]>([])
   const streamingRef = useRef(false)
   const sessionIdRef = useRef<string | null>(null)
+  const kbIdRef = useRef(kbId)
   const abortRef = useRef<AbortController | null>(null)
+  const detailRequestIdRef = useRef(0)
+  const streamRunIdRef = useRef(0)
   const { showError } = useToast()
 
   const canChat = completedDocCount > 0
@@ -62,9 +65,24 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
     streamingRef.current = streaming
   }, [streaming])
 
+  useEffect(() => {
+    kbIdRef.current = kbId
+  }, [kbId])
+
   const loadSessionDetail = useCallback(
     async (sessionId: string) => {
+      const requestId = detailRequestIdRef.current + 1
+      detailRequestIdRef.current = requestId
+      const requestedKbId = kbId
+      const requestedSessionId = sessionId
       const detail = await getChatSession(kbId, sessionId)
+      if (
+        detailRequestIdRef.current !== requestId ||
+        requestedKbId !== kbIdRef.current ||
+        requestedSessionId !== sessionId
+      ) {
+        return false
+      }
       const persistedMessages: ChatMessage[] = detail.messages.map((message) => ({
         id: message.id,
         role: message.role === 'USER' ? 'user' : 'assistant',
@@ -80,15 +98,10 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
       sessionIdRef.current = sessionId
       setMessages(persistedMessages)
       setCitations(lastAssistant?.citations ?? [])
+      return true
     },
     [kbId],
   )
-
-  const refreshSessions = useCallback(async () => {
-    const nextSessions = await listChatSessions(kbId)
-    setSessions(nextSessions)
-    return nextSessions
-  }, [kbId])
 
   useEffect(() => {
     let cancelled = false
@@ -138,8 +151,10 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
       }
 
       try {
-        await loadSessionDetail(sessionId)
-        setHistoryOpen(false)
+        const loaded = await loadSessionDetail(sessionId)
+        if (loaded) {
+          setHistoryOpen(false)
+        }
       } catch (e) {
         showError(e instanceof Error ? e.message : '加载历史会话失败')
       }
@@ -149,6 +164,11 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
 
   const renameSession = useCallback(
     async (sessionId: string, title: string) => {
+      if (streamingRef.current) {
+        showError('当前回答仍在生成中，请先停止后再重命名会话')
+        return
+      }
+
       const nextTitle = title.trim()
       if (!nextTitle) {
         showError('会话标题不能为空')
@@ -181,6 +201,11 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
 
   const removeSession = useCallback(
     async (sessionId: string) => {
+      if (streamingRef.current) {
+        showError('当前回答仍在生成中，请先停止后再删除会话')
+        return
+      }
+
       try {
         await deleteChatSession(kbId, sessionId)
         const nextSessions = sessions.filter((session) => session.id !== sessionId)
@@ -199,6 +224,10 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
   const removeSessions = useCallback(
     async (sessionIds: string[]) => {
       if (sessionIds.length === 0) return
+      if (streamingRef.current) {
+        showError('当前回答仍在生成中，请先停止后再批量删除会话')
+        return
+      }
 
       try {
         await batchDeleteChatSessions(kbId, sessionIds)
@@ -230,9 +259,13 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
     setInput('')
     setStreaming(true)
     setCitations([])
+    detailRequestIdRef.current += 1
 
     const controller = new AbortController()
     abortRef.current = controller
+    const runId = streamRunIdRef.current + 1
+    streamRunIdRef.current = runId
+    const isCurrentStream = () => streamRunIdRef.current === runId
     const sessionId = activeSessionId
     sessionIdRef.current = sessionId
 
@@ -241,8 +274,12 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
         kbId,
         query,
         {
-          onRetrieval: (cits) => setCitations(cits),
+          onRetrieval: (cits) => {
+            if (!isCurrentStream()) return
+            setCitations(cits)
+          },
           onToken: (token) => {
+            if (!isCurrentStream()) return
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantId ? { ...m, content: m.content + token } : m,
@@ -250,13 +287,20 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
             )
           },
           onDone: (sid) => {
+            if (!isCurrentStream()) return
             const resolvedSessionId = sid || sessionId
             if (resolvedSessionId) {
               sessionIdRef.current = resolvedSessionId
               setActiveSessionId(resolvedSessionId)
-              refreshSessions().catch((e) => {
-                showError(e instanceof Error ? e.message : '刷新历史会话失败')
-              })
+              listChatSessions(kbId)
+                .then((nextSessions) => {
+                  if (!isCurrentStream()) return
+                  setSessions(nextSessions)
+                })
+                .catch((e) => {
+                  if (!isCurrentStream()) return
+                  showError(e instanceof Error ? e.message : '刷新历史会话失败')
+                })
             }
             setMessages((prev) =>
               prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
@@ -264,6 +308,7 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
             setStreaming(false)
           },
           onError: (msg) => {
+            if (!isCurrentStream()) return
             const formatted = formatChatError(msg)
             showError(formatted)
             setMessages((prev) =>
@@ -276,6 +321,7 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
             setStreaming(false)
           },
           onAbort: () => {
+            if (!isCurrentStream()) return
             setMessages((prev) =>
               prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
             )
@@ -286,6 +332,7 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
         sessionId ?? undefined,
       )
     } catch (e) {
+      if (!isCurrentStream()) return
       const formatted = formatChatError(e instanceof Error ? e.message : '问答请求失败')
       showError(formatted)
       setMessages((prev) =>
@@ -300,10 +347,16 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
   }
 
   const stop = async () => {
+    streamRunIdRef.current += 1
     abortRef.current?.abort()
     if (sessionIdRef.current) {
       await cancelChat(kbId, sessionIdRef.current)
     }
+    setMessages((prev) =>
+      prev.map((message) =>
+        message.streaming ? { ...message, streaming: false } : message,
+      ),
+    )
     setStreaming(false)
   }
 
