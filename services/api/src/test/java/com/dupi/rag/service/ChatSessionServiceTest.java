@@ -27,6 +27,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -41,12 +43,14 @@ class ChatSessionServiceTest {
     ChatSessionRepository sessionRepository;
     @Mock
     ChatMessageRepository messageRepository;
+    @Mock
+    AuditLogService auditLogService;
 
     ChatSessionService service;
 
     @BeforeEach
     void setUp() {
-        service = new ChatSessionService(knowledgeBaseService, sessionRepository, messageRepository);
+        service = new ChatSessionService(knowledgeBaseService, sessionRepository, messageRepository, auditLogService);
     }
 
     @Test
@@ -92,11 +96,15 @@ class ChatSessionServiceTest {
         UUID kbId = UUID.randomUUID();
         Instant old = Instant.parse("2026-01-01T00:00:00Z");
         Instant recent = Instant.parse("2026-01-02T00:00:00Z");
+        ChatSession recentSession = session(kbId, "Recent", recent);
+        ChatSession oldSession = session(kbId, "Old", old);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
         when(sessionRepository.findByKbIdAndTenantIdOrderByUpdatedAtDesc(kbId, "default")).thenReturn(List.of(
-                session(kbId, "Recent", recent),
-                session(kbId, "Old", old)
+                recentSession,
+                oldSession
         ));
+        when(messageRepository.existsBySessionId(recentSession.getId())).thenReturn(true);
+        when(messageRepository.existsBySessionId(oldSession.getId())).thenReturn(true);
 
         var responses = service.list(kbId);
 
@@ -104,6 +112,22 @@ class ChatSessionServiceTest {
         verify(sessionRepository).findByKbIdAndTenantIdOrderByUpdatedAtDesc(kbId, "default");
         assertThat(responses).extracting("title").containsExactly("Recent", "Old");
         assertThat(responses).extracting("updatedAt").containsExactly(recent, old);
+    }
+
+    @Test
+    void listHidesSessionsWithoutPersistedMessages() {
+        UUID kbId = UUID.randomUUID();
+        ChatSession withMessages = session(kbId, "With messages", Instant.parse("2026-01-02T00:00:00Z"));
+        ChatSession empty = session(kbId, "Empty", Instant.parse("2026-01-03T00:00:00Z"));
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(sessionRepository.findByKbIdAndTenantIdOrderByUpdatedAtDesc(kbId, "default"))
+                .thenReturn(List.of(empty, withMessages));
+        when(messageRepository.existsBySessionId(empty.getId())).thenReturn(false);
+        when(messageRepository.existsBySessionId(withMessages.getId())).thenReturn(true);
+
+        var responses = service.list(kbId);
+
+        assertThat(responses).extracting("title").containsExactly("With messages");
     }
 
     @Test
@@ -144,6 +168,45 @@ class ChatSessionServiceTest {
     }
 
     @Test
+    void messageResponseMapsUuidObjectsStringScoresAndNullCitationFields() {
+        UUID sessionId = UUID.randomUUID();
+        UUID chunkId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        ChatMessage message = message(sessionId, 1, ChatMessageRole.ASSISTANT, "answer", Map.of(
+                "items", List.of(Map.of(
+                        "chunkId", chunkId,
+                        "docId", docId,
+                        "score", "0.42"
+                ))
+        ));
+
+        var response = service.toMessageResponse(message);
+
+        assertThat(response.getCitations()).singleElement().satisfies(citation -> {
+            assertThat(citation.getChunkId()).isEqualTo(chunkId);
+            assertThat(citation.getDocId()).isEqualTo(docId);
+            assertThat(citation.getFileName()).isNull();
+            assertThat(citation.getSnippet()).isNull();
+            assertThat(citation.getScore()).isEqualTo(0.42);
+        });
+    }
+
+    @Test
+    void messageResponseRejectsMalformedCitationSnapshots() {
+        UUID sessionId = UUID.randomUUID();
+
+        ChatMessage nonListItems = message(sessionId, 1, ChatMessageRole.ASSISTANT, "answer", Map.of("items", "bad"));
+        assertThatThrownBy(() -> service.toMessageResponse(nonListItems))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("items must be a list");
+
+        ChatMessage nonObjectItem = message(sessionId, 2, ChatMessageRole.ASSISTANT, "answer", Map.of("items", List.of("bad")));
+        assertThatThrownBy(() -> service.toMessageResponse(nonObjectItem))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("item must be an object");
+    }
+
+    @Test
     void renameRejectsBlankTitleAndSavesTrimmedValidTitle() {
         UUID kbId = UUID.randomUUID();
         UUID sessionId = UUID.randomUUID();
@@ -180,6 +243,12 @@ class ChatSessionServiceTest {
 
         verify(sessionRepository).delete(first);
         verify(sessionRepository).deleteAll(List.of(first, second));
+        verify(auditLogService).recordSuccess(
+                eq("CHAT_SESSION_BATCH_DELETE"),
+                eq("KNOWLEDGE_BASE"),
+                eq(kbId),
+                contains("2 chat session")
+        );
     }
 
     @Test
@@ -231,6 +300,22 @@ class ChatSessionServiceTest {
         });
         verify(sessionRepository, times(2)).findByIdAndKbIdAndTenantIdForUpdate(sessionId, kbId, "default");
         verify(sessionRepository, times(2)).save(session);
+    }
+
+    @Test
+    void saveAssistantMessagePersistsEmptySnapshotWhenCitationsAreMissing() {
+        UUID kbId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+        ChatSession session = session(kbId, sessionId, "Chat");
+        when(sessionRepository.findByIdAndKbIdAndTenantIdForUpdate(sessionId, kbId, "default")).thenReturn(Optional.of(session));
+        when(messageRepository.findMaxSequenceNumberBySessionId(sessionId)).thenReturn(Optional.of(2));
+        when(messageRepository.save(any(ChatMessage.class))).thenAnswer(invocation -> persistedMessage(invocation.getArgument(0)));
+        when(sessionRepository.save(any(ChatSession.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        var assistantMessage = service.saveAssistantMessage(kbId, sessionId, "answer", List.of());
+
+        assertThat(assistantMessage.getSequenceNumber()).isEqualTo(3);
+        assertThat(assistantMessage.getCitations()).containsEntry("items", List.of());
     }
 
     @Test

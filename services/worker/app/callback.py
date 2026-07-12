@@ -21,6 +21,9 @@ def download_object(object_key: str, dest_path: str):
 
 
 def post_status(payload: dict):
+    headers = {}
+    if settings.dupi_internal_key:
+        headers["X-Dupi-Internal-Key"] = settings.dupi_internal_key
     with httpx.Client(base_url=settings.api_base_url, timeout=60.0) as client:
-        response = client.post("/api/v1/internal/ingest/status", json=payload)
+        response = client.post("/api/v1/internal/ingest/status", json=payload, headers=headers)
         response.raise_for_status()

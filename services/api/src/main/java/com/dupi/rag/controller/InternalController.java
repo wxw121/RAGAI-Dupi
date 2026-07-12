@@ -22,7 +22,7 @@ public class InternalController {
 
     @GetMapping("/knowledge-bases/{kbId}/chunks")
     public List<Map<String, Object>> listChunks(@PathVariable UUID kbId) {
-        knowledgeBaseService.findOrThrow(kbId);
+        knowledgeBaseService.findSystemOrThrow(kbId);
         var fileNames = documentRepository.findByKbIdOrderByCreatedAtDesc(kbId).stream()
                 .collect(Collectors.toMap(d -> d.getId(), d -> d.getFileName()));
 

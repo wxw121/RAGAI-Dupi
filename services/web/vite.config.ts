@@ -1,13 +1,20 @@
 /// <reference types="vitest" />
 import path from 'path'
+import { webcrypto } from 'crypto'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+
+// Node 16 本地验证环境的 globalThis.crypto 可能存在但缺少 getRandomValues。
+if (typeof globalThis.crypto?.getRandomValues !== 'function') {
+  globalThis.crypto = webcrypto as unknown as typeof globalThis.crypto
+}
 
 export default defineConfig({
   plugins: [react()],
   test: {
     environment: 'jsdom',
     globals: true,
+    setupFiles: ['./src/test/setup.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json-summary', 'lcov'],

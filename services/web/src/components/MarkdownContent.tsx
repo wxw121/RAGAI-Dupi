@@ -6,6 +6,7 @@ import { normalizeMarkdown } from '@/lib/normalizeMarkdown'
 
 interface MarkdownContentProps {
   content: string
+  compact?: boolean
 }
 
 const markdownComponents: Components = {
@@ -47,22 +48,30 @@ const markdownComponents: Components = {
   },
 }
 
-export function MarkdownContent({ content }: MarkdownContentProps) {
+export function MarkdownContent({ content, compact = false }: MarkdownContentProps) {
   if (!content) return null
 
   const normalized = normalizeMarkdown(content)
-
-  return (
-    <div
-      className="w-full min-w-0 max-w-full break-words [overflow-wrap:anywhere]
+  const className = compact
+    ? `w-full min-w-0 max-w-full break-words [overflow-wrap:anywhere]
+        prose prose-sm max-w-full text-xs
+        prose-headings:my-1 prose-headings:text-xs prose-headings:font-semibold
+        prose-p:my-0 prose-p:text-xs prose-ul:my-0 prose-ol:my-0 prose-li:my-0
+        prose-table:my-1 prose-table:text-xs prose-th:px-1 prose-th:py-0.5 prose-td:px-1 prose-td:py-0.5
+        prose-pre:my-1 prose-pre:bg-slate-900 prose-pre:text-slate-100
+        prose-code:before:content-none prose-code:after:content-none
+        prose-code:bg-slate-200/60 prose-code:px-1 prose-code:rounded`
+    : `w-full min-w-0 max-w-full break-words [overflow-wrap:anywhere]
         prose prose-sm max-w-full
         prose-headings:font-semibold prose-headings:break-words
         prose-p:my-2 prose-p:text-sm prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5
         prose-table:my-3 prose-table:text-xs prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1
         prose-pre:my-3 prose-pre:bg-slate-900 prose-pre:text-slate-100
         prose-code:before:content-none prose-code:after:content-none
-        prose-code:bg-slate-200/60 prose-code:px-1 prose-code:rounded"
-    >
+        prose-code:bg-slate-200/60 prose-code:px-1 prose-code:rounded`
+
+  return (
+    <div className={className}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
         components={markdownComponents}

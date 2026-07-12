@@ -85,6 +85,10 @@ class RetrievalServiceTest {
         var response = service(rag).retrieve(kbId, request);
 
         assertThat(response.getRetrievalMode()).isEqualTo("vector");
+        assertThat(response.getDiagnostics()).containsEntry("hitCount", 1)
+                .containsEntry("topK", 50)
+                .containsEntry("embeddingModel", "embed")
+                .containsEntry("embeddingDimension", 1536);
         assertThat(response.getHits()).hasSize(1);
         assertThat(response.getHits().get(0).getFileName()).isEqualTo("doc.md");
         assertThat(response.getHits().get(0).getMetadata()).containsEntry("heading", "H");
@@ -164,11 +168,55 @@ class RetrievalServiceTest {
         var response = service(rag).retrieve(kbId, request);
 
         assertThat(response.getRetrievalMode()).isEqualTo("local_text_fallback");
+        assertThat(response.getDiagnostics()).containsEntry("fallbackReason", "milvus_unavailable")
+                .containsEntry("hitCount", 1);
         assertThat(response.getHits()).singleElement().satisfies(hit -> {
             assertThat(hit.getChunkId()).isEqualTo(matchingChunkId);
             assertThat(hit.getFileName()).isEqualTo("doc.md");
             assertThat(hit.getContent()).contains("asyncio");
             assertThat(hit.getMetadata()).containsEntry("heading", "asyncio");
+        });
+    }
+
+    @Test
+    void retrieveFallsBackToLocalChunkTextWhenMilvusSearchHasTimestampLag() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID chunkId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(1)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(5);
+        rag.setMaxContextChars(2000);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(llmClient.embed("本地兜底检索", "embed")).thenReturn(List.of(0.1f));
+        when(milvusVectorService.search(eq(kbId), anyList(), eq(1)))
+                .thenThrow(new IllegalStateException("Milvus search failed: fail to search on QueryNode 7: Timestamp lag too large"));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
+                Chunk.builder()
+                        .id(chunkId)
+                        .kbId(kbId)
+                        .docId(docId)
+                        .chunkIndex(0)
+                        .content("这是可用于本地兜底检索的知识库片段")
+                        .metadata(Map.of())
+                        .build()
+        ));
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("本地兜底检索");
+
+        var response = service(rag).retrieve(kbId, request);
+
+        assertThat(response.getRetrievalMode()).isEqualTo("local_text_fallback");
+        assertThat(response.getDiagnostics()).containsEntry("fallbackReason", "milvus_unavailable");
+        assertThat(response.getHits()).singleElement().satisfies(hit -> {
+            assertThat(hit.getChunkId()).isEqualTo(chunkId);
+            assertThat(hit.getContent()).contains("本地兜底检索");
         });
     }
 

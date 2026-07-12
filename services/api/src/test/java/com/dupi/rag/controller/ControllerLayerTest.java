@@ -2,24 +2,75 @@ package com.dupi.rag.controller;
 
 import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;
+import com.dupi.rag.config.ApiSecurityProperties;
+import com.dupi.rag.config.ApiTokenService;
 import com.dupi.rag.dto.*;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.service.*;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;
 
 class ControllerLayerTest {
+
+    @Test
+    void authControllerIssuesSignedTokenAndRejectsInvalidCredentials() {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        properties.setAuthSecret("test-secret");
+        properties.setTokenTtlSeconds(60);
+        properties.getUsers().add(user("admin", "pw", "ops", "ADMIN"));
+        ApiTokenService tokenService = new ApiTokenService(
+                properties,
+                Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC)
+        );
+        AuthController controller = new AuthController(tokenService);
+        LoginRequest request = new LoginRequest();
+        request.setUsername("admin");
+        request.setPassword("pw");
+
+        MockHttpServletResponse servletResponse = new MockHttpServletResponse();
+        LoginResponse response = controller.login(request, servletResponse);
+
+        assertThat(response.getUsername()).isEqualTo("admin");
+        assertThat(response.getTenantId()).isEqualTo("ops");
+        assertThat(response.getRole()).isEqualTo("ADMIN");
+        assertThat(response.getExpiresAt()).isEqualTo(Instant.parse("2026-07-06T00:01:00Z"));
+        assertThat(response.getToken()).isNull();
+        assertThat(response.getCsrfToken()).isNotBlank();
+        assertThat(servletResponse.getHeaders("Set-Cookie")).anySatisfy(cookie -> {
+            assertThat(cookie).contains("DUPI_AUTH=");
+            assertThat(cookie).contains("HttpOnly");
+            assertThat(cookie).contains("SameSite=Lax");
+        }).anySatisfy(cookie -> {
+            assertThat(cookie).contains("DUPI_CSRF=");
+            assertThat(cookie).contains("SameSite=Lax");
+            assertThat(cookie).doesNotContain("HttpOnly");
+        });
+
+        LoginRequest invalid = new LoginRequest();
+        invalid.setUsername("admin");
+        invalid.setPassword("bad");
+        assertThatThrownBy(() -> controller.login(invalid, new MockHttpServletResponse()))
+                .isInstanceOf(ResponseStatusException.class)
+                .extracting("statusCode")
+                .isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
 
     @Test
     void documentControllerDelegatesAllRoutesAndValidatesIngestJobOwnership() {
@@ -32,15 +83,25 @@ class ControllerLayerTest {
         MockMultipartFile batchFile = new MockMultipartFile("files", "b.txt", "text/plain", "y".getBytes());
         DocumentResponse docResponse = DocumentResponse.builder().id(docId).kbId(kbId).fileName("a.txt").build();
         DocumentResponse batchResponse = DocumentResponse.builder().id(UUID.randomUUID()).kbId(kbId).fileName("b.txt").build();
+        BatchDocumentUploadResponse batchUploadResponse = BatchDocumentUploadResponse.builder()
+                .total(1)
+                .succeeded(1)
+                .failed(0)
+                .results(List.of(BatchDocumentUploadResult.builder()
+                        .fileName("b.txt")
+                        .success(true)
+                        .document(batchResponse)
+                        .build()))
+                .build();
         IngestJobResponse jobResponse = IngestJobResponse.builder().docId(docId).build();
         when(documentService.upload(kbId, file)).thenReturn(docResponse);
-        when(documentService.uploadBatch(kbId, List.of(batchFile))).thenReturn(List.of(batchResponse));
+        when(documentService.uploadBatch(kbId, List.of(batchFile))).thenReturn(batchUploadResponse);
         when(documentService.listByKb(kbId)).thenReturn(List.of(docResponse));
         when(documentService.get(kbId, docId)).thenReturn(docResponse);
         when(ingestJobService.getLatestByDoc(docId)).thenReturn(jobResponse);
 
         assertThat(controller.upload(kbId, file)).isSameAs(docResponse);
-        assertThat(controller.uploadBatch(kbId, List.of(batchFile))).containsExactly(batchResponse);
+        assertThat(controller.uploadBatch(kbId, List.of(batchFile))).isSameAs(batchUploadResponse);
         assertThat(controller.list(kbId)).containsExactly(docResponse);
         assertThat(controller.get(kbId, docId)).isSameAs(docResponse);
         controller.delete(kbId, docId);
@@ -93,6 +154,7 @@ class ControllerLayerTest {
         KnowledgeBaseResponse kbResponse = KnowledgeBaseResponse.builder().id(kbId).name("KB").build();
         RetrieveResponse retrieveResponse = RetrieveResponse.builder().query("q").hits(List.of()).build();
         IngestJobResponse jobResponse = IngestJobResponse.builder().kbId(kbId).build();
+        IngestJobResponse retryResponse = IngestJobResponse.builder().id(UUID.randomUUID()).kbId(kbId).build();
         ChatSessionResponse sessionResponse = ChatSessionResponse.builder().id(sessionId).kbId(kbId).title("Session").build();
         ChatSessionDetailResponse sessionDetail = ChatSessionDetailResponse.builder()
                 .session(sessionResponse)
@@ -105,10 +167,12 @@ class ControllerLayerTest {
         when(chatService.chatStream(kbId, streamChat)).thenReturn(Flux.just(ServerSentEvent.<String>builder().event("done").data("{}").build()));
         when(chatService.chat(kbId, syncChat)).thenReturn("answer");
         when(ingestJobService.listByKb(kbId)).thenReturn(List.of(jobResponse));
+        when(ingestJobService.retryForKnowledgeBase(kbId, retryResponse.getId())).thenReturn(retryResponse);
         when(chatSessionService.list(kbId)).thenReturn(List.of(sessionResponse));
         when(chatSessionService.create(kbId, createSession)).thenReturn(sessionResponse);
         when(chatSessionService.getDetail(kbId, sessionId)).thenReturn(sessionDetail);
         when(chatSessionService.rename(kbId, sessionId, renameSession)).thenReturn(sessionResponse);
+        when(ingestJobService.reindexKnowledgeBase(kbId)).thenReturn(List.of(jobResponse));
 
         assertThat(controller.create(create)).isSameAs(kbResponse);
         assertThat(controller.list()).containsExactly(kbResponse);
@@ -120,6 +184,8 @@ class ControllerLayerTest {
         assertThat(controller.cancelChat(Map.of("sessionId", "s1"))).containsEntry("status", "cancel_requested");
         assertThat(controller.cancelChat(Map.of())).containsEntry("status", "cancel_requested");
         assertThat(controller.listJobs(kbId)).containsExactly(jobResponse);
+        assertThat(controller.retryJob(kbId, retryResponse.getId())).isSameAs(retryResponse);
+        assertThat(controller.reindex(kbId)).containsExactly(jobResponse);
         assertThat(controller.listChatSessions(kbId)).containsExactly(sessionResponse);
         assertThat(controller.createChatSession(kbId, createSession)).isSameAs(sessionResponse);
         assertThat(controller.getChatSession(kbId, sessionId)).isSameAs(sessionDetail);
@@ -132,6 +198,98 @@ class ControllerLayerTest {
         verify(chatService, never()).cancel(null);
         verify(chatSessionService).delete(kbId, sessionId);
         verify(chatSessionService).batchDelete(kbId, List.of(sessionId, secondSessionId));
+    }
+
+    @Test
+    void opsControllerDelegatesVectorCleanupTaskListAndRetry() {
+        VectorCleanupTaskService service = mock(VectorCleanupTaskService.class);
+        AuditLogService auditLogService = mock(AuditLogService.class);
+        AccountService accountService = mock(AccountService.class);
+        OpsController controller = new OpsController(service, auditLogService, accountService);
+        UUID taskId = UUID.randomUUID();
+        VectorCleanupTaskResponse response = VectorCleanupTaskResponse.builder()
+                .id(taskId)
+                .targetType(com.dupi.rag.domain.enums.VectorCleanupTargetType.DOCUMENT)
+                .targetId(UUID.randomUUID())
+                .status(com.dupi.rag.domain.enums.VectorCleanupStatus.PENDING)
+                .attemptCount(1)
+                .build();
+        AuditLogResponse auditLog = AuditLogResponse.builder()
+                .id(UUID.randomUUID())
+                .tenantId("tenant-a")
+                .action("DOCUMENT_DELETE")
+                .targetType("DOCUMENT")
+                .targetId(UUID.randomUUID())
+                .status(com.dupi.rag.domain.enums.AuditLogStatus.SUCCESS)
+                .createdAt(Instant.parse("2026-07-06T08:00:00Z"))
+                .build();
+        when(service.listOpenTasks()).thenReturn(List.of(response));
+        when(service.retry(taskId)).thenReturn(response);
+        when(auditLogService.list(any(AuditLogQuery.class))).thenReturn(List.of(auditLog));
+        when(auditLogService.exportCsv(any(AuditLogQuery.class))).thenReturn("createdAt,tenantId\n");
+        when(auditLogService.summarizeAlerts()).thenReturn(List.of(AuditAlertResponse.builder()
+                .code("AUDIT_FAILED_SPIKE")
+                .severity("WARN")
+                .message("Too many failed audit events")
+                .count(3)
+                .threshold(2)
+                .build()));
+        when(accountService.listUsers()).thenReturn(List.of(AccountResponse.builder()
+                .username("admin")
+                .tenantId("ops")
+                .role("ADMIN")
+                .permissions(List.of("*"))
+                .knowledgeBaseIds(List.of())
+                .tokenVersion("1")
+                .passwordConfigured(true)
+                .passwordHashConfigured(false)
+                .build()));
+        AccountUpsertRequest accountRequest = new AccountUpsertRequest();
+        accountRequest.setUsername("analyst");
+        accountRequest.setPassword("secret");
+        AccountResponse analyst = AccountResponse.builder()
+                .username("analyst")
+                .tenantId("tenant-a")
+                .role("USER")
+                .permissions(List.of("KB_READ"))
+                .knowledgeBaseIds(List.of("kb-1"))
+                .tokenVersion("1")
+                .passwordConfigured(false)
+                .passwordHashConfigured(true)
+                .build();
+        when(accountService.create(accountRequest)).thenReturn(analyst);
+        when(accountService.update("analyst", accountRequest)).thenReturn(analyst);
+        when(accountService.disable("analyst")).thenReturn(analyst);
+        when(accountService.enable("analyst")).thenReturn(analyst);
+        when(accountService.rotateTokenVersion("analyst")).thenReturn(analyst);
+        when(accountService.generatePasswordHash("secret")).thenReturn("pbkdf2$hash");
+
+        assertThat(controller.listVectorCleanupTasks()).containsExactly(response);
+        assertThat(controller.retryVectorCleanupTask(taskId)).isSameAs(response);
+        assertThat(controller.listAuditLogs("tenant-a", "DOCUMENT_DELETE", "DOCUMENT", "SUCCESS", 25))
+                .containsExactly(auditLog);
+        assertThat(controller.exportAuditLogs("tenant-a", "DOCUMENT_DELETE", "DOCUMENT", "SUCCESS"))
+                .contains("createdAt,tenantId");
+        assertThat(controller.listAuditAlerts()).extracting(AuditAlertResponse::getCode)
+                .containsExactly("AUDIT_FAILED_SPIKE");
+        assertThat(controller.listAccounts()).extracting(AccountResponse::getUsername)
+                .containsExactly("admin");
+        assertThat(controller.createAccount(accountRequest)).isSameAs(analyst);
+        assertThat(controller.updateAccount("analyst", accountRequest)).isSameAs(analyst);
+        assertThat(controller.disableAccount("analyst")).isSameAs(analyst);
+        assertThat(controller.enableAccount("analyst")).isSameAs(analyst);
+        assertThat(controller.rotateAccountToken("analyst")).isSameAs(analyst);
+        assertThat(controller.generatePasswordHash(Map.of("password", "secret"))).containsEntry("passwordHash", "pbkdf2$hash");
+        verify(auditLogService).list(any(AuditLogQuery.class));
+        verify(auditLogService).exportCsv(any(AuditLogQuery.class));
+        verify(auditLogService).summarizeAlerts();
+        verify(accountService).listUsers();
+        verify(accountService).create(accountRequest);
+        verify(accountService).update("analyst", accountRequest);
+        verify(accountService).disable("analyst");
+        verify(accountService).enable("analyst");
+        verify(accountService).rotateTokenVersion("analyst");
+        verify(auditLogService, atLeast(5)).recordSuccess(eq("ACCOUNT_MANAGE"), eq("ACCOUNT"), isNull(), anyString());
     }
 
     @Test
@@ -165,6 +323,15 @@ class ControllerLayerTest {
                 .containsEntry("file_name", "doc.md")
                 .containsEntry("content", "content")
                 .containsEntry("metadata", Map.of());
-        verify(kbService).findOrThrow(kbId);
+        verify(kbService).findSystemOrThrow(kbId);
+    }
+
+    private static ApiSecurityProperties.UserAccount user(String username, String password, String tenantId, String role) {
+        ApiSecurityProperties.UserAccount user = new ApiSecurityProperties.UserAccount();
+        user.setUsername(username);
+        user.setPassword(password);
+        user.setTenantId(tenantId);
+        user.setRole(role);
+        return user;
     }
 }

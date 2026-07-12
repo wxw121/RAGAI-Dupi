@@ -57,6 +57,7 @@ export function statusBadgeVariant(
     case 'COMPLETED':
       return 'success'
     case 'FAILED':
+    case 'DEAD_LETTER':
       return 'error'
     case 'PROCESSING':
     case 'RUNNING':

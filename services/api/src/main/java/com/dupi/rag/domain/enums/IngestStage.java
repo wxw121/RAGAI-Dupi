@@ -7,5 +7,6 @@ public enum IngestStage {
     EMBEDDING,
     INDEXING,
     COMPLETED,
-    FAILED
+    FAILED,
+    DEAD_LETTER
 }

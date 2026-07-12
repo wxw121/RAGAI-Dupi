@@ -40,6 +40,11 @@ dupi:
   redis:
     ingest-queue: dupi:ingest:jobs
     cancel-channel: dupi:chat:cancel
+    max-pending-jobs: ${INGEST_QUEUE_MAX_PENDING_JOBS:200}
+    max-recovery-attempts: ${INGEST_RECOVERY_MAX_ATTEMPTS:3}
+  ingest:
+    recovery-cron: ${INGEST_RECOVERY_CRON:0 */2 * * * *}
+    outbox-dispatch-cron: ${INGEST_OUTBOX_DISPATCH_CRON:*/10 * * * * *}
   llm:
     chat:
       base-url: ${CHAT_BASE_URL:${OPENAI_BASE_URL:https://api.deepseek.com}}
@@ -55,6 +60,24 @@ dupi:
     max-context-chars: 12000
   worker:
     base-url: ${WORKER_BASE_URL:http://localhost:8000}
+  security:
+    api-key: ${DUPI_API_KEY:}
+    internal-key: ${DUPI_INTERNAL_KEY:}
+    auth-secret: ${DUPI_AUTH_SECRET:}
+    token-ttl-seconds: ${DUPI_AUTH_TOKEN_TTL_SECONDS:28800}
+    login-max-failures: ${DUPI_AUTH_LOGIN_MAX_FAILURES:5}
+    login-lockout-seconds: ${DUPI_AUTH_LOGIN_LOCKOUT_SECONDS:300}
+  upload-rate-limit:
+    enabled: ${UPLOAD_RATE_LIMIT_ENABLED:true}
+    requests: ${UPLOAD_RATE_LIMIT_REQUESTS:20}
+    window-seconds: ${UPLOAD_RATE_LIMIT_WINDOW_SECONDS:60}
+  cleanup:
+    orphan-vectors-cron: ${ORPHAN_VECTOR_CLEANUP_CRON:0 30 3 * * *}
+  audit:
+    retention-days: ${AUDIT_RETENTION_DAYS:180}
+    retention-cron: ${AUDIT_RETENTION_CRON:0 15 2 * * *}
+    alert-window-minutes: ${AUDIT_ALERT_WINDOW_MINUTES:30}
+    alert-failed-threshold: ${AUDIT_ALERT_FAILED_THRESHOLD:10}
 
 management:
   endpoints:

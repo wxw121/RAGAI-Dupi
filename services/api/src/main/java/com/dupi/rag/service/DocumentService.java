@@ -7,6 +7,8 @@ import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
 import com.dupi.rag.domain.enums.IngestStage;
+import com.dupi.rag.dto.BatchDocumentUploadResponse;
+import com.dupi.rag.dto.BatchDocumentUploadResult;
 import com.dupi.rag.dto.DocumentResponse;
 import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.ChunkRepository;
@@ -34,6 +36,10 @@ public class DocumentService {
     private final MinioStorageService minioStorageService;
     private final MilvusVectorService milvusVectorService;
     private final IngestJobProducer ingestJobProducer;
+    private final IngestOutboxService ingestOutboxService;
+    private final DocumentTombstoneService documentTombstoneService;
+    private final VectorCleanupTaskService vectorCleanupTaskService;
+    private final AuditLogService auditLogService;
 
     @Transactional
     public DocumentResponse upload(UUID kbId, MultipartFile file) {
@@ -42,20 +48,46 @@ public class DocumentService {
     }
 
     @Transactional
-    public List<DocumentResponse> uploadBatch(UUID kbId, List<MultipartFile> files) {
+    public BatchDocumentUploadResponse uploadBatch(UUID kbId, List<MultipartFile> files) {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
         if (files == null || files.isEmpty()) {
             throw new IllegalArgumentException("Files are empty");
         }
-        return files.stream()
-                .map(file -> upload(kb, kbId, file))
+
+        List<BatchDocumentUploadResult> results = files.stream()
+                .map(file -> uploadOneForBatch(kb, kbId, file))
                 .toList();
+        int succeeded = (int) results.stream().filter(BatchDocumentUploadResult::isSuccess).count();
+        return BatchDocumentUploadResponse.builder()
+                .total(results.size())
+                .succeeded(succeeded)
+                .failed(results.size() - succeeded)
+                .results(results)
+                .build();
+    }
+
+    private BatchDocumentUploadResult uploadOneForBatch(KnowledgeBase kb, UUID kbId, MultipartFile file) {
+        String fileName = file != null && file.getOriginalFilename() != null ? file.getOriginalFilename() : "unknown";
+        try {
+            return BatchDocumentUploadResult.builder()
+                    .fileName(fileName)
+                    .success(true)
+                    .document(upload(kb, kbId, file))
+                    .build();
+        } catch (Exception e) {
+            return BatchDocumentUploadResult.builder()
+                    .fileName(fileName)
+                    .success(false)
+                    .errorMessage(e.getMessage() != null ? e.getMessage() : "Upload failed")
+                    .build();
+        }
     }
 
     private DocumentResponse upload(KnowledgeBase kb, UUID kbId, MultipartFile file) {
-        if (file.isEmpty()) {
+        if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("File is empty");
         }
+        ingestJobProducer.assertQueueAccepting();
 
         UUID docId = UUID.randomUUID();
         String fileName = file.getOriginalFilename() != null ? file.getOriginalFilename() : "unknown";
@@ -96,18 +128,9 @@ public class DocumentService {
                 .build();
         ingestJobRepository.save(job);
 
-        try {
-            ingestJobProducer.enqueue(job, kb, objectKey, doc.getFileName(), doc.getMimeType());
-            doc.setStatus(DocumentStatus.PROCESSING);
-        } catch (Exception e) {
-            job.setStatus(IngestJobStatus.FAILED);
-            job.setStage(IngestStage.FAILED);
-            job.setErrorMessage(e.getMessage());
-            ingestJobRepository.save(job);
-
-            doc.setStatus(DocumentStatus.FAILED);
-            doc.setErrorMessage("Failed to enqueue ingest job: " + e.getMessage());
-        }
+        ingestOutboxService.record(job, kb, objectKey, doc.getFileName(), doc.getMimeType());
+        doc.setStatus(DocumentStatus.PENDING);
+        doc.setErrorMessage(null);
         documentRepository.save(doc);
 
         return toResponse(doc);
@@ -128,12 +151,14 @@ public class DocumentService {
     @Transactional
     public void delete(UUID kbId, UUID docId) {
         Document doc = findOrThrow(kbId, docId);
+        documentTombstoneService.recordDeleted(doc);
+        vectorCleanupTaskService.enqueueDocument(docId);
         try {
             milvusVectorService.deleteByDocId(docId);
         } catch (Exception e) {
             log.warn("Failed to delete Milvus vectors for doc {}", docId, e);
-            // 删除采用“数据库为最终事实源”的容错思想：即使向量库中记录已被提前删除，
-            // 也继续清理本地元数据，避免外部存储短暂不一致阻塞用户删除文档。
+            // 删除采用“数据库为最终事实源”的容错思想：即使向量库短暂不可用，
+            // 也继续清理本地元数据，残留向量由补偿任务后续重试删除。
         }
         chunkRepository.deleteByDocId(docId);
         try {
@@ -141,9 +166,15 @@ public class DocumentService {
         } catch (Exception e) {
             log.warn("Failed to delete object {} for doc {}", doc.getObjectKey(), docId, e);
             // 对象存储删除失败只记录告警：业务删除链路以数据库状态为准，
-            // 这样可以支持幂等重试，也避免 MinIO 中对象缺失时反向阻塞主记录删除。
+            // 这样可以支持幂等重试，也避免 MinIO 短暂异常阻塞主记录删除。
         }
         documentRepository.delete(doc);
+        auditLogService.recordSuccess(
+                "DOCUMENT_DELETE",
+                "DOCUMENT",
+                docId,
+                "Deleted document " + doc.getFileName()
+        );
     }
 
     public Document findOrThrow(UUID kbId, UUID docId) {

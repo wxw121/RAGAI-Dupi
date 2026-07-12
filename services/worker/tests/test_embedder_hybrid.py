@@ -37,8 +37,8 @@ class FakeGetClient:
     def __exit__(self, *args):
         return False
 
-    def get(self, path):
-        self.calls.append(path)
+    def get(self, path, headers=None):
+        self.calls.append((path, headers or {}))
         return FakeResponse(self.payload)
 
 
@@ -79,6 +79,31 @@ def test_embed_batch_uses_response_order_when_index_missing(monkeypatch):
     monkeypatch.setattr(embedder_module.httpx, "Client", lambda **_: client)
 
     assert Embedder(model="m").embed_batch(["a", "b"]) == [[1.0], [2.0]]
+
+
+def test_embed_batch_uses_configured_chunk_size(monkeypatch):
+    client = FakeClient([
+        {"data": [
+            {"index": 0, "embedding": [1.0]},
+            {"index": 1, "embedding": [2.0]},
+        ]},
+        {"data": [
+            {"index": 0, "embedding": [3.0]},
+            {"index": 1, "embedding": [4.0]},
+        ]},
+        {"data": [{"index": 0, "embedding": [5.0]}]},
+    ])
+    monkeypatch.setattr(embedder_module.httpx, "Client", lambda **_: client)
+    monkeypatch.setattr(embedder_module.settings, "embedding_batch_size", 2)
+
+    assert Embedder(model="m").embed_batch(["a", "b", "c", "d", "e"]) == [
+        [1.0],
+        [2.0],
+        [3.0],
+        [4.0],
+        [5.0],
+    ]
+    assert [call[1]["input"] for call in client.calls] == [["a", "b"], ["c", "d"], ["e"]]
 
 
 def test_tokenize_bm25_and_rrf_fusion():
@@ -139,7 +164,18 @@ def test_get_reranker_caches_failure_and_fetch_corpus_success(monkeypatch):
     client = FakeGetClient([{"chunk_id": "c1", "content": "hello"}])
     monkeypatch.setattr(hybrid.httpx, "Client", lambda **_: client)
     assert hybrid.fetch_kb_corpus("kb") == [{"chunk_id": "c1", "content": "hello"}]
-    assert client.calls == ["/api/v1/internal/knowledge-bases/kb/chunks"]
+    assert client.calls == [("/api/v1/internal/knowledge-bases/kb/chunks", {})]
+
+
+def test_fetch_corpus_sends_internal_key_when_configured(monkeypatch):
+    client = FakeGetClient([{"chunk_id": "c1", "content": "hello"}])
+    monkeypatch.setattr(hybrid.httpx, "Client", lambda **_: client)
+    monkeypatch.setattr(hybrid.settings, "dupi_internal_key", "secret")
+
+    assert hybrid.fetch_kb_corpus("kb") == [{"chunk_id": "c1", "content": "hello"}]
+    assert client.calls == [
+        ("/api/v1/internal/knowledge-bases/kb/chunks", {"X-Dupi-Internal-Key": "secret"}),
+    ]
 
 
 def test_hybrid_retrieve_fuses_vector_and_bm25_then_reranks(monkeypatch):

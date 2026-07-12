@@ -1,5 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { apiDelete, apiGet, apiPatch, apiPost, apiUpload, apiUploadMany, checkHealth } from './client'
+import {
+  apiDelete,
+  apiGet,
+  apiPatch,
+  apiPost,
+  apiUpload,
+  apiUploadMany,
+  checkHealth,
+  clearAuthToken,
+  getAuthToken,
+  login,
+  setAuthToken,
+} from './client'
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), {
@@ -12,6 +24,7 @@ function jsonResponse(body: unknown, init: ResponseInit = {}) {
 describe('api client', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
+    localStorage.clear()
   })
 
   it('returns JSON for successful GET and undefined for 204', async () => {
@@ -23,19 +36,90 @@ describe('api client', () => {
 
     await expect(apiGet('/ok')).resolves.toEqual({ ok: true })
     await expect(apiGet('/empty')).resolves.toBeUndefined()
-    expect(fetchMock).toHaveBeenCalledWith('/ok')
+    expect(fetchMock).toHaveBeenCalledWith('/ok', { credentials: 'include' })
+  })
+
+  it('stores login session state and sends credentials plus CSRF for state-changing requests', async () => {
+    const tokenResponse = {
+      username: 'admin',
+      tenantId: 'ops',
+      role: 'ADMIN',
+      expiresAt: '2026-07-06T08:00:00Z',
+      csrfToken: 'csrf-token',
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(tokenResponse))
+      .mockResolvedValueOnce(jsonResponse({ ok: true }))
+      .mockResolvedValueOnce(jsonResponse({ id: 1 }))
+      .mockResolvedValueOnce(jsonResponse({ patched: true }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(jsonResponse({ uploaded: true }))
+      .mockResolvedValueOnce(jsonResponse([{ uploaded: true }]))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(login('admin', 'pw')).resolves.toEqual(tokenResponse)
+    expect(getAuthToken()).toBe('cookie-session')
+    await apiGet('/ok')
+    await apiPost('/items', { name: 'A' })
+    await apiPatch('/items/1', { name: 'B' })
+    await apiDelete('/items/1')
+    await apiUpload('/upload', new File(['abc'], 'a.txt'))
+    await apiUploadMany('/upload/batch', [new File(['abc'], 'a.txt')])
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ username: 'admin', password: 'pw' }),
+    })
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/ok', {
+      credentials: 'include',
+    })
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/items', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'X-Dupi-CSRF-Token': 'csrf-token' },
+      body: JSON.stringify({ name: 'A' }),
+    })
+    expect(fetchMock).toHaveBeenNthCalledWith(4, '/items/1', {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'X-Dupi-CSRF-Token': 'csrf-token' },
+      body: JSON.stringify({ name: 'B' }),
+    })
+    expect(fetchMock).toHaveBeenNthCalledWith(5, '/items/1', {
+      method: 'DELETE',
+      credentials: 'include',
+      headers: { 'X-Dupi-CSRF-Token': 'csrf-token' },
+    })
+    expect(fetchMock.mock.calls[5][1]).toMatchObject({
+      credentials: 'include',
+      headers: { 'X-Dupi-CSRF-Token': 'csrf-token' },
+    })
+    expect(fetchMock.mock.calls[6][1]).toMatchObject({
+      credentials: 'include',
+      headers: { 'X-Dupi-CSRF-Token': 'csrf-token' },
+    })
+  })
+
+  it('supports manual CSRF updates and clearing', () => {
+    setAuthToken('manual-token')
+    expect(getAuthToken()).toBe('cookie-session')
+
+    clearAuthToken()
+
+    expect(getAuthToken()).toBeNull()
   })
 
   it('throws parsed API errors and falls back to status text', async () => {
-    vi.stubGlobal('fetch', vi.fn()
-      .mockResolvedValueOnce(jsonResponse(
-        { error: 'bad', message: '输入错误' },
-        { status: 400, statusText: 'Bad Request' },
-      ))
-      .mockResolvedValueOnce(new Response('oops', {
-        status: 500,
-        statusText: 'Server Error',
-      })))
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse({ error: 'bad', message: '输入错误' }, { status: 400, statusText: 'Bad Request' }))
+        .mockResolvedValueOnce(new Response('oops', { status: 500, statusText: 'Server Error' })),
+    )
 
     await expect(apiGet('/bad')).rejects.toMatchObject({
       status: 400,
@@ -55,16 +139,14 @@ describe('api client', () => {
       statusText: undefined,
       json: vi.fn().mockRejectedValue(new Error('not json')),
     }
-    vi.stubGlobal('fetch', vi.fn()
-      .mockResolvedValueOnce(jsonResponse(
-        { error: 'missing field' },
-        { status: 422, statusText: 'Unprocessable Entity' },
-      ))
-      .mockResolvedValueOnce(jsonResponse(
-        { error: 'bad upload' },
-        { status: 400, statusText: 'Bad Upload' },
-      ))
-      .mockResolvedValueOnce(genericError))
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse({ error: 'missing field' }, { status: 422, statusText: 'Unprocessable Entity' }))
+        .mockResolvedValueOnce(jsonResponse({ error: 'bad upload' }, { status: 400, statusText: 'Bad Upload' }))
+        .mockResolvedValueOnce(genericError),
+    )
 
     await expect(apiPost('/bad', { name: '' })).rejects.toMatchObject({
       status: 422,
@@ -91,11 +173,13 @@ describe('api client', () => {
     await expect(apiPost('/items')).resolves.toBeUndefined()
     expect(fetchMock).toHaveBeenNthCalledWith(1, '/items', {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: 'A' }),
     })
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/items', {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: undefined,
     })
@@ -108,6 +192,7 @@ describe('api client', () => {
     await expect(apiPatch('/resource', { title: 'New' })).resolves.toEqual({ id: 'x' })
     expect(fetchMock).toHaveBeenCalledWith('/resource', {
       method: 'PATCH',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title: 'New' }),
     })
@@ -140,11 +225,15 @@ describe('api client', () => {
   })
 
   it('checks health status and treats network failures as unhealthy', async () => {
-    vi.stubGlobal('fetch', vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ status: 'UP' }))
-      .mockResolvedValueOnce(jsonResponse({ status: 'DOWN' }))
-      .mockResolvedValueOnce(new Response('{}', { status: 503 }))
-      .mockRejectedValueOnce(new Error('network')))
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse({ status: 'UP' }))
+        .mockResolvedValueOnce(jsonResponse({ status: 'DOWN' }))
+        .mockResolvedValueOnce(new Response('{}', { status: 503 }))
+        .mockRejectedValueOnce(new Error('network')),
+    )
 
     await expect(checkHealth()).resolves.toBe(true)
     await expect(checkHealth()).resolves.toBe(false)

@@ -115,4 +115,14 @@ public class KnowledgeBaseController {
     public java.util.List<IngestJobResponse> listJobs(@PathVariable UUID kbId) {
         return ingestJobService.listByKb(kbId);
     }
+
+    @PostMapping("/{kbId}/ingest-jobs/{jobId}/retry")
+    public IngestJobResponse retryJob(@PathVariable UUID kbId, @PathVariable UUID jobId) {
+        return ingestJobService.retryForKnowledgeBase(kbId, jobId);
+    }
+
+    @PostMapping("/{kbId}/reindex")
+    public java.util.List<IngestJobResponse> reindex(@PathVariable UUID kbId) {
+        return ingestJobService.reindexKnowledgeBase(kbId);
+    }
 }

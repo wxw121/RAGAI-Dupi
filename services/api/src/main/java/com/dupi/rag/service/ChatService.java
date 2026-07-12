@@ -102,7 +102,10 @@ public class ChatService {
                 try {
                     retrievalEvent = Flux.just(ServerSentEvent.<String>builder()
                             .event("retrieval")
-                            .data(objectMapper.writeValueAsString(citations))
+                            .data(objectMapper.writeValueAsString(Map.of(
+                                    "citations", citations,
+                                    "diagnostics", retrieval.getDiagnostics() != null ? retrieval.getDiagnostics() : Map.of()
+                            )))
                             .build());
                 } catch (Exception e) {
                     retrievalEvent = Flux.empty();

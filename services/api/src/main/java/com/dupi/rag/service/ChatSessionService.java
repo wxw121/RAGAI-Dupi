@@ -1,5 +1,6 @@
 package com.dupi.rag.service;
 
+import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.ChatMessage;
 import com.dupi.rag.domain.entity.ChatSession;
 import com.dupi.rag.domain.enums.ChatMessageRole;
@@ -34,11 +35,13 @@ public class ChatSessionService {
     private final KnowledgeBaseService knowledgeBaseService;
     private final ChatSessionRepository sessionRepository;
     private final ChatMessageRepository messageRepository;
+    private final AuditLogService auditLogService;
 
     @Transactional(readOnly = true)
     public List<ChatSessionResponse> list(UUID kbId) {
         knowledgeBaseService.findOrThrow(kbId);
-        return sessionRepository.findByKbIdAndTenantIdOrderByUpdatedAtDesc(kbId, DEFAULT_TENANT_ID).stream()
+        return sessionRepository.findByKbIdAndTenantIdOrderByUpdatedAtDesc(kbId, TenantContext.getTenantId()).stream()
+                .filter(session -> messageRepository.existsBySessionId(session.getId()))
                 .map(this::toSessionResponse)
                 .toList();
     }
@@ -49,7 +52,7 @@ public class ChatSessionService {
         String title = normalizeTitle(request == null ? null : request.getTitle(), DEFAULT_TITLE, false);
         ChatSession session = ChatSession.builder()
                 .kbId(kbId)
-                .tenantId(DEFAULT_TENANT_ID)
+                .tenantId(TenantContext.getTenantId())
                 .title(title)
                 .build();
         return toSessionResponse(sessionRepository.save(session));
@@ -61,7 +64,7 @@ public class ChatSessionService {
         String title = normalizeTitle(firstQuestion, DEFAULT_TITLE, false);
         ChatSession session = ChatSession.builder()
                 .kbId(kbId)
-                .tenantId(DEFAULT_TENANT_ID)
+                .tenantId(TenantContext.getTenantId())
                 .title(title)
                 .build();
         return toSessionResponse(sessionRepository.save(session));
@@ -69,7 +72,7 @@ public class ChatSessionService {
 
     @Transactional(readOnly = true)
     public ChatSessionDetailResponse getDetail(UUID kbId, UUID sessionId) {
-        return getDetail(kbId, sessionId, DEFAULT_TENANT_ID);
+        return getDetail(kbId, sessionId, TenantContext.getTenantId());
     }
 
     @Transactional(readOnly = true)
@@ -107,11 +110,17 @@ public class ChatSessionService {
                 .map(sessionId -> findOrThrow(kbId, sessionId))
                 .toList();
         sessionRepository.deleteAll(sessions);
+        auditLogService.recordSuccess(
+                "CHAT_SESSION_BATCH_DELETE",
+                "KNOWLEDGE_BASE",
+                kbId,
+                "Deleted " + sessions.size() + " chat session(s)"
+        );
     }
 
     @Transactional(readOnly = true)
     public ChatSession findOrThrow(UUID kbId, UUID sessionId) {
-        return findOrThrow(kbId, sessionId, DEFAULT_TENANT_ID);
+        return findOrThrow(kbId, sessionId, TenantContext.getTenantId());
     }
 
     @Transactional(readOnly = true)
@@ -122,7 +131,7 @@ public class ChatSessionService {
 
     @Transactional
     public ChatMessage saveUserMessage(UUID kbId, UUID sessionId, String content) {
-        return saveUserMessage(findForUpdateOrThrow(kbId, sessionId, DEFAULT_TENANT_ID), content);
+        return saveUserMessage(findForUpdateOrThrow(kbId, sessionId, TenantContext.getTenantId()), content);
     }
 
     private ChatMessage saveUserMessage(ChatSession session, String content) {
@@ -131,7 +140,7 @@ public class ChatSessionService {
 
     @Transactional
     public ChatMessage saveAssistantMessage(UUID kbId, UUID sessionId, String content, List<Citation> citations) {
-        return saveAssistantMessage(findForUpdateOrThrow(kbId, sessionId, DEFAULT_TENANT_ID), content, citations);
+        return saveAssistantMessage(findForUpdateOrThrow(kbId, sessionId, TenantContext.getTenantId()), content, citations);
     }
 
     private ChatMessage saveAssistantMessage(ChatSession session, String content, List<Citation> citations) {

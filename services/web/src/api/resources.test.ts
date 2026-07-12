@@ -1,5 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createKnowledgeBase, deleteKnowledgeBase, getKnowledgeBase, listKnowledgeBases } from './knowledgeBase'
+import {
+  createKnowledgeBase,
+  deleteKnowledgeBase,
+  getKnowledgeBase,
+  listKnowledgeBases,
+  listIngestJobs,
+  listAuditLogs,
+  listAuditAlerts,
+  listAccounts,
+  exportAuditLogs,
+  createAccount,
+  listVectorCleanupTasks,
+  reindexKnowledgeBase,
+  rotateAccountToken,
+  retryIngestJob,
+  retryVectorCleanupTask,
+  updateAccount,
+  disableAccount,
+  enableAccount,
+  generatePasswordHash,
+} from './knowledgeBase'
 import { deleteDocument, getIngestJob, listDocuments, uploadDocument, uploadDocuments } from './documents'
 import {
   batchDeleteChatSessions,
@@ -12,6 +32,7 @@ import {
 
 const apiClient = vi.hoisted(() => ({
   apiGet: vi.fn(),
+  apiGetText: vi.fn(),
   apiPost: vi.fn(),
   apiPatch: vi.fn(),
   apiDelete: vi.fn(),
@@ -24,21 +45,84 @@ vi.mock('./client', () => apiClient)
 describe('resource API wrappers', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    apiClient.apiGet.mockReset()
+    apiClient.apiGetText.mockReset()
+    apiClient.apiPost.mockReset()
+    apiClient.apiPatch.mockReset()
+    apiClient.apiDelete.mockReset()
+    apiClient.apiUpload.mockReset()
+    apiClient.apiUploadMany.mockReset()
   })
 
   it('builds knowledge base API paths', async () => {
     apiClient.apiGet.mockResolvedValueOnce([{ id: 'kb1' }]).mockResolvedValueOnce({ id: 'kb1' })
-    apiClient.apiPost.mockResolvedValue({ id: 'kb2' })
+    apiClient.apiGet.mockResolvedValueOnce([{ id: 'job1' }])
+    apiClient.apiGet.mockResolvedValueOnce([{ id: 'cleanup1' }])
+    apiClient.apiGet.mockResolvedValueOnce([{ id: 'audit1' }])
+    apiClient.apiGet.mockResolvedValueOnce([{ code: 'AUDIT_FAILED_SPIKE' }])
+    apiClient.apiGet.mockResolvedValueOnce([{ username: 'admin' }])
+    apiClient.apiGetText.mockResolvedValueOnce('csv-body')
+    apiClient.apiPost
+      .mockResolvedValueOnce({ id: 'kb2' })
+      .mockResolvedValueOnce([{ id: 'job2' }])
+      .mockResolvedValueOnce({ id: 'job3' })
+      .mockResolvedValueOnce({ id: 'cleanup1' })
+      .mockResolvedValueOnce({ username: 'analyst' })
+      .mockResolvedValueOnce({ username: 'analyst', disabled: true })
+      .mockResolvedValueOnce({ username: 'analyst', disabled: false })
+      .mockResolvedValueOnce({ username: 'analyst', tokenVersion: '2' })
+      .mockResolvedValueOnce({ passwordHash: 'pbkdf2$hash' })
+    apiClient.apiPatch.mockResolvedValueOnce({ username: 'analyst' })
     apiClient.apiDelete.mockResolvedValue(undefined)
 
     await expect(listKnowledgeBases()).resolves.toEqual([{ id: 'kb1' }])
     await expect(getKnowledgeBase('kb1')).resolves.toEqual({ id: 'kb1' })
     await expect(createKnowledgeBase({ name: 'KB' })).resolves.toEqual({ id: 'kb2' })
+    await expect(listIngestJobs('kb1')).resolves.toEqual([{ id: 'job1' }])
+    await expect(listVectorCleanupTasks()).resolves.toEqual([{ id: 'cleanup1' }])
+    await expect(listAuditLogs({ tenantId: 'tenant-a', action: 'DOCUMENT_DELETE', status: 'SUCCESS', limit: 25 }))
+      .resolves.toEqual([{ id: 'audit1' }])
+    await expect(listAuditAlerts()).resolves.toEqual([{ code: 'AUDIT_FAILED_SPIKE' }])
+    await expect(listAccounts()).resolves.toEqual([{ username: 'admin' }])
+    await expect(exportAuditLogs({ tenantId: 'tenant-a', targetType: 'DOCUMENT', status: 'FAILED' }))
+      .resolves.toEqual('csv-body')
+    await expect(reindexKnowledgeBase('kb1')).resolves.toEqual([{ id: 'job2' }])
+    await expect(retryIngestJob('kb1', 'job3')).resolves.toEqual({ id: 'job3' })
+    await expect(retryVectorCleanupTask('cleanup1')).resolves.toEqual({ id: 'cleanup1' })
+    await expect(createAccount({ username: 'analyst', password: 'secret' })).resolves.toEqual({ username: 'analyst' })
+    await expect(updateAccount('analyst', { role: 'USER', permissions: ['KB_READ'] })).resolves.toEqual({ username: 'analyst' })
+    await expect(disableAccount('analyst')).resolves.toEqual({ username: 'analyst', disabled: true })
+    await expect(enableAccount('analyst')).resolves.toEqual({ username: 'analyst', disabled: false })
+    await expect(rotateAccountToken('analyst')).resolves.toEqual({ username: 'analyst', tokenVersion: '2' })
+    await expect(generatePasswordHash('secret')).resolves.toEqual({ passwordHash: 'pbkdf2$hash' })
     await expect(deleteKnowledgeBase('kb1')).resolves.toBeUndefined()
 
     expect(apiClient.apiGet).toHaveBeenNthCalledWith(1, '/api/v1/knowledge-bases')
     expect(apiClient.apiGet).toHaveBeenNthCalledWith(2, '/api/v1/knowledge-bases/kb1')
-    expect(apiClient.apiPost).toHaveBeenCalledWith('/api/v1/knowledge-bases', { name: 'KB' })
+    expect(apiClient.apiGet).toHaveBeenNthCalledWith(3, '/api/v1/knowledge-bases/kb1/ingest-jobs')
+    expect(apiClient.apiGet).toHaveBeenNthCalledWith(4, '/api/v1/ops/vector-cleanup-tasks')
+    expect(apiClient.apiGet).toHaveBeenNthCalledWith(
+      5,
+      '/api/v1/ops/audit-logs?tenantId=tenant-a&action=DOCUMENT_DELETE&status=SUCCESS&limit=25',
+    )
+    expect(apiClient.apiGet).toHaveBeenNthCalledWith(6, '/api/v1/ops/audit-alerts')
+    expect(apiClient.apiGet).toHaveBeenNthCalledWith(7, '/api/v1/ops/accounts')
+    expect(apiClient.apiGetText).toHaveBeenCalledWith(
+      '/api/v1/ops/audit-logs/export?tenantId=tenant-a&targetType=DOCUMENT&status=FAILED',
+    )
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(1, '/api/v1/knowledge-bases', { name: 'KB' })
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(2, '/api/v1/knowledge-bases/kb1/reindex')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(3, '/api/v1/knowledge-bases/kb1/ingest-jobs/job3/retry')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(4, '/api/v1/ops/vector-cleanup-tasks/cleanup1/retry')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(5, '/api/v1/ops/accounts', { username: 'analyst', password: 'secret' })
+    expect(apiClient.apiPatch).toHaveBeenCalledWith('/api/v1/ops/accounts/analyst', {
+      role: 'USER',
+      permissions: ['KB_READ'],
+    })
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(6, '/api/v1/ops/accounts/analyst/disable')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(7, '/api/v1/ops/accounts/analyst/enable')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(8, '/api/v1/ops/accounts/analyst/rotate-token')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(9, '/api/v1/ops/accounts/password-hash', { password: 'secret' })
     expect(apiClient.apiDelete).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb1')
   })
 
@@ -47,12 +131,18 @@ describe('resource API wrappers', () => {
     const secondFile = new File(['def'], 'b.txt')
     apiClient.apiGet.mockResolvedValueOnce([{ id: 'd1' }]).mockResolvedValueOnce({ id: 'j1' })
     apiClient.apiUpload.mockResolvedValue({ id: 'd2' })
-    apiClient.apiUploadMany.mockResolvedValue([{ id: 'd3' }])
+    const batchUpload = {
+      total: 2,
+      succeeded: 1,
+      failed: 1,
+      results: [{ fileName: 'b.txt', success: true, errorMessage: null, document: { id: 'd3' } }],
+    }
+    apiClient.apiUploadMany.mockResolvedValue(batchUpload)
     apiClient.apiDelete.mockResolvedValue(undefined)
 
     await expect(listDocuments('kb')).resolves.toEqual([{ id: 'd1' }])
     await expect(uploadDocument('kb', file)).resolves.toEqual({ id: 'd2' })
-    await expect(uploadDocuments('kb', [file, secondFile])).resolves.toEqual([{ id: 'd3' }])
+    await expect(uploadDocuments('kb', [file, secondFile])).resolves.toEqual(batchUpload)
     await expect(deleteDocument('kb', 'doc')).resolves.toBeUndefined()
     await expect(getIngestJob('kb', 'doc')).resolves.toEqual({ id: 'j1' })
 

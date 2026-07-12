@@ -1,0 +1,23 @@
+[
+  {
+    "id": "formats-supported",
+    "query": "dupi-RAG supports which document formats?",
+    "minHits": 1,
+    "expectedFileName": "sample-knowledge.md",
+    "mustContainAny": ["PDF", "Word", "Excel"]
+  },
+  {
+    "id": "core-capabilities",
+    "query": "What are the core capabilities of dupi-RAG?",
+    "minHits": 1,
+    "expectedFileName": "sample-knowledge.md",
+    "mustContainAny": ["Milvus", "SSE", "BM25", "Embedding"]
+  },
+  {
+    "id": "chunk-strategies",
+    "query": "Which chunk strategies are mentioned?",
+    "minHits": 1,
+    "expectedFileName": "sample-knowledge.md",
+    "mustContainAny": ["recursive", "semantic"]
+  }
+]

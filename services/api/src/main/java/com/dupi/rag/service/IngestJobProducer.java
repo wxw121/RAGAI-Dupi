@@ -20,6 +20,7 @@ public class IngestJobProducer {
     private final ObjectMapper objectMapper;
 
     public void enqueue(IngestJob job, KnowledgeBase kb, String objectKey, String fileName, String mimeType) {
+        assertQueueAccepting();
         try {
             IngestJobMessage message = IngestJobMessage.builder()
                     .jobId(job.getId().toString())
@@ -39,6 +40,18 @@ public class IngestJobProducer {
             log.info("Enqueued ingest job {}", job.getId());
         } catch (Exception e) {
             throw new IllegalStateException("Failed to enqueue ingest job", e);
+        }
+    }
+
+    public void assertQueueAccepting() {
+        int maxPendingJobs = queueProperties.getMaxPendingJobs();
+        if (maxPendingJobs <= 0) {
+            return;
+        }
+        Long currentSize = redisTemplate.opsForList().size(queueProperties.getIngestQueue());
+        long pendingJobs = currentSize != null ? currentSize : 0L;
+        if (pendingJobs >= maxPendingJobs) {
+            throw new IllegalStateException("Ingest queue is full: pending=" + pendingJobs + ", max=" + maxPendingJobs);
         }
     }
 }

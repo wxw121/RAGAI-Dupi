@@ -4,5 +4,6 @@ public enum IngestJobStatus {
     PENDING,
     PROCESSING,
     COMPLETED,
-    FAILED
+    FAILED,
+    DEAD_LETTER
 }

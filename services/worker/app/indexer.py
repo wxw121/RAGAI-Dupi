@@ -82,7 +82,12 @@ class MilvusIndexer:
             self.collection.delete(expr=f'doc_id == "{doc_id}"', timeout=MILVUS_OPERATION_TIMEOUT_SECONDS)
         except MilvusException as exc:
             error = str(exc).lower()
-            if "collection not loaded" in error or "collection not fully loaded" in error:
+            if (
+                "collection not loaded" in error
+                or "collection not fully loaded" in error
+                or "timestamp lag too large" in error
+                or "failed to search/query delegator" in error
+            ):
                 return
             raise
 

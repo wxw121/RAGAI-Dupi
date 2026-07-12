@@ -3,7 +3,6 @@ import logging
 
 from app.config import settings
 
-MAX_BATCH_SIZE = 32
 logger = logging.getLogger(__name__)
 
 
@@ -26,8 +25,9 @@ class Embedder:
             return []
 
         vectors: list[list[float]] = []
-        for start in range(0, len(texts), MAX_BATCH_SIZE):
-            batch = texts[start : start + MAX_BATCH_SIZE]
+        batch_size = max(1, settings.embedding_batch_size)
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start : start + batch_size]
             response = self.client.post(
                 "/embeddings",
                 json={"model": self.model, "input": batch},

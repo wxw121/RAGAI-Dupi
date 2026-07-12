@@ -7,7 +7,7 @@ import {
   listChatSessions,
   renameChatSession,
 } from '@/api/chatSessions'
-import type { ChatMessage, ChatSession, Citation } from '@/types'
+import type { ChatMessage, ChatSession, Citation, RetrievalDiagnostics } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/components/Toast'
@@ -23,6 +23,9 @@ interface ChatPanelProps {
 }
 
 function formatChatError(message: string): string {
+  if (!message.trim()) {
+    return '问答请求失败，请稍后重试'
+  }
   const lower = message.toLowerCase()
   if (
     lower.includes('401') ||
@@ -43,6 +46,8 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [citations, setCitations] = useState<Citation[]>([])
+  const [retrievalDiagnostics, setRetrievalDiagnostics] =
+    useState<RetrievalDiagnostics | null>(null)
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -98,6 +103,7 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
       sessionIdRef.current = sessionId
       setMessages(persistedMessages)
       setCitations(lastAssistant?.citations ?? [])
+      setRetrievalDiagnostics(null)
       return true
     },
     [kbId],
@@ -141,6 +147,7 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
     sessionIdRef.current = null
     setMessages([])
     setCitations([])
+    setRetrievalDiagnostics(null)
   }, [])
 
   const selectSession = useCallback(
@@ -259,6 +266,7 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
     setInput('')
     setStreaming(true)
     setCitations([])
+    setRetrievalDiagnostics(null)
     detailRequestIdRef.current += 1
 
     const controller = new AbortController()
@@ -274,9 +282,10 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
         kbId,
         query,
         {
-          onRetrieval: (cits) => {
+          onRetrieval: (cits, diagnostics) => {
             if (!isCurrentStream()) return
             setCitations(cits)
+            setRetrievalDiagnostics(diagnostics ?? null)
           },
           onToken: (token) => {
             if (!isCurrentStream()) return
@@ -374,101 +383,157 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
   )
 
   return (
-    <>
-      <div className="mb-3 md:hidden">
-        <ChatHistoryDrawer open={historyOpen} onOpenChange={setHistoryOpen}>
-          {history}
-        </ChatHistoryDrawer>
+    <div className="flex h-[calc(100vh-73px)] min-h-[560px] bg-background">
+      <div className="hidden w-[260px] shrink-0 border-r border-border bg-[#f9f9f9] px-2 py-3 md:block">
+        {history}
       </div>
-      <div className="flex min-w-0 gap-4">
-        <div className="hidden w-72 shrink-0 md:block">{history}</div>
 
-        <div className="flex min-w-0 flex-1 flex-col">
-          <div className="mb-4 min-h-[400px] flex-1 space-y-4 overflow-y-auto overflow-x-hidden rounded-lg border bg-card p-4">
-            {messages.length === 0 && (
-              <p className="text-center text-sm text-muted-foreground">
-                {canChat
-                  ? '向知识库提问，将基于已摄入的文档进行 RAG 问答'
-                  : `暂无已完成摄入的文档，请先在“文档管理”上传并等待处理完成`}
-              </p>
-            )}
-            {messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={cn(
-                  'flex min-w-0',
-                  msg.role === 'user' ? 'justify-end' : 'justify-start',
-                )}
-              >
-                <div
-                  className={cn(
-                    'min-w-0 rounded-lg px-4 py-2 text-sm break-words [overflow-wrap:anywhere]',
-                    msg.role === 'user' ? 'max-w-[85%]' : 'max-w-[90%]',
-                    msg.role === 'user'
-                      ? 'bg-primary text-primary-foreground'
-                      : 'bg-muted',
-                  )}
-                >
-                  {msg.role === 'user' ? (
-                    <p className="whitespace-pre-wrap">{msg.content}</p>
-                  ) : (
-                    <MarkdownContent content={msg.content} />
-                  )}
-                  {msg.streaming && (
-                    <Loader2 className="mt-1 h-3 w-3 animate-spin opacity-60" />
-                  )}
-                </div>
+      <section className="relative flex min-w-0 flex-1 flex-col">
+        <div className="border-b border-border px-3 py-2 md:hidden">
+          <ChatHistoryDrawer open={historyOpen} onOpenChange={setHistoryOpen}>
+            {history}
+          </ChatHistoryDrawer>
+        </div>
+
+        <div className="chatgpt-scrollbar min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4">
+          <div className="mx-auto flex min-h-full max-w-3xl flex-col py-8 pb-44">
+            {messages.length === 0 ? (
+              <div className="flex flex-1 flex-col items-center justify-center text-center">
+                <h2 className="text-2xl font-semibold tracking-tight md:text-3xl">
+                  {canChat ? '今天想了解什么？' : '先上传文档，再开始问答'}
+                </h2>
+                <p className="mt-3 max-w-md text-sm leading-6 text-muted-foreground">
+                  {canChat
+                    ? '向知识库提问，系统会基于已摄入文档检索上下文并生成回答。'
+                    : `当前有 ${completedDocCount} 份可用文档，请先在“文档”中上传并等待处理完成。`}
+                </p>
               </div>
-            ))}
-          </div>
-
-          {!canChat && (
-            <p className="mb-2 text-sm text-amber-600">
-              需要至少 1 份已完成摄入的文档才能问答（当前 {completedDocCount} 份可用）
-            </p>
-          )}
-
-          <div className="flex gap-2">
-            <Textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder={canChat ? '输入你的问题…' : '请先上传文档并等待处理完成…'}
-              rows={2}
-              disabled={streaming || !canChat}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault()
-                  send()
-                }
-              }}
-            />
-            {streaming ? (
-              <Button variant="destructive" size="lg" onClick={stop}>
-                <Square className="h-4 w-4" />
-              </Button>
             ) : (
-              <Button size="lg" onClick={send} disabled={!input.trim() || !canChat}>
-                <Send className="h-4 w-4" />
-              </Button>
+              <div className="space-y-7">
+                {messages.map((msg) => (
+                  <div
+                    key={msg.id}
+                    className={cn(
+                      'flex min-w-0',
+                      msg.role === 'user' ? 'justify-end' : 'justify-start',
+                    )}
+                  >
+                    <div
+                      className={cn(
+                        'min-w-0 text-[15px] leading-7 break-words [overflow-wrap:anywhere]',
+                        msg.role === 'user'
+                          ? 'max-w-[80%] rounded-3xl bg-muted px-5 py-2.5 text-foreground'
+                          : 'w-full max-w-none text-foreground',
+                      )}
+                    >
+                      {msg.role === 'user' ? (
+                        <p className="whitespace-pre-wrap">{msg.content}</p>
+                      ) : (
+                        <div className="rounded-none bg-transparent">
+                          <MarkdownContent content={msg.content} />
+                        </div>
+                      )}
+                      {msg.streaming && (
+                        <Loader2 className="mt-2 h-4 w-4 animate-spin opacity-60" />
+                      )}
+                    </div>
+                  </div>
+                ))}
+
+                {citations.length > 0 && (
+                  <div
+                    className="chatgpt-scrollbar flex items-start gap-2 overflow-x-auto pb-2 pt-1"
+                    data-testid="chat-citation-strip"
+                    aria-label="引用来源"
+                  >
+                    {citations.slice(0, 5).map((c) => (
+                      <div
+                        key={c.chunkId}
+                        className="h-28 w-52 shrink-0 overflow-hidden rounded-2xl border border-border bg-background px-3 py-2 text-xs shadow-sm"
+                        title={c.snippet}
+                      >
+                        <p className="truncate font-medium">{c.fileName}</p>
+                        <div className="mt-1 line-clamp-4 text-muted-foreground">
+                          <MarkdownContent content={c.snippet} compact />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {retrievalDiagnostics && (
+                  <p className="text-center text-xs text-muted-foreground">
+                    检索诊断：{retrievalDiagnostics.retrievalMode ?? 'unknown'} / 命中{' '}
+                    {retrievalDiagnostics.hitCount ?? 0}
+                    {retrievalDiagnostics.topK
+                      ? ` / TopK ${retrievalDiagnostics.topK}`
+                      : ''}
+                    {retrievalDiagnostics.fallbackReason
+                      ? ` / fallback: ${retrievalDiagnostics.fallbackReason}`
+                      : ''}
+                  </p>
+                )}
+              </div>
             )}
           </div>
         </div>
 
-        {citations.length > 0 && (
-          <aside className="w-72 shrink-0 rounded-lg border bg-card p-4">
-            <h3 className="mb-3 text-sm font-semibold">引用来源</h3>
-            <ul className="space-y-3">
-              {citations.map((c) => (
-                <li key={c.chunkId} className="text-xs">
-                  <p className="font-medium text-primary">{c.fileName}</p>
-                  <p className="mt-1 text-muted-foreground line-clamp-3">{c.snippet}</p>
-                  <p className="mt-1 text-muted-foreground">相关度 {c.score.toFixed(3)}</p>
-                </li>
-              ))}
-            </ul>
-          </aside>
-        )}
-      </div>
-    </>
+        <div
+          className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-background via-background to-transparent px-4 pb-4 pt-10"
+          data-testid="chat-composer"
+        >
+          <div className="pointer-events-auto mx-auto max-w-3xl">
+            {!canChat && (
+              <p className="mb-2 text-center text-sm text-amber-700">
+                需要至少 1 份已完成摄入的文档才能问答（当前 {completedDocCount} 份可用）
+              </p>
+            )}
+
+            <div className="flex items-end gap-2 rounded-[28px] border border-border bg-background p-2 shadow-[0_12px_32px_rgba(0,0,0,0.10)]">
+              <Textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder={canChat ? '询问知识库…' : '请先上传文档并等待处理完成…'}
+                rows={1}
+                disabled={streaming || !canChat}
+                className="max-h-40 min-h-[44px] resize-none border-0 bg-transparent px-3 py-3 shadow-none focus-visible:ring-0"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    send()
+                  }
+                }}
+              />
+              {streaming ? (
+                <Button
+                  variant="destructive"
+                  size="lg"
+                  onClick={stop}
+                  className="h-10 w-10 shrink-0 rounded-full px-0"
+                  aria-label="停止生成"
+                  title="停止生成"
+                >
+                  <Square className="h-4 w-4" />
+                </Button>
+              ) : (
+                <Button
+                  size="lg"
+                  onClick={send}
+                  disabled={!input.trim() || !canChat}
+                  className="h-10 w-10 shrink-0 rounded-full px-0"
+                  aria-label="发送"
+                  title="发送"
+                >
+                  <Send className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
+            <p className="mt-2 text-center text-xs text-muted-foreground">
+              回答基于当前知识库文档生成，请核对引用来源。
+            </p>
+          </div>
+        </div>
+      </section>
+    </div>
   )
 }

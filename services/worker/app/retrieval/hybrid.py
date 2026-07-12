@@ -92,8 +92,14 @@ def rerank_hits(query: str, hits: list[dict], top_k: int) -> list[dict]:
 
 def fetch_kb_corpus(kb_id: str) -> list[dict]:
     try:
+        headers = {}
+        if settings.dupi_internal_key:
+            headers["X-Dupi-Internal-Key"] = settings.dupi_internal_key
         with httpx.Client(base_url=settings.api_base_url, timeout=30.0) as client:
-            response = client.get(f"/api/v1/internal/knowledge-bases/{kb_id}/chunks")
+            response = client.get(
+                f"/api/v1/internal/knowledge-bases/{kb_id}/chunks",
+                headers=headers,
+            )
             response.raise_for_status()
             return response.json()
     except Exception as exc:

@@ -71,8 +71,9 @@ export function UploadZone({ onUpload, disabled }: UploadZoneProps) {
       onDragLeave={onDragLeave}
       onDrop={onDropEvent}
       className={cn(
-        'flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed p-8 transition-colors',
-        isDragActive && 'border-primary bg-primary/5',
+        'flex cursor-pointer flex-col items-center justify-center rounded-3xl border border-dashed border-border bg-muted/30 p-10 text-center transition-colors',
+        'hover:bg-muted/60',
+        isDragActive && 'border-foreground bg-muted',
         (disabled || uploading) && 'cursor-not-allowed opacity-50',
       )}
     >
@@ -84,7 +85,9 @@ export function UploadZone({ onUpload, disabled }: UploadZoneProps) {
         disabled={disabled || uploading}
         onChange={onInputChange}
       />
-      <Upload className="mb-2 h-8 w-8 text-muted-foreground" />
+      <span className="mb-3 flex h-11 w-11 items-center justify-center rounded-2xl bg-background shadow-sm">
+        <Upload className="h-5 w-5 text-muted-foreground" />
+      </span>
       <p className="text-sm font-medium">{statusText}</p>
       <p className="mt-1 text-xs text-muted-foreground">
         支持 PDF、DOCX、TXT、MD、Excel，可多选或拖拽多个文件

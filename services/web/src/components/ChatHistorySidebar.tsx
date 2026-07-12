@@ -97,9 +97,9 @@ export function ChatHistorySidebar({
   }
 
   return (
-    <aside className="flex h-full min-h-0 flex-col rounded-lg border bg-card">
-      <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
-        <h2 className="text-sm font-semibold">历史会话</h2>
+    <aside className="flex h-full min-h-0 flex-col rounded-2xl border border-transparent bg-transparent">
+      <div className="flex items-center justify-between gap-2 px-2 py-2">
+        <h2 className="text-sm font-semibold text-muted-foreground">历史会话</h2>
         <Button
           type="button"
           size="sm"
@@ -108,19 +108,19 @@ export function ChatHistorySidebar({
           disabled={streaming}
           title="新建会话"
           aria-label="新建会话"
-          className="h-8 px-2"
+          className="h-8 rounded-xl px-2"
         >
           <Plus className="h-4 w-4" />
         </Button>
       </div>
 
-      <div className="flex items-center gap-2 border-b px-3 py-2">
+      <div className="flex items-center gap-2 px-2 pb-2">
         <Button
           type="button"
           size="sm"
           variant={selectionMode ? 'secondary' : 'ghost'}
           onClick={toggleSelectionMode}
-          className="h-8 flex-1"
+          className="h-8 flex-1 rounded-xl"
         >
           {selectionMode ? '取消选择' : '批量选择'}
         </Button>
@@ -131,14 +131,14 @@ export function ChatHistorySidebar({
             variant="destructive"
             onClick={deleteSelected}
             disabled={selectedIds.length === 0}
-            className="h-8"
+            className="h-8 rounded-xl"
           >
             删除{selectedIds.length > 0 ? ` ${selectedIds.length}` : ''}
           </Button>
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-2">
+      <div className="chatgpt-scrollbar min-h-0 flex-1 overflow-y-auto px-1 pb-2">
         {sessions.length === 0 ? (
           <p className="px-2 py-6 text-center text-sm text-muted-foreground">暂无历史会话</p>
         ) : (
@@ -162,9 +162,9 @@ export function ChatHistorySidebar({
                       }
                     }}
                     className={cn(
-                      'group flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition-colors',
+                      'group flex w-full cursor-pointer items-center gap-2 rounded-xl px-3 py-2 text-left text-sm transition-colors',
                       'hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                      isActive && !selectionMode && 'bg-muted font-medium text-primary',
+                      isActive && !selectionMode && 'bg-muted font-medium text-foreground',
                       isSelected && 'bg-primary/10 text-primary',
                       streaming && !selectionMode && 'cursor-not-allowed opacity-60',
                     )}

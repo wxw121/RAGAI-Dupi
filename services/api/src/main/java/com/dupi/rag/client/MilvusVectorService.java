@@ -3,9 +3,13 @@ package com.dupi.rag.client;
 import com.dupi.rag.config.MilvusProperties;
 import com.dupi.rag.config.LlmProperties;
 import io.milvus.client.MilvusServiceClient;
+import io.milvus.grpc.CollectionSchema;
 import io.milvus.grpc.DataType;
+import io.milvus.grpc.DescribeCollectionResponse;
+import io.milvus.grpc.FieldSchema;
 import io.milvus.grpc.GetLoadingProgressResponse;
 import io.milvus.grpc.GetLoadStateResponse;
+import io.milvus.grpc.KeyValuePair;
 import io.milvus.grpc.LoadState;
 import io.milvus.grpc.MutationResult;
 import io.milvus.grpc.SearchResults;
@@ -42,6 +46,7 @@ public class MilvusVectorService {
                 .withCollectionName(collection)
                 .build());
         if (Boolean.TRUE.equals(has.getData())) {
+            validateExistingCollectionSchema(collection);
             client.loadCollection(LoadCollectionParam.newBuilder()
                     .withCollectionName(collection)
                     .build());
@@ -101,6 +106,53 @@ public class MilvusVectorService {
                 .withCollectionName(collection)
                 .build());
         log.info("Milvus collection {} ready", collection);
+    }
+
+    private void validateExistingCollectionSchema(String collection) {
+        R<DescribeCollectionResponse> described = client.describeCollection(DescribeCollectionParam.newBuilder()
+                .withCollectionName(collection)
+                .build());
+        if (described == null
+                || described.getStatus() != R.Status.Success.getCode()
+                || described.getData() == null
+                || !described.getData().hasSchema()) {
+            throw new IllegalStateException("Milvus collection schema is unavailable: collection=" + collection
+                    + " message=" + (described != null ? described.getMessage() : "empty describe response"));
+        }
+
+        CollectionSchema schema = described.getData().getSchema();
+        FieldSchema vectorField = schema.getFieldsList().stream()
+                .filter(field -> "embedding".equals(field.getName()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException(
+                        "Milvus collection schema is missing embedding field: collection=" + collection));
+        if (vectorField.getDataType() != DataType.FloatVector) {
+            throw new IllegalStateException("Milvus collection embedding field type mismatch: collection=" + collection
+                    + " expected=FloatVector actual=" + vectorField.getDataType());
+        }
+
+        int expectedDimension = llmProperties.getEmbedding().getDimension();
+        int actualDimension = vectorField.getTypeParamsList().stream()
+                .filter(param -> "dim".equalsIgnoreCase(param.getKey()))
+                .map(KeyValuePair::getValue)
+                .findFirst()
+                .map(this::parseDimension)
+                .orElseThrow(() -> new IllegalStateException(
+                        "Milvus collection embedding dimension is missing: collection=" + collection));
+        if (actualDimension != expectedDimension) {
+            throw new IllegalStateException("Milvus collection embedding dimension mismatch: collection=" + collection
+                    + " expected=" + expectedDimension
+                    + " actual=" + actualDimension
+                    + ". Reset the collection or configure a dimension-specific collection before startup.");
+        }
+    }
+
+    private int parseDimension(String value) {
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException("Milvus collection embedding dimension is invalid: " + value, e);
+        }
     }
 
     public List<SearchResult> search(UUID kbId, List<Float> queryVector, int topK) {
@@ -196,12 +248,36 @@ public class MilvusVectorService {
         deleteIgnoringUnloadedCollection(param, "doc", docId);
     }
 
+    public void deleteByDocIdForCleanup(UUID docId) {
+        DeleteParam param = DeleteParam.newBuilder()
+                .withCollectionName(properties.getCollection())
+                .withExpr("doc_id == \"" + docId + "\"")
+                .build();
+        deleteStrict(param);
+    }
+
     public void deleteByKbId(UUID kbId) {
         DeleteParam param = DeleteParam.newBuilder()
                 .withCollectionName(properties.getCollection())
                 .withExpr("kb_id == \"" + kbId + "\"")
                 .build();
         deleteIgnoringUnloadedCollection(param, "kb", kbId);
+    }
+
+    public void deleteByKbIdForCleanup(UUID kbId) {
+        DeleteParam param = DeleteParam.newBuilder()
+                .withCollectionName(properties.getCollection())
+                .withExpr("kb_id == \"" + kbId + "\"")
+                .build();
+        deleteStrict(param);
+    }
+
+    private void deleteStrict(DeleteParam param) {
+        R<MutationResult> response = client.delete(param);
+        if (response == null || response.getStatus() != R.Status.Success.getCode()) {
+            throw new IllegalStateException("Milvus cleanup delete failed: "
+                    + (response != null ? response.getMessage() : "empty delete response"));
+        }
     }
 
     private void deleteIgnoringUnloadedCollection(DeleteParam param, String scope, UUID id) {

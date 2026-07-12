@@ -125,6 +125,31 @@ def test_delete_by_doc_tolerates_partially_loaded_collection(monkeypatch):
     MilvusIndexer(dimension=1024).delete_by_doc("doc")
 
 
+def test_delete_by_doc_tolerates_timestamp_lag(monkeypatch):
+    class FakeMilvusException(Exception):
+        pass
+
+    class FakeCollection:
+        def __init__(self, name):
+            self.name = name
+            self.schema = types.SimpleNamespace(fields=[
+                types.SimpleNamespace(name="embedding", params={"dim": 1024}),
+            ])
+
+        def delete(self, **kwargs):
+            raise FakeMilvusException(
+                "failed to search/query delegator 7 for channel x: Timestamp lag too large"
+            )
+
+    monkeypatch.setattr(indexer_module.settings, "milvus_collection", "dupi_chunks")
+    monkeypatch.setattr(indexer_module.settings, "embedding_dimension", 1024)
+    monkeypatch.setattr(indexer_module.utility, "has_collection", lambda name: True)
+    monkeypatch.setattr(indexer_module, "Collection", FakeCollection)
+    monkeypatch.setattr(indexer_module, "MilvusException", FakeMilvusException)
+
+    MilvusIndexer(dimension=1024).delete_by_doc("doc")
+
+
 def test_delete_by_doc_reraises_other_milvus_errors(monkeypatch):
     class FakeMilvusException(Exception):
         pass

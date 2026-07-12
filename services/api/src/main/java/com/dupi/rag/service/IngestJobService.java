@@ -1,5 +1,8 @@
 package com.dupi.rag.service;
 
+import com.dupi.rag.client.MilvusVectorService;
+import com.dupi.rag.config.LlmProperties;
+import com.dupi.rag.config.RedisQueueProperties;
 import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.IngestJob;
@@ -14,14 +17,18 @@ import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class IngestJobService {
 
     private final IngestJobRepository ingestJobRepository;
@@ -29,6 +36,13 @@ public class IngestJobService {
     private final ChunkRepository chunkRepository;
     private final KnowledgeBaseService knowledgeBaseService;
     private final IngestJobProducer ingestJobProducer;
+    private final IngestOutboxService ingestOutboxService;
+    private final DocumentTombstoneService documentTombstoneService;
+    private final RedisQueueProperties redisQueueProperties;
+    private final LlmProperties llmProperties;
+    private final MilvusVectorService milvusVectorService;
+    private final VectorCleanupTaskService vectorCleanupTaskService;
+    private final AuditLogService auditLogService;
 
     public IngestJobResponse getLatestByDoc(UUID docId) {
         IngestJob job = ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(docId)
@@ -46,10 +60,15 @@ public class IngestJobService {
     @Transactional
     public void handleStatusUpdate(IngestStatusUpdate update) {
         UUID jobId = UUID.fromString(update.getJobId());
+        UUID docId = UUID.fromString(update.getDocId());
+        if (documentTombstoneService.isDeleted(docId)) {
+            log.info("Ignored ingest status update for tombstoned document {}, job {}", docId, jobId);
+            return;
+        }
         IngestJob job = ingestJobRepository.findById(jobId)
                 .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
 
-        Document doc = documentRepository.findById(UUID.fromString(update.getDocId()))
+        Document doc = documentRepository.findById(docId)
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
         if (!job.getDocId().equals(doc.getId()) || !job.getKbId().equals(doc.getKbId())) {
             throw new IllegalArgumentException("Ingest status update does not match job/document");
@@ -100,10 +119,26 @@ public class IngestJobService {
     public IngestJobResponse retry(UUID jobId) {
         IngestJob job = ingestJobRepository.findById(jobId)
                 .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
-        if (job.getRetryCount() >= 3) {
+        KnowledgeBase kb = knowledgeBaseService.findSystemOrThrow(job.getKbId());
+        return retryJob(job, kb);
+    }
+
+    @Transactional
+    public IngestJobResponse retryForKnowledgeBase(UUID kbId, UUID jobId) {
+        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
+        IngestJob job = ingestJobRepository.findById(jobId)
+                .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
+        if (!job.getKbId().equals(kbId)) {
+            throw new IllegalArgumentException("Ingest job does not belong to knowledge base: " + kbId);
+        }
+        return retryJob(job, kb);
+    }
+
+    private IngestJobResponse retryJob(IngestJob job, KnowledgeBase kb) {
+        if (job.getStatus() != IngestJobStatus.DEAD_LETTER && job.getRetryCount() >= maxRecoveryAttempts()) {
             throw new IllegalStateException("Max retries exceeded");
         }
-        job.setRetryCount(job.getRetryCount() + 1);
+        job.setRetryCount(job.getStatus() == IngestJobStatus.DEAD_LETTER ? 0 : safeRetryCount(job) + 1);
         job.setStatus(IngestJobStatus.PENDING);
         job.setStage(IngestStage.QUEUED);
         job.setErrorMessage(null);
@@ -111,12 +146,146 @@ public class IngestJobService {
 
         Document doc = documentRepository.findById(job.getDocId())
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
-        KnowledgeBase kb = knowledgeBaseService.findOrThrow(job.getKbId());
-        doc.setStatus(com.dupi.rag.domain.enums.DocumentStatus.PROCESSING);
+        doc.setStatus(DocumentStatus.PENDING);
+        doc.setErrorMessage(null);
         documentRepository.save(doc);
-        ingestJobProducer.enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        ingestOutboxService.record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        auditLogService.recordSuccess(
+                "INGEST_JOB_RETRY",
+                "INGEST_JOB",
+                job.getId(),
+                "Retried ingest job " + job.getId() + " for knowledge base " + kb.getId()
+        );
 
         return toResponse(job);
+    }
+
+    @Transactional
+    public List<IngestJobResponse> reindexKnowledgeBase(UUID kbId) {
+        return reindexKnowledgeBase(
+                kbId,
+                llmProperties.getEmbedding().getModel(),
+                llmProperties.getEmbedding().getDimension()
+        );
+    }
+
+    @Transactional
+    public List<IngestJobResponse> reindexKnowledgeBase(UUID kbId, String embeddingModel, int embeddingDimension) {
+        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
+        kb.setEmbeddingModel(embeddingModel);
+        kb.setEmbeddingDimension(embeddingDimension);
+
+        vectorCleanupTaskService.enqueueKnowledgeBase(kbId);
+        try {
+            milvusVectorService.deleteByKbId(kbId);
+        } catch (Exception e) {
+            log.warn("Failed to delete Milvus vectors before reindexing knowledge base {}", kbId, e);
+            // 重建以数据库状态为主：向量库短暂不可用时，仍清理本地 chunks 并重建摄入任务；
+            // 残留向量交给补偿任务继续清理，避免 reindex 操作被外部存储抖动卡死。
+        }
+
+        chunkRepository.deleteByKbId(kbId);
+        List<IngestJobResponse> responses = documentRepository.findByKbIdOrderByCreatedAtDesc(kbId).stream()
+                .map(doc -> requeueDocumentForReindex(kb, doc))
+                .toList();
+        auditLogService.recordSuccess(
+                "KNOWLEDGE_BASE_REINDEX",
+                "KNOWLEDGE_BASE",
+                kbId,
+                "Reindexed knowledge base " + kbId + " with " + responses.size() + " document(s)"
+        );
+        return responses;
+    }
+
+    @Scheduled(cron = "${dupi.ingest.recovery-cron:0 */2 * * * *}")
+    public void recoverQueuedJobsOnSchedule() {
+        int recovered = recoverQueuedJobs();
+        if (recovered > 0) {
+            log.info("Recovered {} queued ingest job(s)", recovered);
+        }
+    }
+
+    @Transactional
+    public int recoverQueuedJobs() {
+        List<IngestJob> jobs = ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
+                IngestJobStatus.PENDING, IngestStage.QUEUED);
+        int recovered = 0;
+        for (IngestJob job : jobs) {
+            Document doc = documentRepository.findById(job.getDocId()).orElse(null);
+            if (doc == null || doc.getStatus() != DocumentStatus.PENDING) {
+                continue;
+            }
+            try {
+                KnowledgeBase kb = knowledgeBaseService.findSystemOrThrow(job.getKbId());
+                ingestJobProducer.enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+                job.setErrorMessage(null);
+                doc.setStatus(DocumentStatus.PROCESSING);
+                doc.setErrorMessage(null);
+                ingestJobRepository.save(job);
+                documentRepository.save(doc);
+                recovered++;
+            } catch (Exception e) {
+                log.warn("Failed to recover queued ingest job {}", job.getId(), e);
+                markRecoveryFailure(job, doc, e);
+            }
+        }
+        return recovered;
+    }
+
+    private IngestJobResponse requeueDocumentForReindex(KnowledgeBase kb, Document doc) {
+        Instant now = Instant.now();
+        IngestJob job = IngestJob.builder()
+                .id(UUID.randomUUID())
+                .kbId(kb.getId())
+                .docId(doc.getId())
+                .status(IngestJobStatus.PENDING)
+                .stage(IngestStage.QUEUED)
+                .retryCount(0)
+                .createdAt(now)
+                .updatedAt(now)
+                .build();
+        ingestJobRepository.save(job);
+
+        doc.setStatus(DocumentStatus.PENDING);
+        doc.setErrorMessage(null);
+        ingestOutboxService.record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        documentRepository.save(doc);
+        return toResponse(job);
+    }
+
+    private void markRecoveryFailure(IngestJob job, Document doc, Exception e) {
+        int attempts = safeRetryCount(job) + 1;
+        job.setRetryCount(attempts);
+        String reason = errorReason(e);
+        if (attempts >= maxRecoveryAttempts()) {
+            job.setStatus(IngestJobStatus.DEAD_LETTER);
+            job.setStage(IngestStage.DEAD_LETTER);
+            job.setErrorMessage("Ingest recovery dead-letter after " + attempts + " attempts: " + reason);
+            doc.setStatus(DocumentStatus.FAILED);
+            doc.setErrorMessage("Ingest job moved to dead-letter after " + attempts + " recovery attempts: " + reason);
+            ingestJobRepository.save(job);
+            documentRepository.save(doc);
+            return;
+        }
+        job.setStatus(IngestJobStatus.PENDING);
+        job.setStage(IngestStage.QUEUED);
+        job.setErrorMessage("Waiting for ingest queue recovery: " + reason);
+        ingestJobRepository.save(job);
+    }
+
+    private int maxRecoveryAttempts() {
+        int configured = redisQueueProperties.getMaxRecoveryAttempts();
+        return configured > 0 ? configured : 3;
+    }
+
+    private int safeRetryCount(IngestJob job) {
+        return job.getRetryCount() == null ? 0 : job.getRetryCount();
+    }
+
+    private String errorReason(Exception e) {
+        return e.getMessage() == null || e.getMessage().isBlank()
+                ? e.getClass().getSimpleName()
+                : e.getMessage();
     }
 
     private IngestJobResponse toResponse(IngestJob job) {

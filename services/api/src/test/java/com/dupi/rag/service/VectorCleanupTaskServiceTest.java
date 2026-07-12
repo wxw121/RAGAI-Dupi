@@ -1,0 +1,237 @@
+package com.dupi.rag.service;
+
+import com.dupi.rag.client.MilvusVectorService;
+import com.dupi.rag.config.SecurityContext;
+import com.dupi.rag.domain.entity.VectorCleanupTask;
+import com.dupi.rag.domain.enums.VectorCleanupStatus;
+import com.dupi.rag.domain.enums.VectorCleanupTargetType;
+import com.dupi.rag.repository.VectorCleanupTaskRepository;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class VectorCleanupTaskServiceTest {
+
+    @Mock VectorCleanupTaskRepository repository;
+    @Mock MilvusVectorService milvusVectorService;
+    @Mock AuditLogService auditLogService;
+
+    @AfterEach
+    void tearDown() {
+        SecurityContext.clear();
+    }
+
+    @Test
+    void enqueueDocumentCreatesPendingTaskOnlyWhenOneDoesNotAlreadyExist() {
+        UUID docId = UUID.randomUUID();
+        when(repository.findByTargetTypeAndTargetIdAndStatus(
+                VectorCleanupTargetType.DOCUMENT,
+                docId,
+                VectorCleanupStatus.PENDING
+        )).thenReturn(Optional.empty());
+
+        service().enqueueDocument(docId);
+
+        ArgumentCaptor<VectorCleanupTask> captor = ArgumentCaptor.forClass(VectorCleanupTask.class);
+        verify(repository).save(captor.capture());
+        assertThat(captor.getValue().getTargetType()).isEqualTo(VectorCleanupTargetType.DOCUMENT);
+        assertThat(captor.getValue().getTargetId()).isEqualTo(docId);
+        assertThat(captor.getValue().getStatus()).isEqualTo(VectorCleanupStatus.PENDING);
+
+        reset(repository);
+        when(repository.findByTargetTypeAndTargetIdAndStatus(
+                VectorCleanupTargetType.DOCUMENT,
+                docId,
+                VectorCleanupStatus.PENDING
+        )).thenReturn(Optional.of(VectorCleanupTask.builder().targetId(docId).build()));
+
+        service().enqueueDocument(docId);
+
+        verify(repository, never()).save(any());
+    }
+
+    @Test
+    void enqueueKnowledgeBaseCreatesKnowledgeBaseTask() {
+        UUID kbId = UUID.randomUUID();
+        when(repository.findByTargetTypeAndTargetIdAndStatus(
+                VectorCleanupTargetType.KNOWLEDGE_BASE,
+                kbId,
+                VectorCleanupStatus.PENDING
+        )).thenReturn(Optional.empty());
+
+        service().enqueueKnowledgeBase(kbId);
+
+        verify(repository).save(argThat(task ->
+                task.getTargetType() == VectorCleanupTargetType.KNOWLEDGE_BASE
+                        && task.getTargetId().equals(kbId)
+                        && task.getStatus() == VectorCleanupStatus.PENDING));
+    }
+
+    @Test
+    void processPendingTasksCompletesSuccessfulDocumentCleanup() {
+        UUID docId = UUID.randomUUID();
+        VectorCleanupTask task = task(VectorCleanupTargetType.DOCUMENT, docId);
+        when(repository.findTop50ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
+                eq(VectorCleanupStatus.PENDING),
+                any(Instant.class)
+        )).thenReturn(List.of(task));
+
+        service().processPendingTasks();
+
+        verify(milvusVectorService).deleteByDocIdForCleanup(docId);
+        assertThat(task.getStatus()).isEqualTo(VectorCleanupStatus.COMPLETED);
+        assertThat(task.getLastError()).isNull();
+    }
+
+    @Test
+    void processPendingTasksBacksOffFailedKnowledgeBaseCleanup() {
+        UUID kbId = UUID.randomUUID();
+        VectorCleanupTask task = task(VectorCleanupTargetType.KNOWLEDGE_BASE, kbId);
+        Instant before = Instant.now();
+        when(repository.findTop50ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
+                eq(VectorCleanupStatus.PENDING),
+                any(Instant.class)
+        )).thenReturn(List.of(task));
+        doThrow(new IllegalStateException("milvus down"))
+                .when(milvusVectorService).deleteByKbIdForCleanup(kbId);
+
+        service().processPendingTasks();
+
+        assertThat(task.getStatus()).isEqualTo(VectorCleanupStatus.PENDING);
+        assertThat(task.getAttemptCount()).isEqualTo(1);
+        assertThat(task.getLastError()).contains("milvus down");
+        assertThat(task.getNextAttemptAt()).isAfter(before);
+    }
+
+    @Test
+    void listOpenTasksReturnsPendingAndFailedTasksFromRepositoryOrdering() {
+        VectorCleanupTask pending = task(VectorCleanupTargetType.DOCUMENT, UUID.randomUUID());
+        VectorCleanupTask failed = task(VectorCleanupTargetType.KNOWLEDGE_BASE, UUID.randomUUID());
+        failed.setStatus(VectorCleanupStatus.FAILED);
+        when(repository.findTop50ByStatusInOrderByUpdatedAtDesc(List.of(
+                VectorCleanupStatus.PENDING,
+                VectorCleanupStatus.FAILED
+        ))).thenReturn(List.of(failed, pending));
+
+        var responses = service().listOpenTasks();
+
+        assertThat(responses).extracting("id").containsExactly(failed.getId(), pending.getId());
+        assertThat(responses).extracting("status").containsExactly(VectorCleanupStatus.FAILED, VectorCleanupStatus.PENDING);
+    }
+
+    @Test
+    void listOpenTasksFiltersDocumentTasksByKnowledgeBaseScopeForNonAdminUsers() {
+        UUID allowedKbId = UUID.randomUUID();
+        UUID allowedDocId = UUID.randomUUID();
+        UUID hiddenDocId = UUID.randomUUID();
+        VectorCleanupTask allowed = task(VectorCleanupTargetType.DOCUMENT, allowedDocId);
+        VectorCleanupTask hidden = task(VectorCleanupTargetType.DOCUMENT, hiddenDocId);
+        SecurityContext.set("maintainer", "USER", List.of("OPS_ADMIN"), List.of(allowedKbId.toString()));
+        when(repository.findTop50ByStatusInOrderByUpdatedAtDesc(List.of(
+                VectorCleanupStatus.PENDING,
+                VectorCleanupStatus.FAILED
+        ))).thenReturn(List.of(allowed, hidden));
+        when(repository.resolveKnowledgeBaseIdForDocumentTarget(allowedDocId)).thenReturn(Optional.of(allowedKbId));
+        when(repository.resolveKnowledgeBaseIdForDocumentTarget(hiddenDocId)).thenReturn(Optional.of(UUID.randomUUID()));
+
+        var responses = service().listOpenTasks();
+
+        assertThat(responses).extracting("targetId").containsExactly(allowedDocId);
+    }
+
+    @Test
+    void retryProcessesTaskImmediatelyAndRecordsSuccessAudit() {
+        UUID taskId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        VectorCleanupTask task = task(VectorCleanupTargetType.DOCUMENT, docId);
+        task.setId(taskId);
+        task.setAttemptCount(2);
+        task.setLastError("previous failure");
+        when(repository.findById(taskId)).thenReturn(Optional.of(task));
+
+        var response = service().retry(taskId);
+
+        verify(milvusVectorService).deleteByDocIdForCleanup(docId);
+        assertThat(task.getStatus()).isEqualTo(VectorCleanupStatus.COMPLETED);
+        assertThat(task.getLastError()).isNull();
+        assertThat(response.getId()).isEqualTo(taskId);
+        assertThat(response.getStatus()).isEqualTo(VectorCleanupStatus.COMPLETED);
+        verify(auditLogService).recordSuccess(
+                eq("VECTOR_CLEANUP_RETRY"),
+                eq("VECTOR_CLEANUP_TASK"),
+                eq(taskId),
+                contains(docId.toString())
+        );
+    }
+
+    @Test
+    void retryRecordsFailureAuditWhenImmediateCleanupStillFails() {
+        UUID taskId = UUID.randomUUID();
+        UUID kbId = UUID.randomUUID();
+        VectorCleanupTask task = task(VectorCleanupTargetType.KNOWLEDGE_BASE, kbId);
+        task.setId(taskId);
+        when(repository.findById(taskId)).thenReturn(Optional.of(task));
+        doThrow(new IllegalStateException("milvus down"))
+                .when(milvusVectorService).deleteByKbIdForCleanup(kbId);
+
+        var response = service().retry(taskId);
+
+        assertThat(response.getStatus()).isEqualTo(VectorCleanupStatus.PENDING);
+        assertThat(task.getAttemptCount()).isEqualTo(1);
+        assertThat(task.getLastError()).contains("milvus down");
+        verify(auditLogService).recordFailure(
+                eq("VECTOR_CLEANUP_RETRY"),
+                eq("VECTOR_CLEANUP_TASK"),
+                eq(taskId),
+                any(IllegalStateException.class)
+        );
+    }
+
+    @Test
+    void retryRejectsTaskOutsideCurrentKnowledgeBaseScope() {
+        UUID taskId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID allowedKbId = UUID.randomUUID();
+        VectorCleanupTask task = task(VectorCleanupTargetType.DOCUMENT, docId);
+        task.setId(taskId);
+        SecurityContext.set("maintainer", "USER", List.of("OPS_ADMIN"), List.of(allowedKbId.toString()));
+        when(repository.findById(taskId)).thenReturn(Optional.of(task));
+        when(repository.resolveKnowledgeBaseIdForDocumentTarget(docId)).thenReturn(Optional.of(UUID.randomUUID()));
+
+        assertThatThrownBy(() -> service().retry(taskId))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("vector cleanup task access denied");
+
+        verifyNoInteractions(milvusVectorService);
+    }
+
+    private VectorCleanupTaskService service() {
+        return new VectorCleanupTaskService(repository, milvusVectorService, auditLogService);
+    }
+
+    private static VectorCleanupTask task(VectorCleanupTargetType targetType, UUID targetId) {
+        return VectorCleanupTask.builder()
+                .targetType(targetType)
+                .targetId(targetId)
+                .status(VectorCleanupStatus.PENDING)
+                .attemptCount(0)
+                .nextAttemptAt(Instant.now())
+                .createdAt(Instant.now())
+                .updatedAt(Instant.now())
+                .build();
+    }
+}

@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
 import { cn } from '@/lib/utils'
 import { X } from 'lucide-react'
 
@@ -20,19 +20,24 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const addToast = useCallback((message: string, type: 'error' | 'success') => {
     const id = Date.now()
-    setToasts((prev) => [...prev, { id, message, type }])
+    setToasts((prev) => {
+      const withoutDuplicate = prev.filter((toast) => !(toast.message === message && toast.type === type))
+      return [...withoutDuplicate, { id, message, type }].slice(-4)
+    })
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 5000)
   }, [])
 
   const remove = (id: number) => setToasts((prev) => prev.filter((t) => t.id !== id))
+  const contextValue = useMemo(
+    () => ({
+      showError: (message: string) => addToast(message, 'error'),
+      showSuccess: (message: string) => addToast(message, 'success'),
+    }),
+    [addToast],
+  )
 
   return (
-    <ToastContext.Provider
-      value={{
-        showError: (m) => addToast(m, 'error'),
-        showSuccess: (m) => addToast(m, 'success'),
-      }}
-    >
+    <ToastContext.Provider value={contextValue}>
       {children}
       <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2">
         {toasts.map((t) => (

@@ -21,6 +21,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -69,20 +70,24 @@ public class RetrievalService {
         List<Float> vector = llmClient.embed(request.getQuery(), kb.getEmbeddingModel());
         try {
             List<MilvusVectorService.SearchResult> results = milvusVectorService.search(kbId, vector, topK);
+            List<RetrievalHit> hits = mapHits(kbId, results);
             return RetrieveResponse.builder()
                     .query(request.getQuery())
                     .retrievalMode("vector")
-                    .hits(mapHits(kbId, results))
+                    .hits(hits)
+                    .diagnostics(diagnostics(kb, "vector", topK, hits.size(), null))
                     .build();
         } catch (IllegalStateException ex) {
             if (!isMilvusUnavailable(ex)) {
                 throw ex;
             }
             log.warn("Milvus vector retrieval unavailable; falling back to local chunk text search for kb {}", kbId, ex);
+            List<RetrievalHit> hits = localTextFallback(kbId, request.getQuery(), topK);
             return RetrieveResponse.builder()
                     .query(request.getQuery())
                     .retrievalMode("local_text_fallback")
-                    .hits(localTextFallback(kbId, request.getQuery(), topK))
+                    .hits(hits)
+                    .diagnostics(diagnostics(kb, "local_text_fallback", topK, hits.size(), "milvus_unavailable"))
                     .build();
         }
     }
@@ -125,7 +130,27 @@ public class RetrievalService {
                 .query(query)
                 .retrievalMode(useRerank ? "hybrid_rerank" : "hybrid")
                 .hits(hits)
+                .diagnostics(diagnostics(kb, useRerank ? "hybrid_rerank" : "hybrid", topK, hits.size(), null))
                 .build();
+    }
+
+    private Map<String, Object> diagnostics(
+            KnowledgeBase kb,
+            String retrievalMode,
+            int topK,
+            int hitCount,
+            String fallbackReason
+    ) {
+        Map<String, Object> diagnostics = new LinkedHashMap<>();
+        diagnostics.put("retrievalMode", retrievalMode);
+        diagnostics.put("topK", topK);
+        diagnostics.put("hitCount", hitCount);
+        diagnostics.put("embeddingModel", kb.getEmbeddingModel());
+        diagnostics.put("embeddingDimension", kb.getEmbeddingDimension());
+        if (fallbackReason != null) {
+            diagnostics.put("fallbackReason", fallbackReason);
+        }
+        return diagnostics;
     }
 
     private int clampTopK(Integer topK) {
@@ -158,7 +183,12 @@ public class RetrievalService {
 
     private boolean isMilvusUnavailable(IllegalStateException ex) {
         String message = ex.getMessage();
-        return message != null && message.contains("Milvus collection is not ready for search");
+        return message != null && (
+                message.contains("Milvus collection is not ready for search")
+                        || message.contains("Milvus search failed")
+                        || message.contains("Timestamp lag too large")
+                        || message.contains("fail to search on QueryNode")
+        );
     }
 
     private List<RetrievalHit> localTextFallback(UUID kbId, String query, int topK) {

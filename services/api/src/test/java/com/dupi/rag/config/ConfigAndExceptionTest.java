@@ -18,6 +18,10 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.filter.CorsFilter;
 
 import java.io.IOException;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
@@ -61,6 +65,527 @@ class ConfigAndExceptionTest {
     }
 
     @Test
+    void apiKeyFilterAllowsHealthAndRejectsMissingPublicApiKey() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        properties.setApiKey("public-key");
+        properties.setInternalKey("internal-key");
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties);
+        FilterChain chain = mock(FilterChain.class);
+
+        MockHttpServletRequest health = new MockHttpServletRequest("GET", "/actuator/health");
+        MockHttpServletResponse healthResponse = new MockHttpServletResponse();
+        filter.doFilter(health, healthResponse, chain);
+        verify(chain).doFilter(health, healthResponse);
+
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/knowledge-bases");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        filter.doFilter(request, response, mock(FilterChain.class));
+
+        assertThat(response.getStatus()).isEqualTo(HttpStatus.UNAUTHORIZED.value());
+        assertThat(response.getContentAsString()).contains("Unauthorized API request");
+    }
+
+    @Test
+    void apiKeyFilterAllowsPublicAndInternalRequestsWithExpectedKeys() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        properties.setApiKey("public-key");
+        properties.setInternalKey("internal-key");
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties);
+        FilterChain publicChain = mock(FilterChain.class);
+        FilterChain internalChain = mock(FilterChain.class);
+
+        MockHttpServletRequest publicRequest = new MockHttpServletRequest("GET", "/api/v1/knowledge-bases");
+        publicRequest.addHeader(ApiKeyAuthFilter.PUBLIC_API_KEY_HEADER, "public-key");
+        MockHttpServletResponse publicResponse = new MockHttpServletResponse();
+        filter.doFilter(publicRequest, publicResponse, publicChain);
+
+        MockHttpServletRequest internalRequest = new MockHttpServletRequest("POST", "/api/v1/internal/ingest/status");
+        internalRequest.addHeader(ApiKeyAuthFilter.INTERNAL_API_KEY_HEADER, "internal-key");
+        MockHttpServletResponse internalResponse = new MockHttpServletResponse();
+        filter.doFilter(internalRequest, internalResponse, internalChain);
+
+        verify(publicChain).doFilter(publicRequest, publicResponse);
+        verify(internalChain).doFilter(internalRequest, internalResponse);
+    }
+
+    @Test
+    void apiKeyFilterKeepsLocalDevelopmentOpenWhenKeysAreBlank() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties);
+        FilterChain chain = mock(FilterChain.class);
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/internal/ingest/status");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        filter.doFilter(request, response, chain);
+
+        verify(chain).doFilter(request, response);
+        assertThat(response.getStatus()).isEqualTo(200);
+    }
+
+    @Test
+    void apiKeyFilterKeepsLocalDevelopmentOpenAfterRuntimeAccountCreation() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties);
+
+        MockHttpServletRequest createAccount = new MockHttpServletRequest("POST", "/api/v1/ops/accounts");
+        MockHttpServletResponse createAccountResponse = new MockHttpServletResponse();
+        FilterChain createAccountChain = (request, response) -> {
+            assertThat(SecurityContext.getPrincipal()).isEqualTo("local-open");
+            assertThat(SecurityContext.hasPermission("OPS_ADMIN")).isTrue();
+            properties.getUsers().add(user("admin", "pw", "default", "ADMIN"));
+        };
+        filter.doFilter(createAccount, createAccountResponse, createAccountChain);
+
+        MockHttpServletRequest listKnowledgeBases = new MockHttpServletRequest("GET", "/api/v1/knowledge-bases");
+        MockHttpServletResponse listKnowledgeBasesResponse = new MockHttpServletResponse();
+        FilterChain listKnowledgeBasesChain = (request, response) -> {
+            assertThat(SecurityContext.getPrincipal()).isEqualTo("local-open");
+            assertThat(SecurityContext.hasPermission("KB_READ")).isTrue();
+        };
+        filter.doFilter(listKnowledgeBases, listKnowledgeBasesResponse, listKnowledgeBasesChain);
+
+        assertThat(createAccountResponse.getStatus()).isEqualTo(200);
+        assertThat(listKnowledgeBasesResponse.getStatus()).isEqualTo(200);
+    }
+
+    @Test
+    void apiKeyFilterRequiresBearerTokenWhenAccountsAreConfigured() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        properties.setAuthSecret("test-secret");
+        properties.getUsers().add(user("alice", "pw", "tenant-a", "USER"));
+        ApiTokenService tokenService = new ApiTokenService(properties, Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC));
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties, tokenService);
+        FilterChain chain = mock(FilterChain.class);
+
+        MockHttpServletRequest missing = new MockHttpServletRequest("GET", "/api/v1/knowledge-bases");
+        MockHttpServletResponse missingResponse = new MockHttpServletResponse();
+        filter.doFilter(missing, missingResponse, chain);
+
+        MockHttpServletRequest authorized = new MockHttpServletRequest("GET", "/api/v1/knowledge-bases");
+        authorized.addHeader("Authorization", "Bearer " + tokenService.issueToken("alice", "tenant-a", "USER"));
+        authorized.addHeader(TenantContextFilter.TENANT_HEADER, "tenant-b");
+        MockHttpServletResponse authorizedResponse = new MockHttpServletResponse();
+        AtomicBoolean contextObserved = new AtomicBoolean(false);
+        FilterChain authorizedChain = (request, response) -> {
+            assertThat(TenantContext.getTenantId()).isEqualTo("tenant-a");
+            assertThat(SecurityContext.getPrincipal()).isEqualTo("alice");
+            assertThat(SecurityContext.hasRole("USER")).isTrue();
+            contextObserved.set(true);
+        };
+        filter.doFilter(authorized, authorizedResponse, authorizedChain);
+
+        assertThat(missingResponse.getStatus()).isEqualTo(HttpStatus.UNAUTHORIZED.value());
+        assertThat(missingResponse.getContentAsString()).contains("Unauthorized API request");
+        assertThat(contextObserved).isTrue();
+        assertThat(authorizedResponse.getHeader(TenantContextFilter.TENANT_HEADER)).isEqualTo("tenant-a");
+        assertThat(SecurityContext.getPrincipal()).isNull();
+        assertThat(TenantContext.getTenantId()).isEqualTo("default");
+    }
+
+    @Test
+    void apiKeyFilterAuthenticatesCookieTokenAndRequiresCsrfForMutations() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        properties.setAuthSecret("test-secret");
+        properties.getUsers().add(user("alice", "pw", "tenant-a", "USER"));
+        ApiTokenService tokenService = new ApiTokenService(properties, Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC));
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties, tokenService);
+        String token = tokenService.issueToken("alice", "tenant-a", "USER");
+        String csrf = "csrf-token";
+
+        MockHttpServletRequest read = new MockHttpServletRequest("GET", "/api/v1/knowledge-bases");
+        read.setCookies(new jakarta.servlet.http.Cookie(ApiKeyAuthFilter.AUTH_COOKIE_NAME, token));
+        MockHttpServletResponse readResponse = new MockHttpServletResponse();
+        FilterChain readChain = mock(FilterChain.class);
+        filter.doFilter(read, readResponse, readChain);
+
+        MockHttpServletRequest missingCsrf = new MockHttpServletRequest("POST", "/api/v1/knowledge-bases/kb/chat");
+        missingCsrf.setCookies(
+                new jakarta.servlet.http.Cookie(ApiKeyAuthFilter.AUTH_COOKIE_NAME, token),
+                new jakarta.servlet.http.Cookie(ApiKeyAuthFilter.CSRF_COOKIE_NAME, csrf)
+        );
+        MockHttpServletResponse missingCsrfResponse = new MockHttpServletResponse();
+        filter.doFilter(missingCsrf, missingCsrfResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest write = new MockHttpServletRequest("POST", "/api/v1/knowledge-bases/kb/chat");
+        write.setCookies(
+                new jakarta.servlet.http.Cookie(ApiKeyAuthFilter.AUTH_COOKIE_NAME, token),
+                new jakarta.servlet.http.Cookie(ApiKeyAuthFilter.CSRF_COOKIE_NAME, csrf)
+        );
+        write.addHeader(ApiKeyAuthFilter.CSRF_HEADER, csrf);
+        MockHttpServletResponse writeResponse = new MockHttpServletResponse();
+        FilterChain writeChain = mock(FilterChain.class);
+        filter.doFilter(write, writeResponse, writeChain);
+
+        verify(readChain).doFilter(read, readResponse);
+        assertThat(missingCsrfResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(missingCsrfResponse.getContentAsString()).contains("CSRF token required");
+        verify(writeChain).doFilter(write, writeResponse);
+    }
+
+    @Test
+    void apiKeyFilterKeepsApiKeyCompatibilityWhenAccountsAreConfigured() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        properties.setApiKey("public-key");
+        properties.setAuthSecret("test-secret");
+        properties.getUsers().add(user("alice", "pw", "tenant-a", "USER"));
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(
+                properties,
+                new ApiTokenService(properties, Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC))
+        );
+        AtomicBoolean contextObserved = new AtomicBoolean(false);
+        FilterChain chain = (servletRequest, servletResponse) -> {
+            assertThat(TenantContext.getTenantId()).isEqualTo("tenant-api");
+            assertThat(SecurityContext.getPrincipal()).isEqualTo("api-key");
+            assertThat(SecurityContext.hasRole("ADMIN")).isTrue();
+            contextObserved.set(true);
+        };
+
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/knowledge-bases");
+        request.addHeader(ApiKeyAuthFilter.PUBLIC_API_KEY_HEADER, "public-key");
+        request.addHeader(TenantContextFilter.TENANT_HEADER, "tenant-api");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        filter.doFilter(request, response, chain);
+
+        assertThat(contextObserved).isTrue();
+        assertThat(SecurityContext.getPrincipal()).isNull();
+        assertThat(TenantContext.getTenantId()).isEqualTo("default");
+    }
+
+    @Test
+    void apiKeyFilterAllowsOnlyAdminRoleToAccessOpsRoutes() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        properties.setApiKey("public-key");
+        properties.setAuthSecret("test-secret");
+        properties.getUsers().add(user("alice", "pw", "tenant-a", "USER"));
+        properties.getUsers().add(user("admin", "pw", "ops", "ADMIN"));
+        ApiTokenService tokenService = new ApiTokenService(properties, Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC));
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties, tokenService);
+        AtomicBoolean adminContextObserved = new AtomicBoolean(false);
+        FilterChain chain = (servletRequest, servletResponse) -> {
+            assertThat(TenantContext.getTenantId()).isEqualTo("ops");
+            assertThat(SecurityContext.getPrincipal()).isEqualTo("admin");
+            assertThat(SecurityContext.hasRole("ADMIN")).isTrue();
+            adminContextObserved.set(true);
+        };
+
+        MockHttpServletRequest userRequest = new MockHttpServletRequest("GET", "/api/v1/ops/vector-cleanup-tasks");
+        userRequest.addHeader("Authorization", "Bearer " + tokenService.issueToken("alice", "tenant-a", "USER"));
+        userRequest.addHeader(ApiKeyAuthFilter.PUBLIC_API_KEY_HEADER, "public-key");
+        MockHttpServletResponse userResponse = new MockHttpServletResponse();
+        filter.doFilter(userRequest, userResponse, chain);
+
+        MockHttpServletRequest adminRequest = new MockHttpServletRequest("GET", "/api/v1/ops/vector-cleanup-tasks");
+        adminRequest.addHeader("Authorization", "Bearer " + tokenService.issueToken("admin", "ops", "ADMIN"));
+        MockHttpServletResponse adminResponse = new MockHttpServletResponse();
+        filter.doFilter(adminRequest, adminResponse, chain);
+
+        assertThat(userResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(userResponse.getContentAsString()).contains("permission required: OPS_ADMIN");
+        assertThat(adminContextObserved).isTrue();
+        assertThat(SecurityContext.getPrincipal()).isNull();
+        assertThat(TenantContext.getTenantId()).isEqualTo("default");
+    }
+
+    @Test
+    void apiKeyFilterRequiresFineGrainedPermissionsForDestructiveRoutes() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        properties.setAuthSecret("test-secret");
+        ApiSecurityProperties.UserAccount reader = user("reader", "pw", "tenant-a", "USER");
+        ApiSecurityProperties.UserAccount maintainer = user("maintainer", "pw", "tenant-a", "USER");
+        maintainer.setPermissions("KB_READ,DOCUMENT_DELETE");
+        properties.getUsers().add(reader);
+        properties.getUsers().add(maintainer);
+        ApiTokenService tokenService = new ApiTokenService(properties, Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC));
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties, tokenService);
+        AtomicBoolean deleteContextObserved = new AtomicBoolean(false);
+        FilterChain deleteChain = (servletRequest, servletResponse) -> {
+            assertThat(SecurityContext.getPrincipal()).isEqualTo("maintainer");
+            assertThat(SecurityContext.hasPermission("DOCUMENT_DELETE")).isTrue();
+            assertThat(SecurityContext.hasPermission("OPS_ADMIN")).isFalse();
+            deleteContextObserved.set(true);
+        };
+
+        MockHttpServletRequest readerList = new MockHttpServletRequest("GET", "/api/v1/knowledge-bases");
+        readerList.addHeader("Authorization", "Bearer " + tokenService.issueToken("reader", "tenant-a", "USER"));
+        MockHttpServletResponse readerListResponse = new MockHttpServletResponse();
+        FilterChain readChain = mock(FilterChain.class);
+        filter.doFilter(readerList, readerListResponse, readChain);
+
+        MockHttpServletRequest readerDelete = new MockHttpServletRequest("DELETE", "/api/v1/knowledge-bases/kb/documents/doc");
+        readerDelete.addHeader("Authorization", "Bearer " + tokenService.issueToken("reader", "tenant-a", "USER"));
+        MockHttpServletResponse readerDeleteResponse = new MockHttpServletResponse();
+        filter.doFilter(readerDelete, readerDeleteResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest maintainerDelete = new MockHttpServletRequest("DELETE", "/api/v1/knowledge-bases/kb/documents/doc");
+        maintainerDelete.addHeader("Authorization", "Bearer " + tokenService.issueToken("maintainer", "tenant-a", "USER"));
+        MockHttpServletResponse maintainerDeleteResponse = new MockHttpServletResponse();
+        filter.doFilter(maintainerDelete, maintainerDeleteResponse, deleteChain);
+
+        MockHttpServletRequest maintainerOps = new MockHttpServletRequest("GET", "/api/v1/ops/vector-cleanup-tasks");
+        maintainerOps.addHeader("Authorization", "Bearer " + tokenService.issueToken("maintainer", "tenant-a", "USER"));
+        MockHttpServletResponse maintainerOpsResponse = new MockHttpServletResponse();
+        filter.doFilter(maintainerOps, maintainerOpsResponse, mock(FilterChain.class));
+
+        verify(readChain).doFilter(readerList, readerListResponse);
+        assertThat(readerDeleteResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(readerDeleteResponse.getContentAsString()).contains("permission required: DOCUMENT_DELETE");
+        assertThat(deleteContextObserved).isTrue();
+        assertThat(maintainerOpsResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(maintainerOpsResponse.getContentAsString()).contains("permission required: OPS_ADMIN");
+        assertThat(SecurityContext.getPrincipal()).isNull();
+        assertThat(TenantContext.getTenantId()).isEqualTo("default");
+    }
+
+    @Test
+    void apiKeyFilterRestrictsScopedUsersToConfiguredKnowledgeBases() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        properties.setAuthSecret("test-secret");
+        ApiSecurityProperties.UserAccount scoped = user("scoped", "pw", "tenant-a", "USER");
+        scoped.setPermissions("KB_READ,CHAT_WRITE,DOCUMENT_DELETE");
+        scoped.setKnowledgeBaseIds("kb-a,kb-b");
+        properties.getUsers().add(scoped);
+        properties.getUsers().add(user("admin", "pw", "ops", "ADMIN"));
+        ApiTokenService tokenService = new ApiTokenService(properties, Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC));
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties, tokenService);
+
+        assertAllowed(filter, tokenService, "scoped", "GET", "/api/v1/knowledge-bases/kb-a/documents");
+        assertAllowed(filter, tokenService, "scoped", "POST", "/api/v1/knowledge-bases/kb-b/chat");
+        assertAllowed(filter, tokenService, "admin", "DELETE", "/api/v1/knowledge-bases/kb-secret");
+
+        MockHttpServletRequest forbidden = bearerRequest(tokenService, "scoped", "GET", "/api/v1/knowledge-bases/kb-secret/documents");
+        MockHttpServletResponse forbiddenResponse = new MockHttpServletResponse();
+        filter.doFilter(forbidden, forbiddenResponse, mock(FilterChain.class));
+
+        assertThat(forbiddenResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(forbiddenResponse.getContentAsString()).contains("knowledge base access required: kb-secret");
+        assertThat(SecurityContext.getPrincipal()).isNull();
+        assertThat(TenantContext.getTenantId()).isEqualTo("default");
+    }
+
+    @Test
+    void apiKeyFilterMapsWriteMaintenanceAndChatPermissions() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        properties.setAuthSecret("test-secret");
+        ApiSecurityProperties.UserAccount operator = user("operator", "pw", "tenant-a", "USER");
+        operator.setPermissions("KB_READ,KB_WRITE,KB_DELETE,DOCUMENT_UPLOAD,CHAT_WRITE,CHAT_DELETE,MAINTENANCE");
+        ApiSecurityProperties.UserAccount reader = user("reader", "pw", "tenant-a", "USER");
+        properties.getUsers().add(operator);
+        properties.getUsers().add(reader);
+        ApiTokenService tokenService = new ApiTokenService(properties, Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC));
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties, tokenService);
+
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/documents");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/documents/batch");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/chat");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/retrieve");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/reindex");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/ingest-jobs/job/retry");
+        assertAllowed(filter, tokenService, "operator", "DELETE", "/api/v1/knowledge-bases/kb");
+        assertAllowed(filter, tokenService, "operator", "DELETE", "/api/v1/knowledge-bases/kb/chat-sessions/session");
+
+        MockHttpServletRequest createKb = bearerRequest(tokenService, "reader", "POST", "/api/v1/knowledge-bases");
+        MockHttpServletResponse createKbResponse = new MockHttpServletResponse();
+        filter.doFilter(createKb, createKbResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest reindex = bearerRequest(tokenService, "reader", "POST", "/api/v1/knowledge-bases/kb/reindex");
+        MockHttpServletResponse reindexResponse = new MockHttpServletResponse();
+        filter.doFilter(reindex, reindexResponse, mock(FilterChain.class));
+
+        assertThat(createKbResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(createKbResponse.getContentAsString()).contains("permission required: KB_WRITE");
+        assertThat(reindexResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(reindexResponse.getContentAsString()).contains("permission required: MAINTENANCE");
+        assertThat(SecurityContext.hasPermission(null)).isFalse();
+        assertThat(SecurityContext.hasPermission(" ")).isFalse();
+    }
+
+    @Test
+    void apiKeyFilterLeavesInternalKeyAuthenticationIndependentFromBearerAccounts() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        properties.setInternalKey("internal-key");
+        properties.setAuthSecret("test-secret");
+        properties.getUsers().add(user("alice", "pw", "tenant-a", "USER"));
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(
+                properties,
+                new ApiTokenService(properties, Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC))
+        );
+        AtomicBoolean contextObserved = new AtomicBoolean(false);
+        FilterChain chain = (servletRequest, servletResponse) -> {
+            assertThat(SecurityContext.getPrincipal()).isEqualTo("internal");
+            assertThat(SecurityContext.hasRole("INTERNAL")).isTrue();
+            contextObserved.set(true);
+        };
+
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/internal/ingest/status");
+        request.addHeader(ApiKeyAuthFilter.INTERNAL_API_KEY_HEADER, "internal-key");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        filter.doFilter(request, response, chain);
+
+        assertThat(contextObserved).isTrue();
+        assertThat(SecurityContext.getPrincipal()).isNull();
+        assertThat(TenantContext.getTenantId()).isEqualTo("default");
+    }
+
+    @Test
+    void tenantContextFilterAcceptsSafeTenantHeaderAndClearsAfterRequest() throws Exception {
+        TenantContextFilter filter = new TenantContextFilter();
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/knowledge-bases");
+        request.addHeader(TenantContextFilter.TENANT_HEADER, "tenant-a_01");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        FilterChain chain = mock(FilterChain.class);
+
+        filter.doFilter(request, response, chain);
+
+        verify(chain).doFilter(request, response);
+        assertThat(response.getHeader(TenantContextFilter.TENANT_HEADER)).isEqualTo("tenant-a_01");
+        assertThat(TenantContext.getTenantId()).isEqualTo("default");
+    }
+
+    @Test
+    void tenantContextFilterPreservesTenantAlreadyBoundByToken() throws Exception {
+        TenantContextFilter filter = new TenantContextFilter();
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/knowledge-bases");
+        request.addHeader(TenantContextFilter.TENANT_HEADER, "spoofed-tenant");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        FilterChain chain = mock(FilterChain.class);
+        TenantContext.setTenantId("token-tenant");
+
+        filter.doFilter(request, response, chain);
+
+        verify(chain).doFilter(request, response);
+        assertThat(response.getHeader(TenantContextFilter.TENANT_HEADER)).isEqualTo("token-tenant");
+        assertThat(TenantContext.getTenantId()).isEqualTo("token-tenant");
+        TenantContext.clear();
+    }
+
+    @Test
+    void tenantContextFilterRejectsUnsafeTenantHeader() throws Exception {
+        TenantContextFilter filter = new TenantContextFilter();
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/knowledge-bases");
+        request.addHeader(TenantContextFilter.TENANT_HEADER, "../bad");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        FilterChain chain = mock(FilterChain.class);
+
+        filter.doFilter(request, response, chain);
+
+        verifyNoInteractions(chain);
+        assertThat(response.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST.value());
+        assertThat(response.getContentAsString()).contains("Invalid tenant id");
+    }
+
+    @Test
+    void uploadRateLimitRejectsOnlyUploadRequestsAfterQuotaIsExceeded() throws Exception {
+        UploadRateLimitProperties properties = new UploadRateLimitProperties();
+        properties.setRequests(1);
+        properties.setWindowSeconds(60);
+        UploadRateLimitFilter filter = new UploadRateLimitFilter(
+                properties,
+                Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC)
+        );
+        FilterChain firstChain = mock(FilterChain.class);
+
+        MockHttpServletRequest first = new MockHttpServletRequest("POST", "/api/v1/knowledge-bases/kb/documents/batch");
+        first.setRemoteAddr("127.0.0.1");
+        first.addHeader(ApiKeyAuthFilter.PUBLIC_API_KEY_HEADER, "public-key");
+        MockHttpServletResponse firstResponse = new MockHttpServletResponse();
+        filter.doFilter(first, firstResponse, firstChain);
+
+        MockHttpServletRequest second = new MockHttpServletRequest("POST", "/api/v1/knowledge-bases/kb/documents/batch");
+        second.setRemoteAddr("127.0.0.1");
+        second.addHeader(ApiKeyAuthFilter.PUBLIC_API_KEY_HEADER, "public-key");
+        MockHttpServletResponse secondResponse = new MockHttpServletResponse();
+        filter.doFilter(second, secondResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest listDocs = new MockHttpServletRequest("GET", "/api/v1/knowledge-bases/kb/documents");
+        MockHttpServletResponse listResponse = new MockHttpServletResponse();
+        FilterChain listChain = mock(FilterChain.class);
+        filter.doFilter(listDocs, listResponse, listChain);
+
+        verify(firstChain).doFilter(first, firstResponse);
+        verify(listChain).doFilter(listDocs, listResponse);
+        assertThat(secondResponse.getStatus()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS.value());
+        assertThat(secondResponse.getHeader("Retry-After")).isEqualTo("60");
+        assertThat(secondResponse.getContentAsString()).contains("rate_limited");
+    }
+
+    @Test
+    void uploadRateLimitUsesForwardedIpAndCanBeDisabled() throws Exception {
+        UploadRateLimitProperties properties = new UploadRateLimitProperties();
+        properties.setRequests(1);
+        properties.setWindowSeconds(0);
+        UploadRateLimitFilter filter = new UploadRateLimitFilter(
+                properties,
+                Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC)
+        );
+
+        MockHttpServletRequest first = new MockHttpServletRequest("POST", "/api/v1/knowledge-bases/kb/documents");
+        first.addHeader("X-Forwarded-For", "10.0.0.1, 10.0.0.2");
+        first.addHeader(ApiKeyAuthFilter.PUBLIC_API_KEY_HEADER, "public-key");
+        MockHttpServletResponse firstResponse = new MockHttpServletResponse();
+        FilterChain firstChain = mock(FilterChain.class);
+        filter.doFilter(first, firstResponse, firstChain);
+
+        MockHttpServletRequest second = new MockHttpServletRequest("POST", "/api/v1/knowledge-bases/kb/documents");
+        second.addHeader("X-Forwarded-For", "10.0.0.1, 10.0.0.2");
+        second.addHeader(ApiKeyAuthFilter.PUBLIC_API_KEY_HEADER, "public-key");
+        MockHttpServletResponse secondResponse = new MockHttpServletResponse();
+        filter.doFilter(second, secondResponse, mock(FilterChain.class));
+
+        properties.setEnabled(false);
+        MockHttpServletRequest disabled = new MockHttpServletRequest("POST", "/api/v1/knowledge-bases/kb/documents");
+        MockHttpServletResponse disabledResponse = new MockHttpServletResponse();
+        FilterChain disabledChain = mock(FilterChain.class);
+        filter.doFilter(disabled, disabledResponse, disabledChain);
+
+        verify(firstChain).doFilter(first, firstResponse);
+        verify(disabledChain).doFilter(disabled, disabledResponse);
+        assertThat(secondResponse.getStatus()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS.value());
+        assertThat(secondResponse.getHeader("Retry-After")).isEqualTo("1");
+    }
+
+    @Test
+    void uploadRateLimitScopesAuthenticatedUsersWithinTenant() throws Exception {
+        UploadRateLimitProperties properties = new UploadRateLimitProperties();
+        properties.setRequests(1);
+        properties.setWindowSeconds(60);
+        UploadRateLimitFilter filter = new UploadRateLimitFilter(
+                properties,
+                Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC)
+        );
+
+        try {
+            TenantContext.setTenantId("tenant-a");
+            SecurityContext.set("alice", "USER");
+            MockHttpServletRequest aliceFirst = new MockHttpServletRequest("POST", "/api/v1/knowledge-bases/kb/documents");
+            aliceFirst.setRemoteAddr("127.0.0.1");
+            MockHttpServletResponse aliceFirstResponse = new MockHttpServletResponse();
+            FilterChain aliceFirstChain = mock(FilterChain.class);
+            filter.doFilter(aliceFirst, aliceFirstResponse, aliceFirstChain);
+
+            SecurityContext.set("bob", "USER");
+            MockHttpServletRequest bobFirst = new MockHttpServletRequest("POST", "/api/v1/knowledge-bases/kb/documents");
+            bobFirst.setRemoteAddr("127.0.0.1");
+            MockHttpServletResponse bobFirstResponse = new MockHttpServletResponse();
+            FilterChain bobFirstChain = mock(FilterChain.class);
+            filter.doFilter(bobFirst, bobFirstResponse, bobFirstChain);
+
+            SecurityContext.set("alice", "USER");
+            MockHttpServletRequest aliceSecond = new MockHttpServletRequest("POST", "/api/v1/knowledge-bases/kb/documents");
+            aliceSecond.setRemoteAddr("127.0.0.1");
+            MockHttpServletResponse aliceSecondResponse = new MockHttpServletResponse();
+            filter.doFilter(aliceSecond, aliceSecondResponse, mock(FilterChain.class));
+
+            verify(aliceFirstChain).doFilter(aliceFirst, aliceFirstResponse);
+            verify(bobFirstChain).doFilter(bobFirst, bobFirstResponse);
+            assertThat(aliceSecondResponse.getStatus()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS.value());
+        } finally {
+            SecurityContext.clear();
+            TenantContext.clear();
+        }
+    }
+
+    @Test
     void propertyBeansAndWebClientConfigExposeMutableSettings() {
         LlmProperties llm = new LlmProperties();
         llm.getChat().setBaseUrl("chat-url");
@@ -79,6 +604,10 @@ class ConfigAndExceptionTest {
         milvus.setHost("localhost");
         milvus.setPort(19530);
         milvus.setCollection("collection");
+        UploadRateLimitProperties uploadRateLimit = new UploadRateLimitProperties();
+        uploadRateLimit.setEnabled(false);
+        uploadRateLimit.setRequests(7);
+        uploadRateLimit.setWindowSeconds(30);
         RagProperties rag = new RagProperties();
         rag.setDefaultTopK(5);
         rag.setMaxContextChars(1000);
@@ -87,8 +616,38 @@ class ConfigAndExceptionTest {
         assertThat(llm.getEmbedding().getDimension()).isEqualTo(12);
         assertThat(minio.getBucket()).isEqualTo("bucket");
         assertThat(milvus.getCollection()).isEqualTo("collection");
+        assertThat(uploadRateLimit.isEnabled()).isFalse();
+        assertThat(uploadRateLimit.getRequests()).isEqualTo(7);
+        assertThat(uploadRateLimit.getWindowSeconds()).isEqualTo(30);
         assertThat(rag.getMaxContextChars()).isEqualTo(1000);
         assertThat(new WebClientConfig().webClientBuilder().build()).isNotNull();
+    }
+
+    private static ApiSecurityProperties.UserAccount user(String username, String password, String tenantId, String role) {
+        ApiSecurityProperties.UserAccount user = new ApiSecurityProperties.UserAccount();
+        user.setUsername(username);
+        user.setPassword(password);
+        user.setTenantId(tenantId);
+        user.setRole(role);
+        return user;
+    }
+
+    private static void assertAllowed(ApiKeyAuthFilter filter, ApiTokenService tokenService, String username, String method, String uri) throws Exception {
+        MockHttpServletRequest request = bearerRequest(tokenService, username, method, uri);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        FilterChain chain = mock(FilterChain.class);
+
+        filter.doFilter(request, response, chain);
+
+        verify(chain).doFilter(request, response);
+        assertThat(SecurityContext.getPrincipal()).isNull();
+        assertThat(TenantContext.getTenantId()).isEqualTo("default");
+    }
+
+    private static MockHttpServletRequest bearerRequest(ApiTokenService tokenService, String username, String method, String uri) {
+        MockHttpServletRequest request = new MockHttpServletRequest(method, uri);
+        request.addHeader("Authorization", "Bearer " + tokenService.issueToken(username, "tenant-a", "USER"));
+        return request;
     }
 
     @Test
@@ -123,6 +682,10 @@ class ConfigAndExceptionTest {
         var validation = handler.handleValidation(validationEx);
         assertThat(validation.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(validation.getBody()).containsEntry("error", "validation_error").containsEntry("message", "must not be blank");
+
+        var badRequest = handler.handleBadRequest(new IllegalArgumentException("bad input"));
+        assertThat(badRequest.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(badRequest.getBody()).containsEntry("error", "bad_request").containsEntry("message", "bad input");
 
         var generic = handler.handleGeneric(new RuntimeException());
         assertThat(generic.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);

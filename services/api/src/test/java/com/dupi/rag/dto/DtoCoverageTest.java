@@ -2,9 +2,15 @@ package com.dupi.rag.dto;
 
 import com.dupi.rag.domain.enums.IngestJobStatus;
 import com.dupi.rag.domain.enums.IngestStage;
+import com.dupi.rag.domain.entity.AuditLog;
+import com.dupi.rag.domain.enums.AuditLogStatus;
 import com.dupi.rag.domain.enums.ChunkStrategy;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.RetrievalMode;
+import com.dupi.rag.domain.entity.VectorCleanupTask;
+import com.dupi.rag.dto.VectorCleanupTaskResponse;
+import com.dupi.rag.domain.enums.VectorCleanupStatus;
+import com.dupi.rag.domain.enums.VectorCleanupTargetType;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -112,6 +118,99 @@ class DtoCoverageTest {
                 .session(session).messages(List.of(message)).build();
         assertThat(detail.getSession()).isSameAs(session);
         assertThat(detail.getMessages()).containsExactly(message);
+
+        BatchDocumentUploadResult uploadResult = BatchDocumentUploadResult.builder()
+                .fileName("f")
+                .success(true)
+                .document(doc)
+                .build();
+        BatchDocumentUploadResponse batchUpload = BatchDocumentUploadResponse.builder()
+                .total(1)
+                .succeeded(1)
+                .failed(0)
+                .results(List.of(uploadResult))
+                .build();
+        assertThat(batchUpload.getTotal()).isEqualTo(1);
+        assertThat(batchUpload.getSucceeded()).isEqualTo(1);
+        assertThat(batchUpload.getFailed()).isZero();
+        assertThat(batchUpload.getResults()).containsExactly(uploadResult);
+        assertThat(uploadResult.getDocument()).isSameAs(doc);
+
+        VectorCleanupTaskResponse cleanupTask = VectorCleanupTaskResponse.builder()
+                .id(id)
+                .targetType(VectorCleanupTargetType.KNOWLEDGE_BASE)
+                .targetId(id)
+                .status(VectorCleanupStatus.FAILED)
+                .attemptCount(3)
+                .lastError("milvus unavailable")
+                .nextAttemptAt(now)
+                .createdAt(now)
+                .updatedAt(now)
+                .build();
+        assertThat(cleanupTask.getId()).isEqualTo(id);
+        assertThat(cleanupTask.getTargetType()).isEqualTo(VectorCleanupTargetType.KNOWLEDGE_BASE);
+        assertThat(cleanupTask.getTargetId()).isEqualTo(id);
+        assertThat(cleanupTask.getStatus()).isEqualTo(VectorCleanupStatus.FAILED);
+        assertThat(cleanupTask.getAttemptCount()).isEqualTo(3);
+        assertThat(cleanupTask.getLastError()).isEqualTo("milvus unavailable");
+        assertThat(cleanupTask.getNextAttemptAt()).isEqualTo(now);
+        assertThat(cleanupTask.getCreatedAt()).isEqualTo(now);
+        assertThat(cleanupTask.getUpdatedAt()).isEqualTo(now);
+
+        AuditLog auditLog = AuditLog.builder()
+                .id(id)
+                .tenantId("tenant-a")
+                .action("DOCUMENT_DELETE")
+                .targetType("DOCUMENT")
+                .targetId(id)
+                .status(AuditLogStatus.FAILED)
+                .message("m")
+                .errorMessage("e")
+                .createdAt(now)
+                .build();
+        AuditLogResponse auditResponse = AuditLogResponse.from(auditLog);
+        assertThat(auditResponse.getId()).isEqualTo(id);
+        assertThat(auditResponse.getTenantId()).isEqualTo("tenant-a");
+        assertThat(auditResponse.getAction()).isEqualTo("DOCUMENT_DELETE");
+        assertThat(auditResponse.getTargetType()).isEqualTo("DOCUMENT");
+        assertThat(auditResponse.getTargetId()).isEqualTo(id);
+        assertThat(auditResponse.getStatus()).isEqualTo(AuditLogStatus.FAILED);
+        assertThat(auditResponse.getMessage()).isEqualTo("m");
+        assertThat(auditResponse.getErrorMessage()).isEqualTo("e");
+        assertThat(auditResponse.getCreatedAt()).isEqualTo(now);
+
+        AuditAlertResponse auditAlert = AuditAlertResponse.builder()
+                .code("AUDIT_FAILED_SPIKE")
+                .severity("WARN")
+                .message("failed audit spike")
+                .count(11)
+                .threshold(10)
+                .windowStart(now.minusSeconds(60))
+                .windowEnd(now)
+                .build();
+        assertThat(auditAlert.getCode()).isEqualTo("AUDIT_FAILED_SPIKE");
+        assertThat(auditAlert.getSeverity()).isEqualTo("WARN");
+        assertThat(auditAlert.getMessage()).isEqualTo("failed audit spike");
+        assertThat(auditAlert.getCount()).isEqualTo(11);
+        assertThat(auditAlert.getThreshold()).isEqualTo(10);
+        assertThat(auditAlert.getWindowStart()).isEqualTo(now.minusSeconds(60));
+        assertThat(auditAlert.getWindowEnd()).isEqualTo(now);
+    }
+
+    @Test
+    void auditLogQueryExposesFilters() {
+        AuditLogQuery query = new AuditLogQuery();
+        query.setTenantId("tenant-a");
+        query.setAction("REINDEX");
+        query.setTargetType("KNOWLEDGE_BASE");
+        query.setStatus(AuditLogStatus.SUCCESS);
+        query.setLimit(25);
+
+        assertThat(query.getTenantId()).isEqualTo("tenant-a");
+        assertThat(query.getAction()).isEqualTo("REINDEX");
+        assertThat(query.getTargetType()).isEqualTo("KNOWLEDGE_BASE");
+        assertThat(query.getStatus()).isEqualTo(AuditLogStatus.SUCCESS);
+        assertThat(query.getLimit()).isEqualTo(25);
     }
 
     @Test
@@ -152,5 +251,35 @@ class DtoCoverageTest {
         BatchDeleteChatSessionsRequest batchDelete = new BatchDeleteChatSessionsRequest();
         batchDelete.setSessionIds(List.of(sessionId));
         assertThat(batchDelete.getSessionIds()).containsExactly(sessionId);
+    }
+
+    @Test
+    void vectorCleanupTaskEntityExposesStateFields() {
+        UUID targetId = UUID.randomUUID();
+        Instant now = Instant.now();
+        VectorCleanupTask task = VectorCleanupTask.builder()
+                .id(UUID.randomUUID())
+                .targetType(VectorCleanupTargetType.DOCUMENT)
+                .targetId(targetId)
+                .status(VectorCleanupStatus.PENDING)
+                .attemptCount(2)
+                .lastError("milvus")
+                .nextAttemptAt(now)
+                .createdAt(now)
+                .updatedAt(now)
+                .build();
+
+        assertThat(task.getTargetType()).isEqualTo(VectorCleanupTargetType.DOCUMENT);
+        assertThat(task.getTargetId()).isEqualTo(targetId);
+        assertThat(task.getStatus()).isEqualTo(VectorCleanupStatus.PENDING);
+        assertThat(task.getAttemptCount()).isEqualTo(2);
+        assertThat(task.getLastError()).isEqualTo("milvus");
+        assertThat(task.getId()).isNotNull();
+        assertThat(task.getNextAttemptAt()).isEqualTo(now);
+        assertThat(task.getCreatedAt()).isEqualTo(now);
+        assertThat(task.getUpdatedAt()).isEqualTo(now);
+        assertThat(VectorCleanupTargetType.KNOWLEDGE_BASE).isNotNull();
+        assertThat(VectorCleanupStatus.COMPLETED).isNotNull();
+        assertThat(VectorCleanupStatus.FAILED).isNotNull();
     }
 }

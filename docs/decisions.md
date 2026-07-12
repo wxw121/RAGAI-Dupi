@@ -1,12 +1,87 @@
 # 技术决策
 
-## 2026-06-21 — 批次上传采用前端顺序单文件 API
+## 2026-07-07 — Transactional Outbox、删除 Tombstone、实例级授权与 Ops 运维增强
+
+**背景**：上传、重试和 reindex 需要把数据库状态与 Redis 摄入队列投递解耦，避免事务已提交但队列消息丢失；文档删除后仍可能遇到 outbox 或 Worker 迟到回调；知识库级授权还需要继续下钻到文档、会话和任务实例；运维侧也需要账号可视化、审计导出、保留和告警。
+**决策**：新增 `ingest_outbox_events` 和 `IngestOutboxService`，上传/重试/reindex 事务内只写 outbox，事务提交后由 dispatcher 投递 Redis，失败按退避重试。新增 `document_tombstones` 和 `DocumentTombstoneService`，删除前记录 tombstone，outbox dispatcher 与 Worker 回调遇到已删 docId 时取消/忽略。资源授权从知识库范围扩展到文档、会话和向量清理任务实例级：先解析实例归属 kbId，再校验 `SecurityContext.canAccessKnowledgeBase(...)`。Ops 增加 `/ops/accounts` 只读账号管理页、`/api/v1/ops/accounts` 脱敏账号元数据接口、审计 CSV 导出、保留清理和失败审计告警摘要。
+**理由**：outbox 让摄入投递具备事务后可靠性；tombstone 关闭删除后迟到写入的竞态窗口；实例级授权避免拥有全局权限点的用户横向操作其他知识库资源；账号和审计运维入口让管理员能查看配置、导出留痕并发现异常失败峰值。
+**影响范围**：`IngestOutboxEvent` / `IngestOutboxService` / `IngestOutboxEventRepository`、`DocumentTombstone` / `DocumentTombstoneService` / `DocumentTombstoneRepository`、`V5__ingest_outbox_and_document_tombstones.sql`、`DocumentService`、`IngestJobService`、`VectorCleanupTaskService`、`AuditLogService`、`OpsController`、`AccountService`、`OpsAuditPage.tsx`、`OpsAccountsPage.tsx`、`AppLayout.tsx`、`knowledgeBase.ts`、`deploy/.env.example`。
+**遗留**：账号管理当前为只读配置视图，后续可补账号创建/禁用、权限分配、密码哈希生成和 tokenVersion 轮换；审计告警当前为接口/页面摘要，生产可继续接入 Webhook/邮件/IM；多实例 outbox 高并发场景可增加 claim/行级锁避免重复扫描竞争。
+
+## 2026-07-06 — 默认部署收窄端口暴露并增加共享密钥门禁
+
+**背景**：扫描项目薄弱点时发现默认 Compose 将 PostgreSQL、Redis、MinIO、Milvus、API、Worker 等内部服务映射到宿主机，且公开 API 与 internal API 缺少最低限度访问门禁。
+**决策**：默认 Compose 只暴露 Web Nginx `:8080`；API、Worker 与基础设施仅保留 Docker 内部网络访问。API 新增可选共享密钥鉴权：公开接口使用 `X-Dupi-API-Key`，internal 接口使用 `X-Dupi-Internal-Key`；环境变量为空时保持本地开发兼容。Web Nginx 代理自动注入公开 API Key，Worker 回调与混合检索语料拉取自动注入 internal Key。
+**理由**：以最小侵入方式降低本机/单机部署的误暴露风险，同时不破坏当前本地自测流程；后续多租户版本再升级为用户级认证、权限模型与审计。
+**影响范围**：`deploy/docker-compose.yml`、`deploy/.env.example`、`services/api/src/main/java/com/dupi/rag/config/`、`services/web/nginx.conf`、`services/web/Dockerfile`、`services/worker/app/callback.py`、`services/worker/app/retrieval/hybrid.py`。
+**遗留**：共享密钥只适合作为单机/内网最低限度门禁；生产级多用户访问已补充内置账号、RBAC、Cookie 会话和审计查询，后续仍需 SSO/OIDC、账号管理 UI、密钥轮换与审计告警。
+
+## 2026-07-06 — P0/P1 上传保护与残留向量补偿
+
+**背景**：P0 安全扫描确认真实 `.env` 展开值曾通过原始 Compose 配置输出暴露，且默认弱口令回退不适合共享环境；P1 继续聚焦批量上传过载、批次内部分失败语义、best-effort 删除后的残留向量。
+**决策**：Compose 对 PostgreSQL/MinIO 密码改为必填环境变量，并新增 `scripts/compose-config-redacted.ps1` 作为脱敏配置检查入口；上传接口增加 `UPLOAD_RATE_LIMIT_*` 限流和 `INGEST_QUEUE_MAX_PENDING_JOBS` 队列高水位；批量上传返回 `BatchDocumentUploadResponse`，逐文件携带成功/失败结果；Redis 入队失败时任务保持 `PENDING + QUEUED`，由 `INGEST_RECOVERY_CRON` 定时补偿扫描重新投递；新增 `vector_cleanup_tasks` 表与 `VectorCleanupTaskService` 定时补偿清理 Milvus 残留向量。
+**理由**：P0 优先阻止弱默认值和二次泄露；P1 通过入口限流、队列削峰和持久化补偿任务提升上传/摄入链路韧性，并用补偿任务消化 Redis 或 Milvus 短暂不可用导致的卡滞与残留。
+**影响范围**：`deploy/.env.example`、`deploy/docker-compose.yml`、`scripts/compose-config-redacted.ps1`、`DocumentController`、`DocumentService`、`IngestJobProducer`、`IngestJobService`、`UploadRateLimitFilter`、`VectorCleanupTaskService`、`V3__vector_cleanup_tasks.sql`、`services/web/src/api/documents.ts`、`KbDetailPage.tsx`。
+**遗留**：真实第三方 Key 的轮换需由持有人在 DeepSeek/智谱平台完成；生产级上传保护仍可继续升级为按租户/用户配额、上传取消与审计。
+
+## 2026-07-06 — Embedding 配置提示与问答诊断
+
+**背景**：旧知识库可能保留历史 embedding 模型/维度，切换到智谱 `embedding-2` 后会造成摄入或检索异常；同时“根据现有知识库资料无法回答”缺少可见诊断，难以区分无命中、fallback 或配置不一致。
+**决策**：知识库响应新增 `embeddingConfigCurrent` / `embeddingConfigWarning`；`/retrieve` 返回 `diagnostics`；Chat SSE 的 `retrieval` 事件从旧数组兼容升级为 `{ citations, diagnostics }`；前端知识库详情页展示 embedding 警告，问答输入区展示检索诊断。
+**理由**：先给用户和运维提供可见诊断，避免把所有问答失败都归因到 LLM；真正的 embedding 配置迁移/重建索引 API 后续单独实现。
+
+## 2026-07-06 — 租户隔离、旧库 reindex 与摄入死信
+
+**背景**：公共 API 之前主要依赖知识库 ID 访问资源，缺少请求级租户边界；旧知识库 embedding 配置提示后仍需要一键重建路径；摄入补偿持续失败时缺少终态，任务会长期停留在 `PENDING + QUEUED`。
+**决策**：新增 `TenantContextFilter`，公共 `/api/**` 请求读取 `X-Dupi-Tenant-Id`，默认 `default`，并让知识库 CRUD、文档、检索、聊天会话等公共路径通过租户限定 KB 根边界；internal/worker/定时补偿路径使用系统级查询。新增 `POST /api/v1/knowledge-bases/{kbId}/reindex`，按当前 embedding 配置更新知识库、清理旧 chunks、登记 Milvus 向量补偿并重新入队全部文档。新增 `DEAD_LETTER` 摄入状态，补偿失败达到 `INGEST_RECOVERY_MAX_ATTEMPTS` 后进入死信。公共重试入口为 `POST /api/v1/knowledge-bases/{kbId}/ingest-jobs/{jobId}/retry`，先校验租户 KB 和任务归属，再复用摄入重试逻辑；Web 文档页通过“索引维护”面板承接 reindex、任务列表和失败/死信任务重试。
+**理由**：用最小改动补上多租户预留字段的真实隔离语义，同时为 embedding 切换后的旧库提供自助恢复路径；死信状态让持续失败从“无限重试”变成可观察、可人工处理的运维事件。
+**影响范围**：`TenantContextFilter`、`TenantContext`、`KnowledgeBaseRepository`、`KnowledgeBaseService`、`ChatSessionService`、`InternalController`、`IngestJobService`、`KnowledgeBaseController`、`IngestJobStatus`、`IngestStage`、`application.yml`、`deploy/.env.example`、`services/web/src/api/knowledgeBase.ts`、`KbDetailPage.tsx`。
+**遗留**：当前租户 ID 在未登录兼容路径仍可由请求头传入，适合本地/内网隔离；登录用户已由 token 租户覆盖请求头。生产级多用户后续仍需 SSO/OIDC、账号管理 UI 与更完整的管理员运维面板。
+**影响范围**：`KnowledgeBaseResponse`、`KnowledgeBaseService`、`RetrieveResponse`、`RetrievalService`、`ChatService`、`services/web/src/api/chat.ts`、`ChatPanel.tsx`、`KbDetailPage.tsx`。
+**遗留**：旧库已支持手动 reindex；后续可补充批量迁移、审计记录与更细粒度的重建进度。
+
+## 2026-07-06 — 审计日志、向量清理运维与 RAG 回归评测
+
+**背景**：删除、reindex、retry 等高影响操作此前只能从业务状态间接推断；向量清理补偿任务缺少可见运维入口；RAG 质量也缺少一组可重复的基线用例。
+
+**决策**：新增 `audit_logs` 表和 `AuditLogService`，记录知识库删除、文档删除、聊天会话批量删除、知识库 reindex、摄入任务手动 retry、向量清理任务手动 retry，并通过 `GET /api/v1/ops/audit-logs` 提供按租户、动作、目标类型、状态和 limit 的查询。新增 `OpsController` 暴露 `GET /api/v1/ops/vector-cleanup-tasks` 与 `POST /api/v1/ops/vector-cleanup-tasks/{taskId}/retry`，Web 文档页“索引维护”区域展示向量清理任务并支持重试，Web 运维区新增 `/ops/audit-logs` 审计查询页。新增 `examples/rag-eval-cases.json` 与 `scripts/rag-regression-eval.ps1`，优先用检索命中、引用文件和关键片段做稳定回归，而不是依赖 LLM 自由文本完全一致。
+
+**理由**：审计日志让高风险操作可追踪；向量清理任务入口让残留向量补偿从“后台黑盒”变成可人工处理的运维事件；RAG 回归评测用检索层断言降低随机生成文本对测试稳定性的影响。
+
+**影响范围**：`AuditLog` / `AuditLogService` / `AuditLogRepository`、`AuditLogQuery`、`AuditLogResponse`、`V4__audit_logs.sql`、`OpsController`、`VectorCleanupTaskService`、`KbDetailPage.tsx`、`OpsAuditPage.tsx`、`AppLayout.tsx`、`knowledgeBase.ts`、`examples/rag-eval-cases.json`、`scripts/rag-regression-eval.ps1`、`scripts/e2e-web-maintenance-flow.ps1`。
+
+**遗留**：审计日志已支持基础查询页面；后续可增加导出、告警、保留策略和更细的管理员权限配置。
+
+## 2026-07-06 — Cookie 会话、CSRF、Redis 登录锁定与知识库资源授权
+
+**背景**：内置账号/RBAC 已补齐角色和权限点，但浏览器侧仍存在可读 Bearer token 的暴露面；Cookie 化后需要 CSRF 防护；登录失败锁定在多副本场景需要共享状态；全局权限点也不足以表达“只能访问部分知识库”的资源边界。
+**决策**：登录接口写入 `DUPI_AUTH` HttpOnly Cookie，并返回 `csrfToken`；前端本地只保存 CSRF token，所有请求使用 `credentials: include`，mutating 请求携带 `X-Dupi-CSRF-Token`；服务端只对 Cookie auth 执行 `DUPI_CSRF` Cookie + Header 双提交校验，Bearer/API Key 保持脚本兼容。新增 `LoginFailureStore` 抽象和 Redis 实现，登录失败计数跨 API 实例共享。账号配置新增 `knowledgeBaseIds`，token 与 `SecurityContext` 携带知识库范围，包含 `{kbId}` 的公开入口在权限点后继续执行资源级授权。
+**理由**：HttpOnly Cookie 降低 token 被前端脚本直接读取的风险；CSRF 双提交保护浏览器 Cookie 会话；Redis 锁定避免多副本绕过；资源级授权把“能做什么”和“能访问哪些知识库”拆开，便于下一步账号管理 UI 承接。
+**影响范围**：`AuthController`、`LoginResponse`、`ApiTokenService`、`ApiKeyAuthFilter`、`ApiSecurityProperties`、`SecurityContext`、`LoginFailureStore`、`RedisLoginFailureStore`、`services/web/src/api/client.ts`、`services/web/src/api/chat.ts`、`services/web/src/api/knowledgeBase.ts`、`services/web/src/pages/OpsAuditPage.tsx`、`deploy/.env.example`。
+**遗留**：仍需外部 SSO/OIDC、账号/权限配置页面、CSRF token 轮换策略和资源授权扩展到文档/会话实例级。
+
+## 2026-07-06 — Worker Embedding 请求分批
+
+**背景**：大文档分块数量较多时，Worker 原先会把所有 chunk 文本一次性传给 Embedding 供应商，容易触发单次 `input` 数组长度限制或限流。
+**决策**：Worker `embed_batch` 按 `EMBEDDING_BATCH_SIZE` 拆分请求，默认 `32`；每批仍按供应商返回的 `index` 排序，缺失 `index` 时保留响应顺序，最终按原 chunk 顺序合并向量并执行数量/形状校验。
+**理由**：以配置项适配不同 Embedding 供应商限制，避免为大文档单独引入新的队列模型，同时保持摄入任务的原有状态回调契约不变。
+**影响范围**：`services/worker/app/config.py`、`services/worker/app/embedder.py`、`services/worker/tests/test_embedder_hybrid.py`、`deploy/.env.example`。
+
+## 2026-07-06 — 知识库删除以数据库为最终事实源
+
+**背景**：知识库删除会先清理 Milvus 向量，再删除数据库记录；当 Milvus 短暂不可用或集合状态异常时，用户无法删除知识库，容易被历史残留向量库状态卡住。
+**决策**：`KnowledgeBaseService.delete()` 和 `DocumentService.delete()` 在删除前登记向量清理任务，随后 best-effort 清理 Milvus；向量清理失败时记录 warn 日志，但继续删除数据库记录。
+**理由**：知识库列表和业务可见状态以数据库为最终事实源；外部向量库残留由持久化补偿任务重试，不能阻断用户释放不可用知识库或文档。
+**影响范围**：`KnowledgeBaseService`、`DocumentService`、`VectorCleanupTaskService`、`VectorCleanupTaskRepository`、`KnowledgeBaseServiceTest`、`DocumentServiceTest`。
+**遗留**：后续可补充清理任务管理页面与运维告警。
+
+## 2026-06-21 — 批次上传改为后端批量文档 API
 
 **背景**：用户需在文档管理页一次上传多个文件；摄入链路已是「一文件一 Document + 一 IngestJob」，Worker 无需 batch 契约。  
-**决策**：不新增 `POST .../documents/batch`；前端 `UploadZone` 开启 `multiple`，`KbDetailPage` 顺序调用现有 `uploadDocument`；单文件失败不中断其余文件，结束后汇总 toast。  
-**理由**：改动面最小，避免调整 Spring `max-request-size` 与批量错误语义；队列侧天然按文件并行消费。  
-**影响范围**：`useDropzone.ts`、`UploadZone.tsx`、`KbDetailPage.tsx`。  
-**遗留**：无上传队列取消；大量文件时 N 次 HTTP 往返（可接受）。
+**决策**：当前实现提供 `POST /api/v1/knowledge-bases/{kbId}/documents/batch`，前端 `uploadDocuments` 通过 `files` FormData 字段一次提交多文件；后端仍按单文件粒度创建 Document 与 IngestJob，并返回逐文件结果。
+**理由**：保留“一文件一任务”的摄入模型，同时减少前端多文件上传时的 N 次 HTTP 往返，并让文档管理页的批量上传行为更接近用户预期。
+**影响范围**：`DocumentController`、`DocumentService.uploadBatch`、`services/web/src/api/documents.ts`、`UploadZone.tsx`、`KbDetailPage.tsx`。
+**遗留**：大批量文件仍需考虑请求体大小、上传队列取消与后台异步上传编排。
 
 ## 2026-06-20 — 摄入统一 Canonical Markdown + 结构感知分块
 

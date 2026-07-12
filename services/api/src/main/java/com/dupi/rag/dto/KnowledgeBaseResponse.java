@@ -20,6 +20,8 @@ public class KnowledgeBaseResponse {
     private Integer topK;
     private String embeddingModel;
     private Integer embeddingDimension;
+    private boolean embeddingConfigCurrent;
+    private String embeddingConfigWarning;
     private ChunkStrategy chunkStrategy;
     private RetrievalMode retrievalMode;
     private Instant createdAt;

@@ -22,11 +22,13 @@ class Settings:
     milvus_collection: str = os.getenv("MILVUS_COLLECTION", "dupi_chunks")
 
     api_base_url: str = os.getenv("API_BASE_URL", "http://localhost:8080")
+    dupi_internal_key: str = os.getenv("DUPI_INTERNAL_KEY", "")
 
     embedding_api_key: str = _env("EMBEDDING_API_KEY", "OPENAI_API_KEY")
     embedding_base_url: str = _env("EMBEDDING_BASE_URL", "OPENAI_BASE_URL", "https://api.openai.com/v1")
     embedding_model: str = _env("EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
     embedding_dimension: int = int(_env("EMBEDDING_DIMENSION", "OPENAI_EMBEDDING_DIMENSION", "1536"))
+    embedding_batch_size: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
 
     worker_host: str = os.getenv("WORKER_HOST", "0.0.0.0")
     worker_port: int = int(os.getenv("WORKER_PORT", "8000"))

@@ -12,7 +12,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { formatDate } from '@/lib/utils'
 import { FileText, Loader2, MessageSquare, Plus, Trash2 } from 'lucide-react'
 
-export function KbListPage() {
+export function KbListPage({ onLogout }: { onLogout?: () => void }) {
   const navigate = useNavigate()
   const [kbs, setKbs] = useState<KnowledgeBase[]>([])
   const [loading, setLoading] = useState(true)
@@ -77,13 +77,14 @@ export function KbListPage() {
   }
 
   return (
-    <AppLayout>
-      <div className="mb-6 flex items-center justify-between">
+    <AppLayout onLogout={onLogout}>
+      <div className="mx-auto max-w-6xl px-4 py-6 md:px-8">
+      <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
-          <h1 className="text-2xl font-bold">知识库</h1>
-          <p className="text-sm text-muted-foreground">管理企业文档与 RAG 问答</p>
+          <h1 className="text-2xl font-semibold tracking-tight">知识库</h1>
+          <p className="mt-1 text-sm text-muted-foreground">管理企业文档与 RAG 问答</p>
         </div>
-        <Button onClick={() => setDialogOpen(true)}>
+        <Button onClick={() => setDialogOpen(true)} className="w-full md:w-auto">
           <Plus className="h-4 w-4" />
           新建知识库
         </Button>
@@ -139,7 +140,7 @@ export function KbListPage() {
           {kbs.map((kb) => (
             <Card
               key={kb.id}
-              className="group relative cursor-pointer transition-shadow hover:shadow-md"
+              className="group relative cursor-pointer rounded-2xl border-border bg-background transition-colors hover:bg-muted/40"
               onClick={() => navigate(`/kb/${kb.id}`)}
             >
               <CardHeader>
@@ -153,7 +154,7 @@ export function KbListPage() {
                 <p className="mt-1 text-xs text-muted-foreground">
                   分块 {kb.chunkSize} / 重叠 {kb.chunkOverlap} / TopK {kb.topK}
                 </p>
-                <div className="mt-4 flex gap-2" onClick={(e) => e.stopPropagation()}>
+                <div className="mt-4 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
                   <Button variant="outline" size="sm" onClick={() => navigate(`/kb/${kb.id}`)}>
                     <FileText className="h-3.5 w-3.5" />
                     管理文档
@@ -176,6 +177,7 @@ export function KbListPage() {
           ))}
         </div>
       )}
+      </div>
 
       <Dialog
         open={dialogOpen}

@@ -14,37 +14,39 @@ interface DocTableProps {
 export function DocTable({ documents, jobStages, onDelete, deletingId }: DocTableProps) {
   if (documents.length === 0) {
     return (
-      <p className="py-8 text-center text-sm text-muted-foreground">暂无文档，请上传文件开始构建知识库</p>
+      <p className="rounded-3xl border border-border bg-muted/30 py-10 text-center text-sm text-muted-foreground">
+        暂无文档，请上传文件开始构建知识库
+      </p>
     )
   }
 
   return (
-    <div className="overflow-x-auto rounded-lg border">
+    <div className="chatgpt-scrollbar overflow-x-auto rounded-3xl border border-border bg-background">
       <table className="w-full text-sm">
         <thead className="border-b bg-muted/50">
           <tr>
-            <th className="px-4 py-3 text-left font-medium">文件名</th>
-            <th className="px-4 py-3 text-left font-medium">大小</th>
-            <th className="px-4 py-3 text-left font-medium">状态</th>
-            <th className="px-4 py-3 text-left font-medium">阶段</th>
-            <th className="px-4 py-3 text-left font-medium">上传时间</th>
-            {onDelete && <th className="px-4 py-3 text-right font-medium">操作</th>}
+            <th className="px-5 py-3 text-left font-medium">文件名</th>
+            <th className="px-5 py-3 text-left font-medium">大小</th>
+            <th className="px-5 py-3 text-left font-medium">状态</th>
+            <th className="px-5 py-3 text-left font-medium">阶段</th>
+            <th className="px-5 py-3 text-left font-medium">上传时间</th>
+            {onDelete && <th className="px-5 py-3 text-right font-medium">操作</th>}
           </tr>
         </thead>
         <tbody>
           {documents.map((doc) => (
-            <tr key={doc.id} className="border-b last:border-0">
-              <td className="px-4 py-3 font-medium">{doc.fileName}</td>
-              <td className="px-4 py-3 text-muted-foreground">{formatBytes(doc.fileSize)}</td>
-              <td className="px-4 py-3">
+            <tr key={doc.id} className="border-b transition-colors last:border-0 hover:bg-muted/40">
+              <td className="px-5 py-3 font-medium">{doc.fileName}</td>
+              <td className="px-5 py-3 text-muted-foreground">{formatBytes(doc.fileSize)}</td>
+              <td className="px-5 py-3">
                 <Badge variant={statusBadgeVariant(doc.status)}>{doc.status}</Badge>
               </td>
-              <td className="px-4 py-3 text-muted-foreground">
+              <td className="px-5 py-3 text-muted-foreground">
                 {jobStages[doc.id] ?? '—'}
               </td>
-              <td className="px-4 py-3 text-muted-foreground">{formatDate(doc.createdAt)}</td>
+              <td className="px-5 py-3 text-muted-foreground">{formatDate(doc.createdAt)}</td>
               {onDelete && (
-                <td className="px-4 py-3 text-right">
+                <td className="px-5 py-3 text-right">
                   <Button
                     variant="ghost"
                     size="sm"

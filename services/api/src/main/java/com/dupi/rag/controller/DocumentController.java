@@ -1,5 +1,6 @@
 package com.dupi.rag.controller;
 
+import com.dupi.rag.dto.BatchDocumentUploadResponse;
 import com.dupi.rag.dto.DocumentResponse;
 import com.dupi.rag.dto.IngestJobResponse;
 import com.dupi.rag.service.DocumentService;
@@ -26,7 +27,7 @@ public class DocumentController {
     }
 
     @PostMapping(value = "/batch", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public List<DocumentResponse> uploadBatch(@PathVariable UUID kbId, @RequestParam("files") List<MultipartFile> files) {
+    public BatchDocumentUploadResponse uploadBatch(@PathVariable UUID kbId, @RequestParam("files") List<MultipartFile> files) {
         return documentService.uploadBatch(kbId, files);
     }
 

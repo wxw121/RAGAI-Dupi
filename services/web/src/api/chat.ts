@@ -1,18 +1,24 @@
-﻿import type { Citation } from '@/types'
-
-
+import { authHeaders } from './client'
+import type { Citation, RetrievalDiagnostics } from '@/types'
 
 export interface ChatStreamCallbacks {
-  onRetrieval?: (citations: Citation[]) => void
+  onRetrieval?: (citations: Citation[], diagnostics?: RetrievalDiagnostics) => void
   onToken?: (token: string) => void
   onDone?: (sessionId: string) => void
   onError?: (message: string) => void
   onAbort?: () => void
 }
 
+function fallbackErrorMessage(message: string | undefined | null, status?: number): string {
+  const trimmed = message?.trim()
+  if (trimmed) return trimmed
+  return status ? `HTTP ${status}` : '问答请求失败，请稍后重试'
+}
+
 function parseSseBlock(block: string): { event: string; data: string } | null {
   let event = 'message'
   const dataLines: string[] = []
+
   for (const line of block.split('\n')) {
     if (line.startsWith('event:')) event = line.slice(6).trim()
     else if (line.startsWith('data:')) {
@@ -21,67 +27,47 @@ function parseSseBlock(block: string): { event: string; data: string } | null {
       dataLines.push(value)
     }
   }
-  if (dataLines.length === 0 && event === 'message') return null
-  const data = dataLines.join('\n')
-  return { event, data }
-}
 
+  if (dataLines.length === 0 && event === 'message') return null
+  return { event, data: dataLines.join('\n') }
+}
 
 // SSE 事件分发器：把后端流式响应解耦成 retrieval/token/done/error 四类回调。
-// 这里使用小型状态对象记录 done 是否到达，便于网络提前结束时做兜底收口。
+// retrieval 同时兼容旧版数组结构与新版 { citations, diagnostics } 对象结构。
 function dispatchSseEvent(
-
   event: string,
-
   data: string,
-
   callbacks: ChatStreamCallbacks,
-
   state: { doneReceived: boolean },
-
 ): void {
-
   if (event === 'retrieval') {
-
     try {
+      const payload = JSON.parse(data) as
+        | Citation[]
+        | { citations?: Citation[]; diagnostics?: RetrievalDiagnostics }
 
-      callbacks.onRetrieval?.(JSON.parse(data) as Citation[])
-
+      if (Array.isArray(payload)) {
+        callbacks.onRetrieval?.(payload)
+      } else {
+        callbacks.onRetrieval?.(payload.citations ?? [], payload.diagnostics)
+      }
     } catch {
-
       /* 忽略单个事件解析失败，保持后续 SSE 流继续消费。 */
-
     }
-
   } else if (event === 'token') {
-
     callbacks.onToken?.(data)
-
   } else if (event === 'done') {
-
     state.doneReceived = true
-
     try {
-
       const payload = JSON.parse(data) as { sessionId?: string }
-
       callbacks.onDone?.(payload.sessionId ?? '')
-
     } catch {
-
       callbacks.onDone?.('')
-
     }
-
   } else if (event === 'error') {
-
-    callbacks.onError?.(data)
-
+    callbacks.onError?.(fallbackErrorMessage(data))
   }
-
 }
-
-
 
 export async function streamChat(
   kbId: string,
@@ -91,13 +77,15 @@ export async function streamChat(
   sessionId?: string,
 ): Promise<void> {
   let res: Response
+
   try {
     res = await fetch(`/api/v1/knowledge-bases/${kbId}/chat`, {
       method: 'POST',
-      headers: {
+      credentials: 'include',
+      headers: authHeaders({
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
-      },
+      }),
       body: JSON.stringify(sessionId ? { query, stream: true, sessionId } : { query, stream: true }),
       signal,
     })
@@ -109,36 +97,23 @@ export async function streamChat(
     throw e
   }
 
-
   if (!res.ok) {
-
-    let message = res.statusText
+    let message = fallbackErrorMessage(res.statusText, res.status)
 
     try {
-
       const err = await res.json()
-
-      message = err.message ?? message
-
+      message = fallbackErrorMessage(err.message ?? message, res.status)
     } catch {
-
-      /* 忽略单个事件解析失败，保持后续 SSE 流继续消费。 */
-
+      /* 非 JSON 错误响应时保留 HTTP 状态文本。 */
     }
 
     if (res.status === 401) {
-
       message = `401 Unauthorized: ${message}`
-
     }
 
     callbacks.onError?.(message)
-
     return
-
   }
-
-
 
   const reader = res.body?.getReader()
   if (!reader) {
@@ -146,14 +121,9 @@ export async function streamChat(
     return
   }
 
-
   const decoder = new TextDecoder()
-
   let buffer = ''
-
   const state = { doneReceived: false }
-
-
 
   try {
     while (true) {
@@ -178,44 +148,25 @@ export async function streamChat(
     throw e
   }
 
-
   // 刷新最后一个未以空行结尾的 SSE 事件，避免流结束时丢掉尾包。
-
-  const remaining = buffer
-  if (remaining) {
-    const parsed = parseSseBlock(remaining)
+  if (buffer) {
+    const parsed = parseSseBlock(buffer)
     if (parsed) {
-
       dispatchSseEvent(parsed.event, parsed.data, callbacks, state)
-
     }
-
   }
-
-
 
   // 流没有显式 done 事件时仍然结束前端状态，避免 UI 一直停留在加载中。
-
   if (!state.doneReceived) {
-
     callbacks.onDone?.('')
-
   }
-
 }
 
-
-
 export async function cancelChat(kbId: string, sessionId: string): Promise<void> {
-
   await fetch(`/api/v1/knowledge-bases/${kbId}/chat/cancel`, {
-
     method: 'POST',
-
-    headers: { 'Content-Type': 'application/json' },
-
+    credentials: 'include',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ sessionId }),
-
   })
-
 }

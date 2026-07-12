@@ -10,6 +10,8 @@ import java.util.Optional;
 import java.util.UUID;
 
 public interface ChatMessageRepository extends JpaRepository<ChatMessage, UUID> {
+    boolean existsBySessionId(UUID sessionId);
+
     @Query("""
             select message from ChatMessage message
             join ChatSession session on session.id = message.sessionId

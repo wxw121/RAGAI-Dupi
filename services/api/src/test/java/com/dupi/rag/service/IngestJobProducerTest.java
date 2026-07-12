@@ -13,6 +13,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
@@ -49,5 +50,31 @@ class IngestJobProducerTest {
                 return false;
             }
         }));
+    }
+
+    @Test
+    void enqueueRejectsWhenIngestQueueIsOverHighWatermark() {
+        StringRedisTemplate redis = mock(StringRedisTemplate.class);
+        ListOperations<String, String> listOps = mock(ListOperations.class);
+        when(redis.opsForList()).thenReturn(listOps);
+        when(listOps.size("jobs")).thenReturn(10L);
+        RedisQueueProperties props = new RedisQueueProperties();
+        props.setIngestQueue("jobs");
+        props.setMaxPendingJobs(10);
+        IngestJobProducer producer = new IngestJobProducer(redis, props, new ObjectMapper());
+        IngestJob job = IngestJob.builder().id(UUID.randomUUID()).kbId(UUID.randomUUID()).docId(UUID.randomUUID()).build();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .chunkSize(300)
+                .chunkOverlap(30)
+                .chunkStrategy(ChunkStrategy.MARKDOWN)
+                .embeddingModel("embed")
+                .embeddingDimension(99)
+                .build();
+
+        assertThatThrownBy(() -> producer.enqueue(job, kb, "obj", "file.md", "text/markdown"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Ingest queue is full");
+
+        verify(listOps, never()).leftPush(anyString(), anyString());
     }
 }
