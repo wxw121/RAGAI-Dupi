@@ -33,14 +33,22 @@ const markdownComponents: Components = {
   td: ({ children }) => <td className="break-words [overflow-wrap:anywhere]">{children}</td>,
   th: ({ children }) => <th className="break-words [overflow-wrap:anywhere]">{children}</th>,
   pre: ({ children }) => (
-    <pre className="overflow-x-auto whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+    <pre
+      className="overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-7 text-slate-900 shadow-sm [overflow-wrap:anywhere]"
+    >
       {children}
     </pre>
   ),
   code: ({ className, children }) => {
     const isBlock = Boolean(className)
     if (isBlock) {
-      return <code className={className}>{children}</code>
+      return (
+        <code
+          className={`${className} block bg-transparent p-0 font-mono leading-7 text-black`}
+        >
+          {children}
+        </code>
+      )
     }
     return (
       <code className="break-words [overflow-wrap:anywhere] whitespace-pre-wrap">{children}</code>
@@ -58,16 +66,18 @@ export function MarkdownContent({ content, compact = false }: MarkdownContentPro
         prose-headings:my-1 prose-headings:text-xs prose-headings:font-semibold
         prose-p:my-0 prose-p:text-xs prose-ul:my-0 prose-ol:my-0 prose-li:my-0
         prose-table:my-1 prose-table:text-xs prose-th:px-1 prose-th:py-0.5 prose-td:px-1 prose-td:py-0.5
-        prose-pre:my-1 prose-pre:bg-slate-900 prose-pre:text-slate-100
+        prose-pre:my-1 prose-pre:bg-slate-50 prose-pre:text-slate-900
         prose-code:before:content-none prose-code:after:content-none
+        prose-pre:prose-code:bg-transparent prose-pre:prose-code:p-0 prose-pre:prose-code:text-black
         prose-code:bg-slate-200/60 prose-code:px-1 prose-code:rounded`
     : `w-full min-w-0 max-w-full break-words [overflow-wrap:anywhere]
         prose prose-sm max-w-full
         prose-headings:font-semibold prose-headings:break-words
         prose-p:my-2 prose-p:text-sm prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5
         prose-table:my-3 prose-table:text-xs prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1
-        prose-pre:my-3 prose-pre:bg-slate-900 prose-pre:text-slate-100
+        prose-pre:my-3 prose-pre:bg-slate-50 prose-pre:text-slate-900
         prose-code:before:content-none prose-code:after:content-none
+        prose-pre:prose-code:bg-transparent prose-pre:prose-code:p-0 prose-pre:prose-code:text-black
         prose-code:bg-slate-200/60 prose-code:px-1 prose-code:rounded`
 
   return (

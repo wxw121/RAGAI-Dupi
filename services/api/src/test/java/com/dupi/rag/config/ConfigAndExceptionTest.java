@@ -2,6 +2,7 @@ package com.dupi.rag.config;
 
 import com.dupi.rag.exception.GlobalExceptionHandler;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.repository.UserAccountRepository;
 import io.milvus.client.MilvusServiceClient;
 import io.minio.MinioClient;
 import jakarta.servlet.FilterChain;
@@ -123,29 +124,53 @@ class ConfigAndExceptionTest {
     }
 
     @Test
-    void apiKeyFilterKeepsLocalDevelopmentOpenAfterRuntimeAccountCreation() throws Exception {
+    void apiKeyFilterClosesLocalDevelopmentOpenWhenPersistedAccountsExist() throws Exception {
         ApiSecurityProperties properties = new ApiSecurityProperties();
-        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties);
+        UserAccountRepository userAccountRepository = mock(UserAccountRepository.class);
+        when(userAccountRepository.countByRoleCodeAndDisabledFalse("ADMIN")).thenReturn(0L, 1L);
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(
+                properties,
+                new ApiTokenService(properties),
+                userAccountRepository
+        );
 
         MockHttpServletRequest createAccount = new MockHttpServletRequest("POST", "/api/v1/ops/accounts");
         MockHttpServletResponse createAccountResponse = new MockHttpServletResponse();
         FilterChain createAccountChain = (request, response) -> {
             assertThat(SecurityContext.getPrincipal()).isEqualTo("local-open");
             assertThat(SecurityContext.hasPermission("OPS_ADMIN")).isTrue();
-            properties.getUsers().add(user("admin", "pw", "default", "ADMIN"));
         };
         filter.doFilter(createAccount, createAccountResponse, createAccountChain);
 
         MockHttpServletRequest listKnowledgeBases = new MockHttpServletRequest("GET", "/api/v1/knowledge-bases");
         MockHttpServletResponse listKnowledgeBasesResponse = new MockHttpServletResponse();
-        FilterChain listKnowledgeBasesChain = (request, response) -> {
-            assertThat(SecurityContext.getPrincipal()).isEqualTo("local-open");
-            assertThat(SecurityContext.hasPermission("KB_READ")).isTrue();
-        };
-        filter.doFilter(listKnowledgeBases, listKnowledgeBasesResponse, listKnowledgeBasesChain);
+        filter.doFilter(listKnowledgeBases, listKnowledgeBasesResponse, mock(FilterChain.class));
 
         assertThat(createAccountResponse.getStatus()).isEqualTo(200);
-        assertThat(listKnowledgeBasesResponse.getStatus()).isEqualTo(200);
+        assertThat(listKnowledgeBasesResponse.getStatus()).isEqualTo(HttpStatus.UNAUTHORIZED.value());
+        assertThat(listKnowledgeBasesResponse.getContentAsString()).contains("Unauthorized API request");
+    }
+
+    @Test
+    void apiKeyFilterKeepsLocalDevelopmentOpenWhenOnlyNonAdminAccountsExist() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        UserAccountRepository userAccountRepository = mock(UserAccountRepository.class);
+        when(userAccountRepository.countByRoleCodeAndDisabledFalse("ADMIN")).thenReturn(0L);
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(
+                properties,
+                new ApiTokenService(properties),
+                userAccountRepository
+        );
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/ops/accounts");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        FilterChain chain = (servletRequest, servletResponse) -> {
+            assertThat(SecurityContext.getPrincipal()).isEqualTo("local-open");
+            assertThat(SecurityContext.hasPermission("OPS_ADMIN")).isTrue();
+        };
+
+        filter.doFilter(request, response, chain);
+
+        assertThat(response.getStatus()).isEqualTo(200);
     }
 
     @Test

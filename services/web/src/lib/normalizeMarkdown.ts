@@ -52,7 +52,7 @@ function unmangleCommands(text: string): string {
 }
 
 function fixGluedCodeFences(text: string): string {
-  const openLang = new RegExp(`\`\`\`(${CODE_LANGS})`, 'gi')
+  const openLang = new RegExp(`\`\`\`(${CODE_LANGS})(?!\\n)`, 'gi')
   let s = text
     .replace(/([^\n`])(```(?:bash|sh|shell|env|sql|json|javascript|js|nginx|yaml|yml|text))/gi, '$1\n\n$2')
     .replace(/([：:])\s*(```)/g, '$1\n\n$2')
@@ -70,7 +70,7 @@ function fixCodeFences(text: string): string {
   })
 
   s = s.replace(
-    new RegExp(`\`\`\`(${CODE_LANGS})\\s+([^\\n]+)`, 'gi'),
+    new RegExp(`\`\`\`(${CODE_LANGS})[ \\t]+([^\\n]+)`, 'gi'),
     (_, lang: string, body: string) =>
       `\`\`\`${lang.toLowerCase()}\n${unmangleCommands(body.trim())}\n\`\`\``,
   )
@@ -338,6 +338,7 @@ function fixShortHeadings(text: string): string {
 function fixListBoldMash(text: string): string {
   return text
     .replace(/([：:])-\*\*([^：\n]+)：/g, '$1\n\n- **$2**：')
+    .replace(/^-\s+\*\*([^：:\n]{2,20})[：:]\s*/gm, '- **$1**：')
     .replace(/^-\*\*([^*\n]+)\*\*：/gm, '- **$1**：')
     .replace(/^-\*\*([^：\n]+)：/gm, '- **$1**：')
     .replace(/([^\n])-\*\*([^：\n]+)：/g, '$1\n\n- **$2**：')
@@ -469,6 +470,61 @@ function fixBrokenBackticks(text: string): string {
   return out.join('\n')
 }
 
+/** 修复模型把 Python venv 命令拆成列表/半截行内代码的问题。 */
+function fixSplitPythonVenvCommands(text: string): string {
+  return text
+    .replace(/`python\s*\n\s*[-*]\s*mvenv\.venv`/gi, '`python -m venv .venv`')
+    .replace(/`python\s*\n\s*[-*]\s*m\s*venv\s+\.?venv`/gi, '`python -m venv .venv`')
+    .replace(/`py\s*\n\s*(?:3|1)\.\s*12\s*\n\s*[-*]\s*mvenv\.venv`/gi, '`py -3.12 -m venv .venv`')
+    .replace(/`py\s*\n\s*(?:3|1)\.\s*12\s*\n\s*[-*]\s*m\s*venv\s+\.?venv`/gi, '`py -3.12 -m venv .venv`')
+    .replace(/`py\s*-\s*\n\s*\d+\.\s*12\s+-m\s+venv\s+\.?venv`/gi, '`py -3.12 -m venv .venv`')
+    .replace(/`py\s*-\s*\n\s*\d+\.\s*12\s+-mvenv\.venv`/gi, '`py -3.12 -m venv .venv`')
+    .replace(/名为\.venv`/g, '名为 `.venv`')
+    .replace(/名为\.venv/g, '名为 `.venv`')
+}
+
+/** 修复“1. 4venv的优缺点”或“## 3.4 venv 的优缺点”这类片段编号污染的小节标题。 */
+function fixMalformedNumberedHeadings(text: string): string {
+  return text
+    .replace(
+      /^\d+\.\s*\d+([A-Za-z][^\n]*(?:优缺点|步骤|说明|用法|配置)[^\n]*)$/gm,
+      '## $1',
+    )
+    .replace(
+      /^##\s+\d+\.\d+\s+([A-Za-z][^\n]*(?:优缺点|步骤|说明|用法|配置)[^\n]*)$/gm,
+      '## $1',
+    )
+    .replace(
+      /^#{3,6}\s+\d+\.\d+\s+([A-Za-z][^\n]*(?:优缺点|步骤|说明|用法|配置)[^\n]*)$/gm,
+      '## $1',
+    )
+    .replace(
+      /^#{2,3}\s*\n\d+\.\s*\d+\s+([A-Za-z][^\n]*(?:优缺点|步骤|说明|用法|配置)[^\n]*)$/gm,
+      '## $1',
+    )
+}
+
+function removeEmptyListItems(text: string): string {
+  return text.replace(/^\s*[-*]\s*$/gm, '')
+}
+
+function fixDanglingBoldMarkers(text: string): string {
+  return text.replace(/^- ([^*\n：:]{2,30})\*{2,}([：:])/gm, '- **$1**$2')
+}
+
+function fixMalformedVenvAnswerLines(text: string): string {
+  return text
+    .replace(/^- \*\*创建虚拟环境：\s*使用`?python -m venv \.venv`?/gm, '- **创建虚拟环境**：使用`python -m venv .venv`')
+    .replace(/^- 指定Python版本\*+：/gm, '- **指定Python版本**：')
+    .replace(/^- 指定Python版本\*+：\s*可以通过`?py -3\.12 -m venv \.venv`?/gm, '- **指定Python版本**：可以通过`py -3.12 -m venv .venv`')
+    .replace(/^- 指定Python版本：\s*可以通过`?py -3\.12 -m venv \.venv`?/gm, '- **指定Python版本**：可以通过`py -3.12 -m venv .venv`')
+    .replace(/^- \*\*指定Python版本\*\*：\s*可以通过`?py -3\.12 -m venv \.venv`?/gm, '- **指定Python版本**：可以通过`py -3.12 -m venv .venv`')
+    .replace(/^(\d+)\.\s*12\s*版本来创建环境/gm, '3.12 版本来创建环境')
+    .replace(/^##\s+版本来创建环境/gm, '3.12 版本来创建环境')
+    .replace(/`py -\s*\n\d+\.\s*12 -m venv \.venv`/g, '`py -3.12 -m venv .venv`')
+    .replace(/通过`py -\s*\n\d+\.\s*12 -m venv \.venv`/g, '通过`py -3.12 -m venv .venv`')
+}
+
 /** 将散落在正文中的粘连命令行包成 bash 代码块。 */
 function fixLooseCommandLines(text: string): string {
   return text.replace(
@@ -483,11 +539,14 @@ export function normalizeMarkdown(text: string): string {
   let s = text.replace(/\r\n/g, '\n')
 
   s = stripArtifacts(s)
+  s = fixSplitPythonVenvCommands(s)
+  s = fixMalformedVenvAnswerLines(s)
   s = splitGluedSectionTitles(s)
   s = fixListBoldMash(s)
   s = fixOrphanBold(s)
   s = fixShortHeadings(s)
   s = fixNestedSectionNumbers(s)
+  s = fixMalformedNumberedHeadings(s)
 
   s = s.replace(/([^\n#])(#{1,6})\s*([^\n#]+)/g, (_, before, hashes, title) => {
     const trimmed = title.trim()
@@ -507,16 +566,29 @@ export function normalizeMarkdown(text: string): string {
   s = splitMarkdownInsideCodeBlocks(s)
   s = fixLooseCommandLines(s)
   s = fixInlineCode(s)
+  s = fixSplitPythonVenvCommands(s)
+  s = fixMalformedVenvAnswerLines(s)
   s = fixBrokenBackticks(s)
+  s = fixSplitPythonVenvCommands(s)
+  s = fixMalformedVenvAnswerLines(s)
 
-  s = s.replace(/([^\n\d])(\d{1,2})\.\s*/g, '$1\n$2. ')
-  s = s.replace(/^(\d{1,2})\.([^\s])/gm, '$1. $2')
+  s = s.replace(/([^\n\d])(\d{1,2})\.(?!\d)\s*/g, '$1\n$2. ')
+  s = s.replace(/^(\d{1,2})\.(?!\d)([^\s])/gm, '$1. $2')
+  s = fixMalformedNumberedHeadings(s)
+  s = fixSplitPythonVenvCommands(s)
+  s = fixMalformedVenvAnswerLines(s)
 
   s = s.replace(/([。）\]\w\u4e00-\u9fff])(-\s*)([^\s\-])/g, '$1\n$2$3')
   s = s.replace(/^-([^\s\-])/gm, '- $1')
+  s = removeEmptyListItems(s)
 
   s = renumberOrderedLists(s)
+  s = fixSplitPythonVenvCommands(s)
+  s = fixMalformedVenvAnswerLines(s)
+  s = removeEmptyListItems(s)
   s = fixExcessiveBold(s)
+  s = fixDanglingBoldMarkers(s)
+  s = fixMalformedVenvAnswerLines(s)
   s = s.replace(/^#\s+([^#\n].*)$/gm, '## $1')
   s = s.replace(/\n{3,}/g, '\n\n')
 

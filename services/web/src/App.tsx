@@ -8,6 +8,7 @@ import { KbListPage } from '@/pages/KbListPage'
 import { KbDetailPage } from '@/pages/KbDetailPage'
 import { OpsAccountsPage } from '@/pages/OpsAccountsPage'
 import { OpsAuditPage } from '@/pages/OpsAuditPage'
+import { OpsRolesPage } from '@/pages/OpsRolesPage'
 import { Database, Loader2 } from 'lucide-react'
 
 function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) {
@@ -59,9 +60,6 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) {
             {loading && <Loader2 className="h-4 w-4 animate-spin" />}
             登录
           </Button>
-          <Button variant="ghost" className="w-full" onClick={onAuthenticated}>
-            本地开放模式继续
-          </Button>
         </div>
       </div>
     </div>
@@ -85,6 +83,7 @@ export default function App() {
             <Route path="/kb/:kbId" element={<KbDetailPage onLogout={handleLogout} />} />
             <Route path="/ops/audit-logs" element={<OpsAuditPage onLogout={handleLogout} />} />
             <Route path="/ops/accounts" element={<OpsAccountsPage onLogout={handleLogout} />} />
+            <Route path="/ops/roles" element={<OpsRolesPage onLogout={handleLogout} />} />
           </Routes>
         </BrowserRouter>
       ) : (

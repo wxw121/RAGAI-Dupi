@@ -12,7 +12,7 @@
 - **Worker 迟到回调防护**：Worker 状态回调处理前检查 tombstone；已删除文档的迟到回调不会恢复 chunks、document 状态或 ingest job。
 - **Outbox 删除防护**：outbox dispatcher 遇到 tombstoned document 会取消事件，不再把已删除文档重新投递给 Worker。
 - **实例级授权**：在知识库范围授权基础上，文档、会话和向量清理任务等实例级操作会解析实例归属 kbId 后再校验 `SecurityContext.canAccessKnowledgeBase(...)`。
-- **账号管理 UI**：新增 `/ops/accounts`，展示内置账号的 username、tenantId、role、permissions、knowledgeBaseIds、tokenVersion 和密码/哈希配置状态；仅展示脱敏元数据。
+- **账号管理 UI**：新增 `/ops/accounts`，展示内置账号的 username、tenantId、role、permissions、knowledgeBaseIds、tokenVersion 和密码/哈希配置状态；仅展示脱敏元数据。该能力已在 2026-07-12 升级为数据库账号 + 角色管理，详见 `docs/rbac-ops-admin-2026-07-06.md` 与 `docs/progress.md`。
 - **审计导出/保留/告警**：新增 CSV 导出接口 `/api/v1/ops/audit-logs/export`，保留清理由 `AUDIT_RETENTION_DAYS` / `AUDIT_RETENTION_CRON` 控制，告警接口 `/api/v1/ops/audit-alerts` 在近期失败审计数超过阈值时返回 `AUDIT_FAILED_SPIKE`。
 - **审计运维 UI**：`/ops/audit-logs` 增加告警摘要和“导出 CSV”按钮，继续支持租户、动作、目标类型、状态和 limit 筛选。
 
@@ -24,7 +24,7 @@
 | 审计查询 | `GET /api/v1/ops/audit-logs` |
 | 审计 CSV 导出 | `GET /api/v1/ops/audit-logs/export` |
 | 审计告警摘要 | `GET /api/v1/ops/audit-alerts` |
-| 内置账号元数据 | `GET /api/v1/ops/accounts` |
+| 内置账号元数据 | `GET /api/v1/ops/accounts`（2026-07-12 后为数据库账号管理入口） |
 | 账号管理页 | `/ops/accounts` |
 | 审计日志页 | `/ops/audit-logs` |
 
@@ -48,6 +48,6 @@
 
 ## 后续建议
 
-- 账号管理当前为只读元数据页；下一步可增加账号创建/禁用、权限分配、tokenVersion 轮换和密码哈希生成工作流。
+- 账号管理只读元数据页已在后续版本升级为数据库账号 + 角色管理，支持账号创建/禁用、角色分配、tokenVersion 轮换和密码重置；后续重点转向 SSO/OIDC 与外部身份源同步。
 - 审计告警当前为接口与页面摘要；生产部署可接入邮件、Webhook 或 IM 通知。
 - outbox 当前保障投递可靠性；如后续扩展到多实例高并发，可增加行级锁/claim 字段，减少重复扫描竞争。

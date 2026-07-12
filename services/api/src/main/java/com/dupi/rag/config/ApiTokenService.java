@@ -1,5 +1,10 @@
 package com.dupi.rag.config;
 
+import com.dupi.rag.domain.entity.Role;
+import com.dupi.rag.domain.entity.UserAccount;
+import com.dupi.rag.repository.RoleRepository;
+import com.dupi.rag.repository.UserAccountRepository;
+import com.dupi.rag.service.RoleService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,38 +38,59 @@ public class ApiTokenService {
     private final ApiSecurityProperties properties;
     private final Clock clock;
     private final LoginFailureStore loginFailureStore;
+    private final UserAccountRepository userAccountRepository;
+    private final RoleRepository roleRepository;
 
     public ApiTokenService(ApiSecurityProperties properties) {
-        this(properties, Clock.systemUTC(), new InMemoryLoginFailureStore());
+        this(properties, Clock.systemUTC(), new InMemoryLoginFailureStore(), null, null);
+    }
+
+    public ApiTokenService(ApiSecurityProperties properties, LoginFailureStore loginFailureStore) {
+        this(properties, Clock.systemUTC(), loginFailureStore, null, null);
     }
 
     @Autowired
-    public ApiTokenService(ApiSecurityProperties properties, LoginFailureStore loginFailureStore) {
-        this(properties, Clock.systemUTC(), loginFailureStore);
+    public ApiTokenService(
+            ApiSecurityProperties properties,
+            LoginFailureStore loginFailureStore,
+            UserAccountRepository userAccountRepository,
+            RoleRepository roleRepository
+    ) {
+        this(properties, Clock.systemUTC(), loginFailureStore, userAccountRepository, roleRepository);
     }
 
     public ApiTokenService(ApiSecurityProperties properties, Clock clock) {
-        this(properties, clock, new InMemoryLoginFailureStore());
+        this(properties, clock, new InMemoryLoginFailureStore(), null, null);
     }
 
     public ApiTokenService(ApiSecurityProperties properties, Clock clock, LoginFailureStore loginFailureStore) {
+        this(properties, clock, loginFailureStore, null, null);
+    }
+
+    public ApiTokenService(
+            ApiSecurityProperties properties,
+            Clock clock,
+            LoginFailureStore loginFailureStore,
+            UserAccountRepository userAccountRepository,
+            RoleRepository roleRepository
+    ) {
         this.properties = properties;
         this.clock = clock;
         this.loginFailureStore = loginFailureStore;
+        this.userAccountRepository = userAccountRepository;
+        this.roleRepository = roleRepository;
     }
 
     public Optional<TokenPrincipal> authenticate(String username, String password) {
         if (username == null || password == null) {
             return Optional.empty();
         }
-        Optional<ApiSecurityProperties.UserAccount> matchedUser = properties.getUsers().stream()
-                .filter(user -> constantTimeEquals(username, user.getUsername()))
-                .findFirst();
-        if (matchedUser.isEmpty() || matchedUser.get().isDisabled() || isLocked(username)) {
+        Optional<AuthAccount> matchedUser = findAuthAccount(username);
+        if (matchedUser.isEmpty() || matchedUser.get().disabled() || isLocked(username)) {
             return Optional.empty();
         }
 
-        ApiSecurityProperties.UserAccount user = matchedUser.get();
+        AuthAccount user = matchedUser.get();
         if (!matchesPassword(password, user)) {
             recordFailure(username);
             return Optional.empty();
@@ -75,10 +101,10 @@ public class ApiTokenService {
     }
 
     public String issueToken(String username, String tenantId, String role) {
-        Optional<ApiSecurityProperties.UserAccount> configuredUser = findUser(username);
-        Collection<String> permissions = configuredUser.map(user -> parsePermissions(user.getPermissions(), user.getRole())).orElse(List.of());
-        Collection<String> knowledgeBaseIds = configuredUser.map(user -> parseKnowledgeBaseIds(user.getKnowledgeBaseIds())).orElse(List.of());
-        String tokenVersion = configuredUser.map(ApiSecurityProperties.UserAccount::getTokenVersion).orElse("1");
+        Optional<AuthAccount> configuredUser = findAuthAccount(username);
+        Collection<String> permissions = configuredUser.map(AuthAccount::permissions).orElse(List.of());
+        Collection<String> knowledgeBaseIds = configuredUser.map(AuthAccount::knowledgeBaseIds).orElse(List.of());
+        String tokenVersion = configuredUser.map(AuthAccount::tokenVersion).orElse("1");
         return issueToken(username, tenantId, role, permissions, knowledgeBaseIds, tokenVersion);
     }
 
@@ -128,19 +154,19 @@ public class ApiTokenService {
             if (username.isBlank() || tenantId.isBlank()) {
                 return Optional.empty();
             }
-            Optional<ApiSecurityProperties.UserAccount> configuredUser = findUser(username);
-            if (configuredUser.isPresent() && configuredUser.get().isDisabled()) {
+            Optional<AuthAccount> configuredUser = findAuthAccount(username);
+            if (configuredUser.isPresent() && configuredUser.get().disabled()) {
                 return Optional.empty();
             }
-            if (configuredUser.isPresent() && !constantTimeEquals(tokenVersion, normalizeTokenVersion(configuredUser.get().getTokenVersion()))) {
+            if (configuredUser.isPresent() && !constantTimeEquals(tokenVersion, normalizeTokenVersion(configuredUser.get().tokenVersion()))) {
                 return Optional.empty();
             }
             Collection<String> permissions = payload.containsKey("permissions")
                     ? parsePermissions(payload.get("permissions"), role)
-                    : configuredUser.map(user -> parsePermissions(user.getPermissions(), role)).orElse(List.of());
+                    : configuredUser.map(AuthAccount::permissions).orElse(List.of());
             Collection<String> knowledgeBaseIds = payload.containsKey("knowledgeBaseIds")
                     ? parseKnowledgeBaseIds(payload.get("knowledgeBaseIds"))
-                    : configuredUser.map(user -> parseKnowledgeBaseIds(user.getKnowledgeBaseIds())).orElse(List.of());
+                    : configuredUser.map(AuthAccount::knowledgeBaseIds).orElse(List.of());
             return Optional.of(new TokenPrincipal(
                     username,
                     tenantId,
@@ -195,25 +221,35 @@ public class ApiTokenService {
         return Long.parseLong(String.valueOf(value));
     }
 
-    private Optional<ApiSecurityProperties.UserAccount> findUser(String username) {
-        if (username == null || properties.getUsers() == null) {
+    private Optional<AuthAccount> findAuthAccount(String username) {
+        if (username == null) {
+            return Optional.empty();
+        }
+        if (userAccountRepository != null && roleRepository != null) {
+            Optional<UserAccount> persisted = userAccountRepository.findByUsername(username.trim());
+            if (persisted.isPresent()) {
+                return persisted.map(this::toAuthAccount);
+            }
+        }
+        if (properties.getUsers() == null) {
             return Optional.empty();
         }
         return properties.getUsers().stream()
                 .filter(user -> constantTimeEquals(username, user.getUsername()))
+                .map(this::toAuthAccount)
                 .findFirst();
     }
 
-    private TokenPrincipal toPrincipal(ApiSecurityProperties.UserAccount user, Instant expiresAt) {
-        String role = normalizeRole(user.getRole());
-        String tokenVersion = normalizeTokenVersion(user.getTokenVersion());
+    private TokenPrincipal toPrincipal(AuthAccount user, Instant expiresAt) {
+        String role = normalizeRole(user.role());
+        String tokenVersion = normalizeTokenVersion(user.tokenVersion());
         return new TokenPrincipal(
-                user.getUsername(),
-                user.getTenantId(),
+                user.username(),
+                user.tenantId(),
                 role,
                 expiresAt,
-                parsePermissions(user.getPermissions(), role),
-                parseKnowledgeBaseIds(user.getKnowledgeBaseIds()),
+                user.permissions(),
+                user.knowledgeBaseIds(),
                 tokenVersion
         );
     }
@@ -222,11 +258,42 @@ public class ApiTokenService {
      * 生产环境优先使用 PBKDF2 哈希密码，明文 password 仅作为本地首次启动的兼容入口。
      * 这里采用“策略优先级”思想：账号显式配置 passwordHash 时走强校验，否则回退旧字段，避免升级时破坏本地开发体验。
      */
-    private boolean matchesPassword(String password, ApiSecurityProperties.UserAccount user) {
-        if (user.getPasswordHash() != null && !user.getPasswordHash().isBlank()) {
-            return verifyPbkdf2Password(password, user.getPasswordHash());
+    private boolean matchesPassword(String password, AuthAccount user) {
+        if (user.passwordHash() != null && !user.passwordHash().isBlank()) {
+            return verifyPbkdf2Password(password, user.passwordHash());
         }
-        return constantTimeEquals(password, user.getPassword());
+        return constantTimeEquals(password, user.password());
+    }
+
+    private AuthAccount toAuthAccount(UserAccount user) {
+        Role role = roleRepository.findByCode(user.getRoleCode()).orElse(null);
+        String roleCode = role == null ? user.getRoleCode() : role.getCode();
+        return new AuthAccount(
+                user.getUsername(),
+                "",
+                user.getPasswordHash(),
+                user.getTenantId(),
+                roleCode,
+                role == null ? List.of() : RoleService.parsePermissions(role.getPermissions(), roleCode),
+                parseKnowledgeBaseIds(user.getKnowledgeBaseIds()),
+                user.getTokenVersion(),
+                user.isDisabled() || (role != null && role.isDisabled())
+        );
+    }
+
+    private AuthAccount toAuthAccount(ApiSecurityProperties.UserAccount user) {
+        String role = normalizeRole(user.getRole());
+        return new AuthAccount(
+                user.getUsername(),
+                user.getPassword(),
+                user.getPasswordHash(),
+                user.getTenantId(),
+                role,
+                parsePermissions(user.getPermissions(), role),
+                parseKnowledgeBaseIds(user.getKnowledgeBaseIds()),
+                user.getTokenVersion(),
+                user.isDisabled()
+        );
     }
 
     /**
@@ -393,5 +460,10 @@ public class ApiTokenService {
 
     public record TokenPrincipal(String username, String tenantId, String role, Instant expiresAt,
                                  List<String> permissions, List<String> knowledgeBaseIds, String tokenVersion) {
+    }
+
+    private record AuthAccount(String username, String password, String passwordHash, String tenantId, String role,
+                               List<String> permissions, List<String> knowledgeBaseIds, String tokenVersion,
+                               boolean disabled) {
     }
 }

@@ -73,6 +73,25 @@ class ControllerLayerTest {
     }
 
     @Test
+    void authControllerReturnsServiceUnavailableWhenAuthSecretIsMissing() {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        properties.getUsers().add(user("admin", "pw", "ops", "ADMIN"));
+        ApiTokenService tokenService = new ApiTokenService(
+                properties,
+                Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC)
+        );
+        AuthController controller = new AuthController(tokenService);
+        LoginRequest request = new LoginRequest();
+        request.setUsername("admin");
+        request.setPassword("pw");
+
+        assertThatThrownBy(() -> controller.login(request, new MockHttpServletResponse()))
+                .isInstanceOf(ResponseStatusException.class)
+                .extracting("statusCode")
+                .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+    }
+
+    @Test
     void documentControllerDelegatesAllRoutesAndValidatesIngestJobOwnership() {
         DocumentService documentService = mock(DocumentService.class);
         IngestJobService ingestJobService = mock(IngestJobService.class);
@@ -205,7 +224,8 @@ class ControllerLayerTest {
         VectorCleanupTaskService service = mock(VectorCleanupTaskService.class);
         AuditLogService auditLogService = mock(AuditLogService.class);
         AccountService accountService = mock(AccountService.class);
-        OpsController controller = new OpsController(service, auditLogService, accountService);
+        RoleService roleService = mock(RoleService.class);
+        OpsController controller = new OpsController(service, auditLogService, accountService, roleService);
         UUID taskId = UUID.randomUUID();
         VectorCleanupTaskResponse response = VectorCleanupTaskResponse.builder()
                 .id(taskId)
@@ -263,6 +283,17 @@ class ControllerLayerTest {
         when(accountService.enable("analyst")).thenReturn(analyst);
         when(accountService.rotateTokenVersion("analyst")).thenReturn(analyst);
         when(accountService.generatePasswordHash("secret")).thenReturn("pbkdf2$hash");
+        when(accountService.resetPassword(eq("analyst"), eq("secret"))).thenReturn(analyst);
+        RoleResponse role = RoleResponse.builder()
+                .id(UUID.randomUUID())
+                .code("ANALYST")
+                .name("分析用户")
+                .permissions(List.of("KB_READ"))
+                .build();
+        when(roleService.listRoles()).thenReturn(List.of(role));
+        when(roleService.create(any(RoleRequest.class))).thenReturn(role);
+        when(roleService.update(eq(role.getId()), any(RoleRequest.class))).thenReturn(role);
+        when(roleService.disable(role.getId())).thenReturn(role);
 
         assertThat(controller.listVectorCleanupTasks()).containsExactly(response);
         assertThat(controller.retryVectorCleanupTask(taskId)).isSameAs(response);
@@ -279,7 +310,29 @@ class ControllerLayerTest {
         assertThat(controller.disableAccount("analyst")).isSameAs(analyst);
         assertThat(controller.enableAccount("analyst")).isSameAs(analyst);
         assertThat(controller.rotateAccountToken("analyst")).isSameAs(analyst);
+        PasswordResetRequest passwordResetRequest = new PasswordResetRequest();
+        passwordResetRequest.setPassword("secret");
+        assertThat(controller.resetAccountPassword("analyst", passwordResetRequest)).isSameAs(analyst);
         assertThat(controller.generatePasswordHash(Map.of("password", "secret"))).containsEntry("passwordHash", "pbkdf2$hash");
+        OpsMetadataResponse metadata = controller.metadata();
+        assertThat(metadata.getPermissions()).contains("KB_READ", "ACCOUNT_PASSWORD_RESET");
+        assertThat(metadata.getPermissionDetails())
+                .extracting(PermissionMetadataResponse::getCode)
+                .contains("KB_READ", "ACCOUNT_PASSWORD_RESET");
+        assertThat(metadata.getPermissionDetails())
+                .filteredOn(detail -> "ACCOUNT_PASSWORD_RESET".equals(detail.getCode()))
+                .singleElement()
+                .satisfies(detail -> {
+                    assertThat(detail.getName()).isNotBlank();
+                    assertThat(detail.getAllows()).contains("重置其他账号密码");
+                    assertThat(detail.getDenies()).contains("创建、禁用或编辑账号基础信息");
+                });
+        assertThat(controller.listRoles()).containsExactly(role);
+        RoleRequest roleRequest = new RoleRequest();
+        roleRequest.setCode("ANALYST");
+        assertThat(controller.createRole(roleRequest)).isSameAs(role);
+        assertThat(controller.updateRole(role.getId(), roleRequest)).isSameAs(role);
+        assertThat(controller.disableRole(role.getId())).isSameAs(role);
         verify(auditLogService).list(any(AuditLogQuery.class));
         verify(auditLogService).exportCsv(any(AuditLogQuery.class));
         verify(auditLogService).summarizeAlerts();
@@ -289,7 +342,11 @@ class ControllerLayerTest {
         verify(accountService).disable("analyst");
         verify(accountService).enable("analyst");
         verify(accountService).rotateTokenVersion("analyst");
-        verify(auditLogService, atLeast(5)).recordSuccess(eq("ACCOUNT_MANAGE"), eq("ACCOUNT"), isNull(), anyString());
+        verify(accountService).resetPassword("analyst", "secret");
+        verify(auditLogService).recordSuccess(eq("ACCOUNT_CREATE"), eq("ACCOUNT"), isNull(), anyString());
+        verify(auditLogService).recordSuccess(eq("ACCOUNT_UPDATE"), eq("ACCOUNT"), isNull(), anyString());
+        verify(auditLogService).recordSuccess(eq("ACCOUNT_PASSWORD_RESET"), eq("ACCOUNT"), isNull(), anyString());
+        verify(auditLogService).recordSuccess(eq("ROLE_CREATE"), eq("ROLE"), eq(role.getId()), anyString());
     }
 
     @Test

@@ -3,6 +3,7 @@ import type { ApiError } from '@/types'
 const CSRF_TOKEN_KEY = 'dupi.auth.csrf'
 const COOKIE_SESSION_MARKER = 'cookie-session'
 const CSRF_HEADER = 'X-Dupi-CSRF-Token'
+const AUTH_EXPIRED_MESSAGE = '登录状态已过期，请重新登录'
 
 export interface LoginResponse {
   csrfToken: string
@@ -52,6 +53,15 @@ export function authHeaders(extra: Record<string, string> = {}): Record<string, 
   return { ...extra, [CSRF_HEADER]: csrfToken }
 }
 
+export function csrfHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const csrfToken = localStorage.getItem(CSRF_TOKEN_KEY)
+  if (!csrfToken) {
+    clearAuthToken()
+    throw new HttpError(401, AUTH_EXPIRED_MESSAGE)
+  }
+  return { ...extra, [CSRF_HEADER]: csrfToken }
+}
+
 export async function login(username: string, password: string): Promise<LoginResponse> {
   const res = await fetch('/api/v1/auth/login', {
     method: 'POST',
@@ -82,7 +92,7 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method: 'POST',
     credentials: 'include',
-    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    headers: csrfHeaders({ 'Content-Type': 'application/json' }),
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
   if (!res.ok) throw await parseError(res)
@@ -94,7 +104,7 @@ export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method: 'PATCH',
     credentials: 'include',
-    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    headers: csrfHeaders({ 'Content-Type': 'application/json' }),
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
   if (!res.ok) throw await parseError(res)
@@ -103,14 +113,14 @@ export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export async function apiDelete(path: string): Promise<void> {
-  const res = await fetch(path, { method: 'DELETE', credentials: 'include', headers: authHeaders() })
+  const res = await fetch(path, { method: 'DELETE', credentials: 'include', headers: csrfHeaders() })
   if (!res.ok) throw await parseError(res)
 }
 
 export async function apiUpload<T>(path: string, file: File): Promise<T> {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch(path, { method: 'POST', credentials: 'include', headers: authHeaders(), body: form })
+  const res = await fetch(path, { method: 'POST', credentials: 'include', headers: csrfHeaders(), body: form })
   if (!res.ok) throw await parseError(res)
   return res.json()
 }
@@ -118,7 +128,7 @@ export async function apiUpload<T>(path: string, file: File): Promise<T> {
 export async function apiUploadMany<T>(path: string, files: File[]): Promise<T> {
   const form = new FormData()
   files.forEach((file) => form.append('files', file))
-  const res = await fetch(path, { method: 'POST', credentials: 'include', headers: authHeaders(), body: form })
+  const res = await fetch(path, { method: 'POST', credentials: 'include', headers: csrfHeaders(), body: form })
   if (!res.ok) throw await parseError(res)
   return res.json()
 }

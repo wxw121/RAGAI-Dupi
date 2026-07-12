@@ -15,11 +15,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.reactive.function.client.ExchangeFunction;
 import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientRequestException;
 
+import java.net.URI;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -218,6 +222,54 @@ class RetrievalServiceTest {
             assertThat(hit.getChunkId()).isEqualTo(chunkId);
             assertThat(hit.getContent()).contains("本地兜底检索");
         });
+    }
+
+    @Test
+    void retrieveFallsBackToLocalChunkTextWhenEmbeddingProviderNetworkFails() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID chunkId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(3)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(5);
+        rag.setMaxContextChars(2000);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(llmClient.embed("venv是什么", "embed"))
+                .thenThrow(new WebClientRequestException(
+                        new RuntimeException("Query failed with SERVFAIL"),
+                        HttpMethod.POST,
+                        URI.create("https://open.bigmodel.cn/api/paas/v4/embeddings"),
+                        HttpHeaders.EMPTY
+                ));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
+                Chunk.builder()
+                        .id(chunkId)
+                        .kbId(kbId)
+                        .docId(docId)
+                        .chunkIndex(0)
+                        .content("venv 是 Python 虚拟环境，用于隔离项目依赖。")
+                        .metadata(Map.of("heading", "venv"))
+                        .build()
+        ));
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("venv是什么");
+
+        var response = service(rag).retrieve(kbId, request);
+
+        assertThat(response.getRetrievalMode()).isEqualTo("local_text_fallback");
+        assertThat(response.getDiagnostics()).containsEntry("fallbackReason", "embedding_unavailable")
+                .containsEntry("hitCount", 1);
+        assertThat(response.getHits()).singleElement().satisfies(hit -> {
+            assertThat(hit.getChunkId()).isEqualTo(chunkId);
+            assertThat(hit.getContent()).contains("Python 虚拟环境");
+        });
+        verifyNoInteractions(milvusVectorService);
     }
 
     @Test

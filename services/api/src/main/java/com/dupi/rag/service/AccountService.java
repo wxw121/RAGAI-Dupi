@@ -1,159 +1,249 @@
 package com.dupi.rag.service;
 
 import com.dupi.rag.config.ApiSecurityProperties;
+import com.dupi.rag.config.ApiTokenService;
+import com.dupi.rag.config.SecurityContext;
 import com.dupi.rag.config.TenantContext;
+import com.dupi.rag.domain.entity.Role;
+import com.dupi.rag.domain.entity.UserAccount;
 import com.dupi.rag.dto.AccountResponse;
 import com.dupi.rag.dto.AccountUpsertRequest;
+import com.dupi.rag.repository.RoleRepository;
+import com.dupi.rag.repository.UserAccountRepository;
+import jakarta.annotation.PostConstruct;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Service;
 
 @Service
 @RequiredArgsConstructor
 public class AccountService {
 
     private final ApiSecurityProperties properties;
+    private final UserAccountRepository userAccountRepository;
+    private final RoleRepository roleRepository;
+    private final RoleService roleService;
 
+    @PostConstruct
+    @Transactional
+    public void bootstrapConfiguredUsers() {
+        ensureBuiltInRoles();
+        if (properties.getUsers() == null || properties.getUsers().isEmpty()) {
+            return;
+        }
+        for (ApiSecurityProperties.UserAccount configured : properties.getUsers()) {
+            if (configured.getUsername() == null || configured.getUsername().isBlank()
+                    || userAccountRepository.existsByUsername(configured.getUsername().trim())) {
+                continue;
+            }
+            String roleCode = configuredRoleCode(configured);
+            Role role = roleService.requireActiveRole(roleCode);
+            String passwordHash = configured.getPasswordHash();
+            if (passwordHash == null || passwordHash.isBlank()) {
+                if (configured.getPassword() == null || configured.getPassword().isBlank()) {
+                    continue;
+                }
+                passwordHash = generatePasswordHash(configured.getPassword());
+            }
+            userAccountRepository.save(UserAccount.builder()
+                    .username(configured.getUsername().trim())
+                    .passwordHash(passwordHash.trim())
+                    .tenantId(hasText(configured.getTenantId()) ? configured.getTenantId().trim() : TenantContext.DEFAULT_TENANT_ID)
+                    .roleCode(role.getCode())
+                    .knowledgeBaseIds("ADMIN".equals(role.getCode()) ? "" : normalizeCsv(configured.getKnowledgeBaseIds()))
+                    .tokenVersion(hasText(configured.getTokenVersion()) ? configured.getTokenVersion().trim() : "1")
+                    .disabled(configured.isDisabled())
+                    .build());
+        }
+    }
+
+    @Transactional(readOnly = true)
     public List<AccountResponse> listUsers() {
-        return properties.getUsers().stream()
-                .map(user -> AccountResponse.builder()
-                        .username(user.getUsername())
-                        .tenantId(user.getTenantId())
-                        .role(normalizeRole(user.getRole()))
-                        .permissions(parseCsv(user.getPermissions(), defaultPermissions(user.getRole())))
-                        .knowledgeBaseIds(parseCsv(user.getKnowledgeBaseIds(), List.of()))
-                        .tokenVersion(user.getTokenVersion() == null || user.getTokenVersion().isBlank() ? "1" : user.getTokenVersion().trim())
-                        .passwordConfigured(user.getPassword() != null && !user.getPassword().isBlank())
-                        .passwordHashConfigured(user.getPasswordHash() != null && !user.getPasswordHash().isBlank())
-                        .disabled(user.isDisabled())
-                        .build())
+        return userAccountRepository.findAll().stream()
+                .map(this::response)
                 .toList();
     }
 
+    @Transactional
     public AccountResponse create(AccountUpsertRequest request) {
         if (request == null || request.getUsername() == null || request.getUsername().isBlank()) {
             throw new IllegalArgumentException("username is required");
         }
         String username = request.getUsername().trim();
-        if (findUser(username) != null) {
+        if (userAccountRepository.existsByUsername(username)) {
             throw new IllegalArgumentException("account already exists: " + username);
         }
-        ApiSecurityProperties.UserAccount user = new ApiSecurityProperties.UserAccount();
-        user.setUsername(username);
-        apply(user, request, true);
-        properties.getUsers().add(user);
-        return response(user);
+        Role role = roleService.requireActiveRole(requestedRole(request, "ANALYST"));
+        String password = request.getPassword();
+        if (!hasText(password) && !hasText(request.getPasswordHash())) {
+            throw new IllegalArgumentException("password is required");
+        }
+        UserAccount user = UserAccount.builder()
+                .username(username)
+                .passwordHash(hasText(request.getPasswordHash()) ? request.getPasswordHash().trim() : generatePasswordHash(password))
+                .tenantId(hasText(request.getTenantId()) ? request.getTenantId().trim() : TenantContext.DEFAULT_TENANT_ID)
+                .roleCode(role.getCode())
+                .knowledgeBaseIds("ADMIN".equals(role.getCode()) ? "" : String.join(",", normalizeKnowledgeBaseIds(request.getKnowledgeBaseIds())))
+                .tokenVersion("1")
+                .disabled(Boolean.TRUE.equals(request.getDisabled()))
+                .build();
+        return response(userAccountRepository.save(user));
     }
 
+    @Transactional
     public AccountResponse update(String username, AccountUpsertRequest request) {
-        ApiSecurityProperties.UserAccount user = requireUser(username);
-        apply(user, request, false);
-        return response(user);
+        UserAccount user = requireUser(username);
+        if (request != null) {
+            if (request.getTenantId() != null) {
+                user.setTenantId(request.getTenantId().isBlank() ? TenantContext.DEFAULT_TENANT_ID : request.getTenantId().trim());
+            }
+            if (request.getRoleCode() != null || request.getRole() != null) {
+                Role role = roleService.requireActiveRole(requestedRole(request, user.getRoleCode()));
+                user.setRoleCode(role.getCode());
+                if ("ADMIN".equals(role.getCode())) {
+                    user.setKnowledgeBaseIds("");
+                }
+                user.setTokenVersion(nextTokenVersion(user.getTokenVersion()));
+            }
+            if (request.getKnowledgeBaseIds() != null) {
+                user.setKnowledgeBaseIds("ADMIN".equals(user.getRoleCode()) ? "" : String.join(",", normalizeKnowledgeBaseIds(request.getKnowledgeBaseIds())));
+            }
+            if (request.getDisabled() != null) {
+                if (request.getDisabled()) {
+                    ensureCanDisable(user);
+                }
+                user.setDisabled(request.getDisabled());
+                user.setTokenVersion(nextTokenVersion(user.getTokenVersion()));
+            }
+        }
+        return response(userAccountRepository.save(user));
     }
 
+    @Transactional
+    public AccountResponse resetPassword(String username, String password) {
+        if (!SecurityContext.hasPermission("ACCOUNT_PASSWORD_RESET")) {
+            throw new IllegalArgumentException("permission required: ACCOUNT_PASSWORD_RESET");
+        }
+        UserAccount user = requireUser(username);
+        if (!hasText(password)) {
+            throw new IllegalArgumentException("password is required");
+        }
+        user.setPasswordHash(generatePasswordHash(password));
+        user.setTokenVersion(nextTokenVersion(user.getTokenVersion()));
+        return response(userAccountRepository.save(user));
+    }
+
+    @Transactional
     public AccountResponse disable(String username) {
-        ApiSecurityProperties.UserAccount user = requireUser(username);
+        UserAccount user = requireUser(username);
+        ensureCanDisable(user);
         user.setDisabled(true);
         user.setTokenVersion(nextTokenVersion(user.getTokenVersion()));
-        return response(user);
+        return response(userAccountRepository.save(user));
     }
 
+    @Transactional
     public AccountResponse enable(String username) {
-        ApiSecurityProperties.UserAccount user = requireUser(username);
+        UserAccount user = requireUser(username);
         user.setDisabled(false);
-        return response(user);
+        return response(userAccountRepository.save(user));
     }
 
+    @Transactional
     public AccountResponse rotateTokenVersion(String username) {
-        ApiSecurityProperties.UserAccount user = requireUser(username);
+        UserAccount user = requireUser(username);
         user.setTokenVersion(nextTokenVersion(user.getTokenVersion()));
-        return response(user);
+        return response(userAccountRepository.save(user));
     }
 
     public String generatePasswordHash(String password) {
         if (password == null || password.isBlank()) {
             throw new IllegalArgumentException("password is required");
         }
-        return com.dupi.rag.config.ApiTokenService.pbkdf2Hash(password, UUID.randomUUID().toString(), 120_000);
+        return ApiTokenService.pbkdf2Hash(password, UUID.randomUUID().toString(), 120_000);
     }
 
-    private void apply(ApiSecurityProperties.UserAccount user, AccountUpsertRequest request, boolean creating) {
-        if (request == null) {
-            if (creating) {
-                user.setTokenVersion("1");
-            }
-            return;
-        }
-        if (request.getTenantId() != null) {
-            user.setTenantId(request.getTenantId().isBlank() ? TenantContext.DEFAULT_TENANT_ID : request.getTenantId().trim());
-        }
-        if (request.getRole() != null) {
-            user.setRole(normalizeRole(request.getRole()));
-        }
-        if (request.getPermissions() != null) {
-            user.setPermissions(String.join(",", normalizePermissions(request.getPermissions(), user.getRole())));
-        }
-        if (request.getKnowledgeBaseIds() != null) {
-            user.setKnowledgeBaseIds("ADMIN".equals(normalizeRole(user.getRole()))
-                    ? ""
-                    : String.join(",", normalizeKnowledgeBaseIds(request.getKnowledgeBaseIds())));
-        }
-        if (request.getTokenVersion() != null) {
-            user.setTokenVersion(request.getTokenVersion().isBlank() ? "1" : request.getTokenVersion().trim());
-        } else if (creating) {
-            user.setTokenVersion("1");
-        }
-        if (request.getPasswordHash() != null && !request.getPasswordHash().isBlank()) {
-            user.setPassword("");
-            user.setPasswordHash(request.getPasswordHash().trim());
-        } else if (request.getPassword() != null && !request.getPassword().isBlank()) {
-            user.setPassword("");
-            user.setPasswordHash(generatePasswordHash(request.getPassword()));
-        }
-        if (request.getDisabled() != null) {
-            user.setDisabled(request.getDisabled());
-        }
-    }
-
-    private ApiSecurityProperties.UserAccount findUser(String username) {
-        if (username == null || properties.getUsers() == null) {
-            return null;
-        }
-        return properties.getUsers().stream()
-                .filter(user -> username.trim().equals(user.getUsername()))
-                .findFirst()
-                .orElse(null);
-    }
-
-    private ApiSecurityProperties.UserAccount requireUser(String username) {
-        ApiSecurityProperties.UserAccount user = findUser(username);
-        if (user == null) {
-            throw new IllegalArgumentException("account not found: " + username);
-        }
-        return user;
-    }
-
-    private AccountResponse response(ApiSecurityProperties.UserAccount user) {
+    @Transactional(readOnly = true)
+    public AccountResponse response(UserAccount user) {
+        Role role = roleRepository.findByCode(user.getRoleCode()).orElse(null);
+        String roleCode = role == null ? user.getRoleCode() : role.getCode();
         return AccountResponse.builder()
                 .username(user.getUsername())
                 .tenantId(user.getTenantId())
-                .role(normalizeRole(user.getRole()))
-                .permissions(parseCsv(user.getPermissions(), defaultPermissions(user.getRole())))
-                .knowledgeBaseIds("ADMIN".equals(normalizeRole(user.getRole())) ? List.of() : parseCsv(user.getKnowledgeBaseIds(), List.of()))
+                .role(roleCode)
+                .roleCode(roleCode)
+                .roleName(role == null ? roleCode : role.getName())
+                .permissions(role == null ? List.of() : RoleService.parsePermissions(role.getPermissions(), roleCode))
+                .knowledgeBaseIds("ADMIN".equals(roleCode) ? List.of() : parseCsv(user.getKnowledgeBaseIds(), List.of()))
                 .tokenVersion(user.getTokenVersion() == null || user.getTokenVersion().isBlank() ? "1" : user.getTokenVersion().trim())
-                .passwordConfigured(user.getPassword() != null && !user.getPassword().isBlank())
+                .passwordConfigured(false)
                 .passwordHashConfigured(user.getPasswordHash() != null && !user.getPasswordHash().isBlank())
                 .disabled(user.isDisabled())
                 .build();
     }
 
-    private List<String> defaultPermissions(String role) {
-        return "ADMIN".equals(normalizeRole(role)) ? List.of("*") : List.of("KB_READ", "DOCUMENT_UPLOAD", "CHAT_WRITE");
+    private UserAccount requireUser(String username) {
+        if (username == null || username.isBlank()) {
+            throw new IllegalArgumentException("username is required");
+        }
+        return userAccountRepository.findByUsername(username.trim())
+                .orElseThrow(() -> new IllegalArgumentException("account not found: " + username.trim()));
     }
 
-    private List<String> parseCsv(String raw, List<String> fallback) {
+    private void ensureCanDisable(UserAccount user) {
+        if ("ADMIN".equals(user.getRoleCode()) && userAccountRepository.countByRoleCodeAndDisabledFalse("ADMIN") <= 1) {
+            throw new IllegalArgumentException("cannot disable the last active admin account");
+        }
+    }
+
+    private void ensureBuiltInRoles() {
+        saveBuiltInRole("ADMIN", "管理员", "拥有全部系统权限", List.of("*"));
+        saveBuiltInRole("OPERATOR", "运维人员", "可维护知识库、任务和审计",
+                List.of("KB_READ", "DOCUMENT_UPLOAD", "MAINTENANCE", "DOCUMENT_DELETE", "CHAT_DELETE", "OPS_ADMIN", "OPS_AUDIT_READ"));
+        saveBuiltInRole("ANALYST", "分析用户", "可读取知识库并发起问答",
+                List.of("KB_READ", "DOCUMENT_UPLOAD", "CHAT_WRITE"));
+        saveBuiltInRole("VIEWER", "只读用户", "仅可查看知识库内容", List.of("KB_READ"));
+    }
+
+    private void saveBuiltInRole(String code, String name, String description, List<String> permissions) {
+        roleRepository.findByCode(code).orElseGet(() -> roleRepository.save(Role.builder()
+                .code(code)
+                .name(name)
+                .description(description)
+                .permissions(String.join(",", permissions))
+                .systemBuiltin(true)
+                .disabled(false)
+                .build()));
+    }
+
+    private String configuredRoleCode(ApiSecurityProperties.UserAccount configured) {
+        String role = RoleService.normalizeCode(configured.getRole());
+        return "USER".equals(role) ? "ANALYST" : role;
+    }
+
+    private String requestedRole(AccountUpsertRequest request, String fallback) {
+        if (request == null) {
+            return fallback;
+        }
+        if (hasText(request.getRoleCode())) {
+            return request.getRoleCode();
+        }
+        if (hasText(request.getRole())) {
+            String role = RoleService.normalizeCode(request.getRole());
+            return "USER".equals(role) ? "ANALYST" : role;
+        }
+        return fallback;
+    }
+
+    private static String normalizeCsv(String raw) {
+        return String.join(",", parseCsv(raw, List.of()));
+    }
+
+    private static List<String> parseCsv(String raw, List<String> fallback) {
         if (raw == null || raw.isBlank()) {
             return fallback;
         }
@@ -164,21 +254,7 @@ public class AccountService {
                 .toList();
     }
 
-    private List<String> normalizePermissions(List<String> permissions, String role) {
-        if ("ADMIN".equals(normalizeRole(role))) {
-            return List.of("*");
-        }
-        if (permissions == null || permissions.isEmpty()) {
-            return defaultPermissions(role);
-        }
-        return permissions.stream()
-                .filter(value -> value != null && !value.isBlank())
-                .map(value -> value.trim().toUpperCase().replace('-', '_'))
-                .distinct()
-                .toList();
-    }
-
-    private List<String> normalizeKnowledgeBaseIds(List<String> knowledgeBaseIds) {
+    private static List<String> normalizeKnowledgeBaseIds(List<String> knowledgeBaseIds) {
         if (knowledgeBaseIds == null || knowledgeBaseIds.isEmpty()) {
             return List.of();
         }
@@ -189,7 +265,7 @@ public class AccountService {
                 .toList();
     }
 
-    private String nextTokenVersion(String current) {
+    private static String nextTokenVersion(String current) {
         try {
             return String.valueOf(Integer.parseInt(current == null || current.isBlank() ? "1" : current.trim()) + 1);
         } catch (NumberFormatException ex) {
@@ -197,7 +273,7 @@ public class AccountService {
         }
     }
 
-    private String normalizeRole(String role) {
-        return role == null || role.isBlank() ? "USER" : role.trim().toUpperCase();
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
     }
 }

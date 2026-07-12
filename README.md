@@ -144,25 +144,36 @@ curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs/{jo
 curl http://localhost:8080/api/v1/ops/vector-cleanup-tasks
 curl -X POST http://localhost:8080/api/v1/ops/vector-cleanup-tasks/{taskId}/retry
 
-# 查看/导出审计日志、查看审计告警和管理内置账号
+# 查看/导出审计日志、查看审计告警、账号/角色元数据
 curl "http://localhost:8080/api/v1/ops/audit-logs?limit=50"
 curl "http://localhost:8080/api/v1/ops/audit-logs/export" -o audit-logs.csv
 curl http://localhost:8080/api/v1/ops/audit-alerts
+curl http://localhost:8080/api/v1/ops/metadata
 curl http://localhost:8080/api/v1/ops/accounts
+curl http://localhost:8080/api/v1/ops/roles
 
-# 新建/更新账号、禁用/启用账号、轮换 tokenVersion、生成 PBKDF2 密码哈希
+# 新建/更新账号、重置密码、禁用/启用账号、轮换 tokenVersion
 curl -X POST http://localhost:8080/api/v1/ops/accounts \
   -H "Content-Type: application/json" \
-  -d '{"username":"analyst","password":"change-me","tenantId":"default","role":"USER","permissions":["KB_READ","DOCUMENT_UPLOAD","CHAT_WRITE"],"knowledgeBaseIds":[]}'
+  -d '{"username":"analyst","password":"change-me","tenantId":"default","roleCode":"ANALYST","knowledgeBaseIds":[]}'
 curl -X PATCH http://localhost:8080/api/v1/ops/accounts/analyst \
   -H "Content-Type: application/json" \
-  -d '{"permissions":["KB_READ","CHAT_WRITE"],"knowledgeBaseIds":["<kbId>"]}'
+  -d '{"roleCode":"VIEWER","knowledgeBaseIds":["<kbId>"]}'
+curl -X POST http://localhost:8080/api/v1/ops/accounts/analyst/reset-password \
+  -H "Content-Type: application/json" \
+  -d '{"password":"new-change-me"}'
 curl -X POST http://localhost:8080/api/v1/ops/accounts/analyst/disable
 curl -X POST http://localhost:8080/api/v1/ops/accounts/analyst/enable
 curl -X POST http://localhost:8080/api/v1/ops/accounts/analyst/rotate-token
-curl -X POST http://localhost:8080/api/v1/ops/accounts/password-hash \
+
+# 新建/更新/禁用角色；账号通过 roleCode 获得角色绑定的权限点
+curl -X POST http://localhost:8080/api/v1/ops/roles \
   -H "Content-Type: application/json" \
-  -d '{"password":"change-me"}'
+  -d '{"code":"SUPPORT","name":"支持人员","permissions":["KB_READ","CHAT_WRITE"]}'
+curl -X PATCH http://localhost:8080/api/v1/ops/roles/SUPPORT \
+  -H "Content-Type: application/json" \
+  -d '{"name":"支持人员","permissions":["KB_READ","CHAT_WRITE","DOCUMENT_UPLOAD"]}'
+curl -X POST http://localhost:8080/api/v1/ops/roles/SUPPORT/disable
 
 # RAG 流式问答
 curl -N -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/chat \

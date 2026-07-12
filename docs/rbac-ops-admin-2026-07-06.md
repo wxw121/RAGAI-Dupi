@@ -6,7 +6,7 @@
 
 ## 已完成改动
 
-- 新增轻量内置账号配置：通过 `DUPI_SECURITY_USERS_*` 配置用户名、密码/密码哈希、租户、角色、权限点和 token 版本。
+- 新增数据库账号与角色表：`roles` 保存角色绑定的权限点，`user_accounts` 保存账号、密码哈希、租户、角色、知识库范围和 token 版本；`DUPI_SECURITY_USERS_*` 仅作为启动同步/首次引导来源。
 - 新增登录接口：`POST /api/v1/auth/login`，成功后写入 `DUPI_AUTH` HttpOnly Cookie，并返回用户名、租户、角色、过期时间和前端需要保存的 `csrfToken`。
 - 新增 HMAC-SHA256 token 签发与解析：token payload 包含 `sub`、`tenantId`、`role`、`permissions`、`knowledgeBaseIds`、`ver`、`iat`、`exp`。
 - 新增账号安全生产化能力：支持 PBKDF2 密码哈希、Redis 登录失败锁定、tokenVersion 强制失效旧 token。
@@ -16,7 +16,7 @@
 - 增加知识库资源级授权：账号可通过 `knowledgeBaseIds` 限定只能访问指定知识库，`ADMIN`、`*` 或空范围保持全量访问兼容。
 - 增加 Cookie 会话 CSRF 防护：Cookie 登录后的 mutating 请求必须同时携带 `DUPI_CSRF` Cookie 与 `X-Dupi-CSRF-Token` 请求头；Bearer/API Key 兼容路径不要求 CSRF。
 - 增加审计日志查询：`GET /api/v1/ops/audit-logs` 支持按租户、动作、目标类型、状态和 limit 筛选，前端新增 `/ops/audit-logs` 查询页；2026-07-07 继续补充 CSV 导出、保留清理和失败告警摘要。
-- 增加账号管理页：`GET /api/v1/ops/accounts` 与前端 `/ops/accounts` 展示内置账号脱敏元数据，并支持创建账号、更新租户/角色/权限/知识库范围、禁用/启用、轮换 `tokenVersion`、生成 PBKDF2 密码哈希；页面与接口不暴露明文 password/passwordHash。
+- 增加账号与角色管理页：`/ops/accounts` 管理数据库账号，账号通过 `roleCode` 选择角色，不再直接编辑权限点；`/ops/roles` 管理角色与权限点绑定；账号密码重置独立为管理员动作并轮换 `tokenVersion`，页面与接口不暴露 passwordHash。
 - 保持 internal 边界独立：`/api/v1/internal/**` 继续只校验 `X-Dupi-Internal-Key`，不接受用户 Bearer token 替代。
 - 前端支持登录页、退出登录、Cookie 会话状态识别，本地仅保存 CSRF token；普通 API、上传、SSE 问答和取消问答请求统一带 `credentials: include`，必要时携带 `X-Dupi-CSRF-Token`。
 - `deploy/.env.example` 与 `application.yml` 已同步账号安全和权限相关配置项。
@@ -36,7 +36,7 @@
 | `CHAT_DELETE` | 删除会话 | `DELETE .../chat-sessions/**` |
 | `MAINTENANCE` | 维护动作 | `POST .../reindex`、`POST .../ingest-jobs/{jobId}/retry` |
 
-`ADMIN` 角色在 `SecurityContext` 中会映射为 `*`，兼容 API Key 也继续按管理员等价处理。`USER` 默认具备 `KB_READ`、`DOCUMENT_UPLOAD`、`CHAT_WRITE`，如果需要允许删除或维护动作，应显式配置 `DUPI_SECURITY_USERS_0_PERMISSIONS`。如果配置 `DUPI_SECURITY_USERS_0_KNOWLEDGE_BASE_IDS`，则该账号只能访问列表内知识库；未配置或配置 `*` 时保持全量知识库访问兼容。
+`ADMIN` 角色在 `SecurityContext` 中会映射为 `*`，兼容 API Key 也继续按管理员等价处理。数据库默认种子角色包含 `ADMIN`、`OPERATOR`、`ANALYST`、`VIEWER`；账号通过 `roleCode` 继承角色上的权限点。配置项中的 `DUPI_SECURITY_USERS_*` 仍可用于首次引导账号，启动时会同步到 `user_accounts`，但后续管理以数据库账号和角色为准。如果配置 `knowledgeBaseIds`，则该账号只能访问列表内知识库；未配置或配置 `*` 时保持全量知识库访问兼容。
 
 ## 关键安全决策
 
@@ -58,7 +58,7 @@ Worker 回调、internal chunks 拉取等系统链路继续只走 `X-Dupi-Intern
 
 ### tokenVersion 用于强制登出
 
-Bearer token 中写入账号当前 `tokenVersion`。如果管理员调整 `DUPI_SECURITY_USERS_0_TOKEN_VERSION` 并重启服务，旧 token 解析时会因版本不匹配被拒绝，可用于密码轮换、账号泄露后的强制失效。
+Bearer token 中写入账号当前 `tokenVersion`。管理员重置密码、轮换 tokenVersion 或禁用账号后，旧 token 解析时会因版本不匹配或账号状态被拒绝，可用于密码轮换、账号泄露后的强制失效。
 
 ### Redis 保存登录锁定状态
 
@@ -115,7 +115,9 @@ curl http://localhost:8080/api/v1/knowledge-bases \
 
 ## 账号管理入口
 
-`/ops/accounts` 已从只读元数据页升级为账号管理工作台。管理员可以在页面完成新建账号、编辑租户/角色/权限/知识库范围、禁用/启用账号、轮换 `tokenVersion` 和生成 PBKDF2 密码哈希。禁用账号会立即拒绝该账号登录和已签发 token；轮换 `tokenVersion` 会使旧 token 失效，适合密码轮换或账号泄露后的强制登出。
+`/ops/accounts` 是数据库账号管理工作台。管理员可以在页面完成新建账号、编辑租户/角色/知识库范围、禁用/启用账号、轮换 `tokenVersion` 和重置密码。账号角色使用下拉选择，权限来自角色绑定，不再在账号页手工输入权限点；禁用账号会立即拒绝该账号登录和已签发 token；轮换 `tokenVersion` 或重置密码会使旧 token 失效。
+
+`/ops/roles` 是角色管理工作台。管理员可以创建角色、编辑角色名称与权限点、禁用角色；账号登录和 token 解析会拒绝已禁用角色。审计日志筛选中的动作、目标类型和状态，以及账号/角色管理中的权限选择，均通过 `/api/v1/ops/metadata` 提供下拉元数据，减少手工输入错误。该元数据同时返回权限说明：每个权限点包含名称、用途、允许动作和不允许动作，前端在角色权限选择、角色列表和账号角色权限列表中以悬停/聚焦浮层展示，帮助管理员确认权限边界。
 
 对应 API：
 
@@ -124,10 +126,15 @@ curl http://localhost:8080/api/v1/knowledge-bases \
 | 账号列表 | `GET /api/v1/ops/accounts` |
 | 新建账号 | `POST /api/v1/ops/accounts` |
 | 更新账号 | `PATCH /api/v1/ops/accounts/{username}` |
+| 重置密码 | `POST /api/v1/ops/accounts/{username}/reset-password` |
 | 禁用账号 | `POST /api/v1/ops/accounts/{username}/disable` |
 | 启用账号 | `POST /api/v1/ops/accounts/{username}/enable` |
 | 轮换 tokenVersion | `POST /api/v1/ops/accounts/{username}/rotate-token` |
-| 生成密码哈希 | `POST /api/v1/ops/accounts/password-hash` |
+| 角色列表 | `GET /api/v1/ops/roles` |
+| 新建角色 | `POST /api/v1/ops/roles` |
+| 更新角色 | `PATCH /api/v1/ops/roles/{roleId}` |
+| 禁用角色 | `POST /api/v1/ops/roles/{roleId}/disable` |
+| 运维元数据 | `GET /api/v1/ops/metadata` |
 
 ## 薄弱点修复记录
 
@@ -143,11 +150,11 @@ curl http://localhost:8080/api/v1/knowledge-bases \
 | 租户隔离依赖客户端请求头 | 客户端可能伪造 `X-Dupi-Tenant-Id` | Bearer token 绑定租户，token 租户优先于请求头 | token 租户不会被请求头覆盖 |
 | 全局权限点缺少资源范围 | 有 `KB_READ` 的用户可横向访问其他知识库 | `knowledgeBaseIds` 限定账号可访问知识库集合 | scoped USER 访问未授权 kbId 返回 403 |
 | 审计日志只能写入不可查询 | 管理员难以追踪删除、reindex、retry 和 ops 操作 | 新增 audit logs 查询、CSV 导出、保留清理、失败告警 API 与前端审计日志页 | `/api/v1/ops/audit-logs` 支持筛选并在 `/ops/audit-logs` 展示、导出和查看告警 |
-| 账号配置不可管理 | 管理员难以确认和调整内置账号租户、角色、权限和知识库范围 | 新增脱敏账号管理接口和 `/ops/accounts` 管理页，支持创建、更新、禁用/启用、tokenVersion 轮换和密码哈希生成 | 页面展示 username、tenantId、role、permissions、knowledgeBaseIds、禁用状态和凭证配置状态，并可执行管理动作 |
+| 账号配置不可管理 | 管理员难以确认和调整账号租户、角色和知识库范围 | 新增数据库账号管理接口和 `/ops/accounts` 管理页，支持创建、更新、禁用/启用、tokenVersion 轮换和密码重置 | 页面展示 username、tenantId、roleCode、permissions、knowledgeBaseIds、禁用状态和凭证配置状态，并可执行管理动作 |
+| 角色无实际管理能力 | 用户仍要逐个选择权限，角色字段价值不足 | 新增 `roles` 表、角色管理 API 和 `/ops/roles` 页面，账号通过 `roleCode` 继承角色权限 | 新建/更新角色后账号权限跟随角色；禁用角色后对应账号 token 被拒绝 |
 | internal API 与用户认证边界不清晰 | 用户 token 可能误入系统链路 | internal API 继续只校验 `X-Dupi-Internal-Key` | internal key 与 Bearer 账号互不替代 |
 
 ## 后续建议
 
-- 后续可接入外部 SSO/OIDC，并把当前内置账号作为本地/应急模式。
-- 账号管理 UI、审计日志导出、审计保留策略和高风险操作告警已补基础能力；继续补外部 SSO/OIDC、外部告警通知和审计归档对接。
-- 继续细化资源级授权，从知识库范围扩展到文档、会话和运维动作实例级授权。
+- 后续可接入外部 SSO/OIDC，并把当前数据库账号作为本地/应急模式。
+- 账号/角色管理 UI、审计日志导出、审计保留策略和高风险操作告警已补基础能力；继续补外部 SSO/OIDC、外部告警通知和审计归档对接。

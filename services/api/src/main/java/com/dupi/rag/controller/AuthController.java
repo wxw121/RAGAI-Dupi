@@ -31,7 +31,12 @@ public class AuthController {
     public LoginResponse login(@Valid @RequestBody LoginRequest request, HttpServletResponse response) {
         return tokenService.authenticate(request.getUsername(), request.getPassword())
                 .map(principal -> {
-                    String token = tokenService.issueToken(principal.username(), principal.tenantId(), principal.role());
+                    String token;
+                    try {
+                        token = tokenService.issueToken(principal.username(), principal.tenantId(), principal.role());
+                    } catch (IllegalStateException ex) {
+                        throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), ex);
+                    }
                     String csrfToken = generateCsrfToken();
                     Duration maxAge = Duration.between(tokenService.now(), principal.expiresAt());
                     addCookie(response, ApiKeyAuthFilter.AUTH_COOKIE_NAME, token, true, maxAge);

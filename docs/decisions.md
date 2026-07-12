@@ -3,10 +3,10 @@
 ## 2026-07-07 — Transactional Outbox、删除 Tombstone、实例级授权与 Ops 运维增强
 
 **背景**：上传、重试和 reindex 需要把数据库状态与 Redis 摄入队列投递解耦，避免事务已提交但队列消息丢失；文档删除后仍可能遇到 outbox 或 Worker 迟到回调；知识库级授权还需要继续下钻到文档、会话和任务实例；运维侧也需要账号可视化、审计导出、保留和告警。
-**决策**：新增 `ingest_outbox_events` 和 `IngestOutboxService`，上传/重试/reindex 事务内只写 outbox，事务提交后由 dispatcher 投递 Redis，失败按退避重试。新增 `document_tombstones` 和 `DocumentTombstoneService`，删除前记录 tombstone，outbox dispatcher 与 Worker 回调遇到已删 docId 时取消/忽略。资源授权从知识库范围扩展到文档、会话和向量清理任务实例级：先解析实例归属 kbId，再校验 `SecurityContext.canAccessKnowledgeBase(...)`。Ops 增加 `/ops/accounts` 只读账号管理页、`/api/v1/ops/accounts` 脱敏账号元数据接口、审计 CSV 导出、保留清理和失败审计告警摘要。
+**决策**：新增 `ingest_outbox_events` 和 `IngestOutboxService`，上传/重试/reindex 事务内只写 outbox，事务提交后由 dispatcher 投递 Redis，失败按退避重试。新增 `document_tombstones` 和 `DocumentTombstoneService`，删除前记录 tombstone，outbox dispatcher 与 Worker 回调遇到已删 docId 时取消/忽略。资源授权从知识库范围扩展到文档、会话和向量清理任务实例级：先解析实例归属 kbId，再校验 `SecurityContext.canAccessKnowledgeBase(...)`。Ops 增加 `/ops/accounts` 账号管理入口、`/api/v1/ops/accounts` 脱敏账号元数据接口、审计 CSV 导出、保留清理和失败审计告警摘要。
 **理由**：outbox 让摄入投递具备事务后可靠性；tombstone 关闭删除后迟到写入的竞态窗口；实例级授权避免拥有全局权限点的用户横向操作其他知识库资源；账号和审计运维入口让管理员能查看配置、导出留痕并发现异常失败峰值。
 **影响范围**：`IngestOutboxEvent` / `IngestOutboxService` / `IngestOutboxEventRepository`、`DocumentTombstone` / `DocumentTombstoneService` / `DocumentTombstoneRepository`、`V5__ingest_outbox_and_document_tombstones.sql`、`DocumentService`、`IngestJobService`、`VectorCleanupTaskService`、`AuditLogService`、`OpsController`、`AccountService`、`OpsAuditPage.tsx`、`OpsAccountsPage.tsx`、`AppLayout.tsx`、`knowledgeBase.ts`、`deploy/.env.example`。
-**遗留**：账号管理当前为只读配置视图，后续可补账号创建/禁用、权限分配、密码哈希生成和 tokenVersion 轮换；审计告警当前为接口/页面摘要，生产可继续接入 Webhook/邮件/IM；多实例 outbox 高并发场景可增加 claim/行级锁避免重复扫描竞争。
+**遗留**：账号管理已在 2026-07-12 升级为数据库账号 + 角色管理；审计告警当前为接口/页面摘要，生产可继续接入 Webhook/邮件/IM；多实例 outbox 高并发场景可增加 claim/行级锁避免重复扫描竞争。
 
 ## 2026-07-06 — 默认部署收窄端口暴露并增加共享密钥门禁
 

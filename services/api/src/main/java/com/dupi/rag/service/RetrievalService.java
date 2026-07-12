@@ -16,6 +16,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClientRequestException;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.util.ArrayList;
@@ -67,7 +68,16 @@ public class RetrievalService {
             return hybridRetrieve(kb, request.getQuery(), topK, Boolean.TRUE.equals(request.getUseRerank()));
         }
 
-        List<Float> vector = llmClient.embed(request.getQuery(), kb.getEmbeddingModel());
+        List<Float> vector;
+        try {
+            vector = llmClient.embed(request.getQuery(), kb.getEmbeddingModel());
+        } catch (RuntimeException ex) {
+            if (!isEmbeddingUnavailable(ex)) {
+                throw ex;
+            }
+            log.warn("Embedding retrieval unavailable; falling back to local chunk text search for kb {}", kbId, ex);
+            return localTextFallbackResponse(kb, request.getQuery(), topK, "embedding_unavailable");
+        }
         try {
             List<MilvusVectorService.SearchResult> results = milvusVectorService.search(kbId, vector, topK);
             List<RetrievalHit> hits = mapHits(kbId, results);
@@ -82,14 +92,18 @@ public class RetrievalService {
                 throw ex;
             }
             log.warn("Milvus vector retrieval unavailable; falling back to local chunk text search for kb {}", kbId, ex);
-            List<RetrievalHit> hits = localTextFallback(kbId, request.getQuery(), topK);
-            return RetrieveResponse.builder()
-                    .query(request.getQuery())
-                    .retrievalMode("local_text_fallback")
-                    .hits(hits)
-                    .diagnostics(diagnostics(kb, "local_text_fallback", topK, hits.size(), "milvus_unavailable"))
-                    .build();
+            return localTextFallbackResponse(kb, request.getQuery(), topK, "milvus_unavailable");
         }
+    }
+
+    private RetrieveResponse localTextFallbackResponse(KnowledgeBase kb, String query, int topK, String fallbackReason) {
+        List<RetrievalHit> hits = localTextFallback(kb.getId(), query, topK);
+        return RetrieveResponse.builder()
+                .query(query)
+                .retrievalMode("local_text_fallback")
+                .hits(hits)
+                .diagnostics(diagnostics(kb, "local_text_fallback", topK, hits.size(), fallbackReason))
+                .build();
     }
 
     private RetrieveResponse hybridRetrieve(KnowledgeBase kb, String query, int topK, boolean useRerank) {
@@ -191,6 +205,26 @@ public class RetrievalService {
         );
     }
 
+    private boolean isEmbeddingUnavailable(RuntimeException ex) {
+        if (ex instanceof WebClientRequestException) {
+            return true;
+        }
+        Throwable cause = ex.getCause();
+        while (cause != null) {
+            if (cause instanceof WebClientRequestException) {
+                return true;
+            }
+            cause = cause.getCause();
+        }
+        String message = ex.getMessage();
+        return message != null && (
+                message.contains("Failed to resolve")
+                        || message.contains("Query failed with SERVFAIL")
+                        || message.contains("Connection refused")
+                        || message.contains("Connection timed out")
+        );
+    }
+
     private List<RetrievalHit> localTextFallback(UUID kbId, String query, int topK) {
         Map<UUID, String> fileNames = documentRepository.findByKbIdOrderByCreatedAtDesc(kbId).stream()
                 .collect(Collectors.toMap(Document::getId, Document::getFileName));
@@ -256,12 +290,20 @@ public class RetrievalService {
                 .filter(term -> !term.isBlank())
                 .forEach(term -> {
                     terms.add(term);
+                    collectAsciiKeywords(term, terms);
                     collectCjkKeywords(term, terms);
                 });
         return terms.stream()
                 .filter(term -> !WEAK_QUESTION_TERMS.contains(term))
                 .distinct()
                 .toList();
+    }
+
+    private void collectAsciiKeywords(String term, Set<String> terms) {
+        Arrays.stream(term.split("[^a-z0-9_.-]+"))
+                .map(String::trim)
+                .filter(token -> token.length() >= 2)
+                .forEach(terms::add);
     }
 
     private void collectCjkKeywords(String term, Set<String> terms) {

@@ -12,6 +12,8 @@ public class AccountResponse {
     private String username;
     private String tenantId;
     private String role;
+    private String roleCode;
+    private String roleName;
     private List<String> permissions;
     private List<String> knowledgeBaseIds;
     private String tokenVersion;

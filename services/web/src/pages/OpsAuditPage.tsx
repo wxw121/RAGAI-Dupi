@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { exportAuditLogs, listAuditAlerts, listAuditLogs } from '@/api/knowledgeBase'
-import type { AuditAlert, AuditLog, AuditLogQuery } from '@/types'
+import { exportAuditLogs, listAuditAlerts, listAuditLogs, listOpsMetadata } from '@/api/knowledgeBase'
+import type { AuditAlert, AuditLog, AuditLogQuery, OpsMetadata } from '@/types'
 import { AppLayout } from '@/components/AppLayout'
 import { useToast } from '@/components/Toast'
 import { Badge, statusBadgeVariant } from '@/components/ui/dialog'
@@ -16,6 +16,7 @@ export function OpsAuditPage({ onLogout }: { onLogout?: () => void }) {
   const [action, setAction] = useState('')
   const [targetType, setTargetType] = useState('')
   const [status, setStatus] = useState('')
+  const [metadata, setMetadata] = useState<OpsMetadata | null>(null)
   const [limit, setLimit] = useState(50)
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
@@ -29,9 +30,10 @@ export function OpsAuditPage({ onLogout }: { onLogout?: () => void }) {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [nextLogs, nextAlerts] = await Promise.all([listAuditLogs(query), listAuditAlerts()])
+      const [nextLogs, nextAlerts, nextMetadata] = await Promise.all([listAuditLogs(query), listAuditAlerts(), listOpsMetadata()])
       setLogs(nextLogs)
       setAlerts(nextAlerts)
+      setMetadata(nextMetadata)
     } catch (e) {
       showError(e instanceof Error ? e.message : '加载审计日志失败')
     } finally {
@@ -92,16 +94,41 @@ export function OpsAuditPage({ onLogout }: { onLogout?: () => void }) {
         <div className="rounded-3xl border border-border bg-background p-4">
           <div className="grid gap-3 md:grid-cols-5">
             <Input value={tenantId} onChange={(e) => setTenantId(e.target.value)} placeholder="租户 ID" />
-            <Input value={action} onChange={(e) => setAction(e.target.value)} placeholder="动作，例如 DOCUMENT_DELETE" />
-            <Input value={targetType} onChange={(e) => setTargetType(e.target.value)} placeholder="目标类型，例如 DOCUMENT" />
+            <select
+              value={action}
+              onChange={(e) => setAction(e.target.value)}
+              className="h-10 rounded-xl border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <option value="">全部动作</option>
+              {(metadata?.auditActions ?? []).map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+            <select
+              value={targetType}
+              onChange={(e) => setTargetType(e.target.value)}
+              className="h-10 rounded-xl border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <option value="">全部目标</option>
+              {(metadata?.auditTargetTypes ?? []).map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
             <select
               value={status}
               onChange={(e) => setStatus(e.target.value)}
               className="h-10 rounded-xl border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <option value="">全部状态</option>
-              <option value="SUCCESS">SUCCESS</option>
-              <option value="FAILED">FAILED</option>
+              {(metadata?.auditStatuses ?? ['SUCCESS', 'FAILED']).map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
             </select>
             <Input type="number" value={limit} min={1} max={200} onChange={(e) => setLimit(Number(e.target.value))} />
           </div>

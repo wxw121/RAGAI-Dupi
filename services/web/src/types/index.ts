@@ -108,6 +108,8 @@ export interface Account {
   username: string
   tenantId: string
   role: string
+  roleCode: string
+  roleName: string
   permissions: string[]
   knowledgeBaseIds: string[]
   tokenVersion: string
@@ -122,6 +124,7 @@ export interface AccountUpsertRequest {
   passwordHash?: string
   tenantId?: string
   role?: string
+  roleCode?: string
   permissions?: string[]
   knowledgeBaseIds?: string[]
   tokenVersion?: string
@@ -130,6 +133,45 @@ export interface AccountUpsertRequest {
 
 export interface PasswordHashResponse {
   passwordHash: string
+}
+
+export interface PasswordResetRequest {
+  password: string
+}
+
+export interface Role {
+  id: string
+  code: string
+  name: string
+  description: string | null
+  permissions: string[]
+  systemBuiltin: boolean
+  disabled: boolean
+  userCount: number
+}
+
+export interface RoleRequest {
+  code?: string
+  name?: string
+  description?: string
+  permissions?: string[]
+  disabled?: boolean
+}
+
+export interface PermissionMetadata {
+  code: string
+  name: string
+  description: string
+  allows: string[]
+  denies: string[]
+}
+
+export interface OpsMetadata {
+  permissions: string[]
+  permissionDetails: PermissionMetadata[]
+  auditActions: string[]
+  auditTargetTypes: string[]
+  auditStatuses: string[]
 }
 
 export interface Citation {

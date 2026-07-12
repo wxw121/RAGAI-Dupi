@@ -10,6 +10,7 @@ public class AccountUpsertRequest {
     private String passwordHash;
     private String tenantId;
     private String role;
+    private String roleCode;
     private List<String> permissions;
     private List<String> knowledgeBaseIds;
     private String tokenVersion;

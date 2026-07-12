@@ -6,10 +6,15 @@ import com.dupi.rag.dto.AccountUpsertRequest;
 import com.dupi.rag.dto.AuditAlertResponse;
 import com.dupi.rag.dto.AuditLogQuery;
 import com.dupi.rag.dto.AuditLogResponse;
+import com.dupi.rag.dto.OpsMetadataResponse;
+import com.dupi.rag.dto.PasswordResetRequest;
+import com.dupi.rag.dto.RoleRequest;
+import com.dupi.rag.dto.RoleResponse;
 import com.dupi.rag.dto.VectorCleanupTaskResponse;
 import jakarta.validation.Valid;
 import com.dupi.rag.service.AccountService;
 import com.dupi.rag.service.AuditLogService;
+import com.dupi.rag.service.RoleService;
 import com.dupi.rag.service.VectorCleanupTaskService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -32,6 +37,7 @@ public class OpsController {
     private final VectorCleanupTaskService vectorCleanupTaskService;
     private final AuditLogService auditLogService;
     private final AccountService accountService;
+    private final RoleService roleService;
 
     @GetMapping("/vector-cleanup-tasks")
     public List<VectorCleanupTaskResponse> listVectorCleanupTasks() {
@@ -80,44 +86,103 @@ public class OpsController {
         return accountService.listUsers();
     }
 
+    @GetMapping("/metadata")
+    public OpsMetadataResponse metadata() {
+        return OpsMetadataResponse.builder()
+                .permissions(RoleService.DEFAULT_PERMISSIONS)
+                .permissionDetails(RoleService.DEFAULT_PERMISSION_DETAILS)
+                .auditActions(List.of(
+                        "ACCOUNT_CREATE",
+                        "ACCOUNT_UPDATE",
+                        "ACCOUNT_PASSWORD_RESET",
+                        "ACCOUNT_DISABLE",
+                        "ACCOUNT_ENABLE",
+                        "ACCOUNT_TOKEN_ROTATE",
+                        "ROLE_CREATE",
+                        "ROLE_UPDATE",
+                        "ROLE_DISABLE",
+                        "DOCUMENT_DELETE",
+                        "KNOWLEDGE_BASE_DELETE",
+                        "REINDEX",
+                        "INGEST_RETRY",
+                        "VECTOR_CLEANUP_RETRY"
+                ))
+                .auditTargetTypes(List.of("ACCOUNT", "ROLE", "DOCUMENT", "KNOWLEDGE_BASE", "INGEST_JOB", "VECTOR_CLEANUP_TASK", "CHAT_SESSION"))
+                .auditStatuses(List.of("SUCCESS", "FAILED"))
+                .build();
+    }
+
     @PostMapping("/accounts")
     public AccountResponse createAccount(@Valid @RequestBody AccountUpsertRequest request) {
         AccountResponse response = accountService.create(request);
-        auditLogService.recordSuccess("ACCOUNT_MANAGE", "ACCOUNT", null, "Created account " + response.getUsername());
+        auditLogService.recordSuccess("ACCOUNT_CREATE", "ACCOUNT", null, "Created account " + response.getUsername());
         return response;
     }
 
     @PatchMapping("/accounts/{username}")
     public AccountResponse updateAccount(@PathVariable String username, @Valid @RequestBody AccountUpsertRequest request) {
         AccountResponse response = accountService.update(username, request);
-        auditLogService.recordSuccess("ACCOUNT_MANAGE", "ACCOUNT", null, "Updated account " + response.getUsername());
+        auditLogService.recordSuccess("ACCOUNT_UPDATE", "ACCOUNT", null, "Updated account " + response.getUsername());
+        return response;
+    }
+
+    @PostMapping("/accounts/{username}/reset-password")
+    public AccountResponse resetAccountPassword(@PathVariable String username, @RequestBody PasswordResetRequest request) {
+        AccountResponse response = accountService.resetPassword(username, request == null ? null : request.getPassword());
+        auditLogService.recordSuccess("ACCOUNT_PASSWORD_RESET", "ACCOUNT", null, "Reset password for account " + response.getUsername());
         return response;
     }
 
     @PostMapping("/accounts/{username}/disable")
     public AccountResponse disableAccount(@PathVariable String username) {
         AccountResponse response = accountService.disable(username);
-        auditLogService.recordSuccess("ACCOUNT_MANAGE", "ACCOUNT", null, "Disabled account " + response.getUsername());
+        auditLogService.recordSuccess("ACCOUNT_DISABLE", "ACCOUNT", null, "Disabled account " + response.getUsername());
         return response;
     }
 
     @PostMapping("/accounts/{username}/enable")
     public AccountResponse enableAccount(@PathVariable String username) {
         AccountResponse response = accountService.enable(username);
-        auditLogService.recordSuccess("ACCOUNT_MANAGE", "ACCOUNT", null, "Enabled account " + response.getUsername());
+        auditLogService.recordSuccess("ACCOUNT_ENABLE", "ACCOUNT", null, "Enabled account " + response.getUsername());
         return response;
     }
 
     @PostMapping("/accounts/{username}/rotate-token")
     public AccountResponse rotateAccountToken(@PathVariable String username) {
         AccountResponse response = accountService.rotateTokenVersion(username);
-        auditLogService.recordSuccess("ACCOUNT_MANAGE", "ACCOUNT", null, "Rotated token version for account " + response.getUsername());
+        auditLogService.recordSuccess("ACCOUNT_TOKEN_ROTATE", "ACCOUNT", null, "Rotated token version for account " + response.getUsername());
         return response;
     }
 
     @PostMapping("/accounts/password-hash")
     public Map<String, String> generatePasswordHash(@RequestBody Map<String, String> request) {
         return Map.of("passwordHash", accountService.generatePasswordHash(request == null ? null : request.get("password")));
+    }
+
+    @GetMapping("/roles")
+    public List<RoleResponse> listRoles() {
+        return roleService.listRoles();
+    }
+
+    @PostMapping("/roles")
+    public RoleResponse createRole(@Valid @RequestBody RoleRequest request) {
+        RoleResponse response = roleService.create(request);
+        auditLogService.recordSuccess("ROLE_CREATE", "ROLE", response.getId(), "Created role " + response.getCode());
+        return response;
+    }
+
+    @PatchMapping("/roles/{roleId}")
+    public RoleResponse updateRole(@PathVariable UUID roleId, @Valid @RequestBody RoleRequest request) {
+        RoleResponse response = roleService.update(roleId, request);
+        auditLogService.recordSuccess("ROLE_UPDATE", "ROLE", response.getId(), "Updated role " + response.getCode());
+        return response;
+    }
+
+    @PostMapping("/roles/{roleId}/disable")
+    public RoleResponse disableRole(@PathVariable UUID roleId) {
+        RoleResponse response = roleService.disable(roleId);
+        auditLogService.recordSuccess("ROLE_DISABLE", "ROLE", response.getId(), "Disabled role " + response.getCode());
+        return response;
     }
 
     private AuditLogQuery query(String tenantId, String action, String targetType, String status, Integer limit) {

@@ -45,8 +45,9 @@ dupi-RAG/
 | `DocumentTombstoneService` | 删除 tombstone，防止 outbox 或 Worker 迟到回调恢复已删文档 | 文档删除、outbox、Worker 回调 |
 | `RetrievalService` | 向量检索（V1 纯向量） | `RetrievalController` |
 | `ChatService` | RAG 编排、LLM 调用、SSE | `ChatController` |
-| `AuditLogService` | 高影响操作审计日志，记录租户、动作、目标和结果 | 删除、reindex、retry、运维操作 |
-| `AccountService` | 内置账号管理、权限/知识库范围配置、禁用/启用、tokenVersion 轮换、PBKDF2 哈希生成 | `/api/v1/ops/accounts/**` |
+| `AuditLogService` | 高影响操作审计日志，记录租户、动作、目标和结果 | 删除、reindex、retry、账号/角色运维操作 |
+| `AccountService` | 数据库账号管理，负责配置账号启动同步、创建/更新、密码重置、禁用/启用与 tokenVersion 轮换 | `/api/v1/ops/accounts/**` |
+| `RoleService` | 角色管理、权限点归一化与权限说明元数据，账号通过 `roleCode` 继承角色权限 | `/api/v1/ops/roles/**`、`/api/v1/ops/metadata` |
 | `VectorCleanupTaskService` | 文档/知识库删除后的残留 Milvus 向量补偿清理 | 定时任务、`/api/v1/ops/vector-cleanup-tasks` |
 | `ingest-worker` | 解析→分块→Embedding→Milvus | `worker/main.py` |
 | `hybrid-retriever` (V2) | BM25 + 向量 + Rerank | `worker/retrieval/` |
@@ -82,7 +83,7 @@ Worker 的 `embed_batch` 会按 `EMBEDDING_BATCH_SIZE`（默认 `32`）拆分 Em
 
 ### 审计日志
 
-`audit_logs` 记录高影响操作的租户、动作、目标类型、目标 ID、结果、说明和错误信息。当前覆盖知识库删除、文档删除、聊天会话批量删除、知识库 reindex、摄入任务手动 retry、向量清理任务手动 retry，以及账号创建/更新/禁用/启用/tokenVersion 轮换等管理动作。审计写入使用独立事务，降低主业务回滚导致审计丢失的风险。运维接口支持 `GET /api/v1/ops/audit-logs` 查询、`GET /api/v1/ops/audit-logs/export` CSV 导出、`GET /api/v1/ops/audit-alerts` 返回近期失败审计告警；保留清理由 `AUDIT_RETENTION_DAYS` 与 `AUDIT_RETENTION_CRON` 控制。
+`audit_logs` 记录高影响操作的租户、动作、目标类型、目标 ID、结果、说明和错误信息。当前覆盖知识库删除、文档删除、聊天会话批量删除、知识库 reindex、摄入任务手动 retry、向量清理任务手动 retry，以及账号创建/更新/密码重置/禁用/启用/tokenVersion 轮换、角色创建/更新/禁用等管理动作。审计写入使用独立事务，降低主业务回滚导致审计丢失的风险。运维接口支持 `GET /api/v1/ops/audit-logs` 查询、`GET /api/v1/ops/audit-logs/export` CSV 导出、`GET /api/v1/ops/audit-alerts` 返回近期失败审计告警，`GET /api/v1/ops/metadata` 返回审计筛选、权限下拉和权限说明元数据；保留清理由 `AUDIT_RETENTION_DAYS` 与 `AUDIT_RETENTION_CRON` 控制。
 
 ### RAG 问答
 

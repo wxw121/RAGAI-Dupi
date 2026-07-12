@@ -1,5 +1,6 @@
 package com.dupi.rag.config;
 
+import com.dupi.rag.repository.UserAccountRepository;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.Cookie;
@@ -31,17 +32,25 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
 
     private final ApiSecurityProperties securityProperties;
     private final ApiTokenService tokenService;
-    private final boolean localOpenMode;
+    private final UserAccountRepository userAccountRepository;
 
     public ApiKeyAuthFilter(ApiSecurityProperties securityProperties) {
-        this(securityProperties, new ApiTokenService(securityProperties));
+        this(securityProperties, new ApiTokenService(securityProperties), null);
     }
 
     @Autowired
-    public ApiKeyAuthFilter(ApiSecurityProperties securityProperties, ApiTokenService tokenService) {
+    public ApiKeyAuthFilter(
+            ApiSecurityProperties securityProperties,
+            ApiTokenService tokenService,
+            UserAccountRepository userAccountRepository
+    ) {
         this.securityProperties = securityProperties;
         this.tokenService = tokenService;
-        this.localOpenMode = !hasText(securityProperties.getApiKey()) && !securityProperties.hasConfiguredUsers();
+        this.userAccountRepository = userAccountRepository;
+    }
+
+    public ApiKeyAuthFilter(ApiSecurityProperties securityProperties, ApiTokenService tokenService) {
+        this(securityProperties, tokenService, null);
     }
 
     @Override
@@ -99,7 +108,7 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
 
     private boolean authenticatePublicRequest(HttpServletRequest request, HttpServletResponse response) {
         boolean apiKeyConfigured = hasText(securityProperties.getApiKey());
-        if (localOpenMode) {
+        if (isLocalOpenMode()) {
             SecurityContext.set("local-open", "ADMIN", List.of("*"));
             bindTenantFromHeader(request, response);
             request.setAttribute(AUTH_MODE_ATTRIBUTE, "local-open");
@@ -144,6 +153,13 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
         }
 
         return false;
+    }
+
+    private boolean isLocalOpenMode() {
+        if (hasText(securityProperties.getApiKey()) || securityProperties.hasConfiguredUsers()) {
+            return false;
+        }
+        return userAccountRepository == null || userAccountRepository.countByRoleCodeAndDisabledFalse("ADMIN") == 0;
     }
 
     private boolean hasText(String value) {

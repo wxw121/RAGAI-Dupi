@@ -8,7 +8,11 @@ import type {
   CreateKnowledgeBaseRequest,
   IngestJob,
   KnowledgeBase,
+  OpsMetadata,
   PasswordHashResponse,
+  PasswordResetRequest,
+  Role,
+  RoleRequest,
   VectorCleanupTask,
 } from '@/types'
 
@@ -67,6 +71,10 @@ export function listAccounts(): Promise<Account[]> {
   return apiGet<Account[]>(`${OPS_BASE}/accounts`)
 }
 
+export function listOpsMetadata(): Promise<OpsMetadata> {
+  return apiGet<OpsMetadata>(`${OPS_BASE}/metadata`)
+}
+
 export function createAccount(request: AccountUpsertRequest): Promise<Account> {
   return apiPost<Account>(`${OPS_BASE}/accounts`, request)
 }
@@ -87,8 +95,28 @@ export function rotateAccountToken(username: string): Promise<Account> {
   return apiPost<Account>(`${OPS_BASE}/accounts/${username}/rotate-token`)
 }
 
+export function resetAccountPassword(username: string, request: PasswordResetRequest): Promise<Account> {
+  return apiPost<Account>(`${OPS_BASE}/accounts/${username}/reset-password`, request)
+}
+
 export function generatePasswordHash(password: string): Promise<PasswordHashResponse> {
   return apiPost<PasswordHashResponse>(`${OPS_BASE}/accounts/password-hash`, { password })
+}
+
+export function listRoles(): Promise<Role[]> {
+  return apiGet<Role[]>(`${OPS_BASE}/roles`)
+}
+
+export function createRole(request: RoleRequest): Promise<Role> {
+  return apiPost<Role>(`${OPS_BASE}/roles`, request)
+}
+
+export function updateRole(roleId: string, request: RoleRequest): Promise<Role> {
+  return apiPatch<Role>(`${OPS_BASE}/roles/${roleId}`, request)
+}
+
+export function disableRole(roleId: string): Promise<Role> {
+  return apiPost<Role>(`${OPS_BASE}/roles/${roleId}/disable`)
 }
 
 function toQueryString(query: AuditLogQuery): string {

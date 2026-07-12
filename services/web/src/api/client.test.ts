@@ -8,6 +8,7 @@ import {
   apiUploadMany,
   checkHealth,
   clearAuthToken,
+  csrfHeaders,
   getAuthToken,
   login,
   setAuthToken,
@@ -106,13 +107,30 @@ describe('api client', () => {
   it('supports manual CSRF updates and clearing', () => {
     setAuthToken('manual-token')
     expect(getAuthToken()).toBe('cookie-session')
+    expect(csrfHeaders()).toEqual({ 'X-Dupi-CSRF-Token': 'manual-token' })
 
     clearAuthToken()
 
     expect(getAuthToken()).toBeNull()
   })
 
+  it('rejects state-changing requests locally when CSRF state is missing', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(apiPost('/items', { name: 'A' })).rejects.toMatchObject({
+      status: 401,
+      message: '登录状态已过期，请重新登录',
+    })
+    await expect(apiPatch('/items/1', { name: 'B' })).rejects.toMatchObject({ status: 401 })
+    await expect(apiDelete('/items/1')).rejects.toMatchObject({ status: 401 })
+    await expect(apiUpload('/upload', new File(['abc'], 'a.txt'))).rejects.toMatchObject({ status: 401 })
+    await expect(apiUploadMany('/upload/batch', [new File(['abc'], 'a.txt')])).rejects.toMatchObject({ status: 401 })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('throws parsed API errors and falls back to status text', async () => {
+    setAuthToken('csrf-token')
     vi.stubGlobal(
       'fetch',
       vi
@@ -133,6 +151,7 @@ describe('api client', () => {
   })
 
   it('covers POST, upload and generic fallback error branches', async () => {
+    setAuthToken('csrf-token')
     const genericError = {
       ok: false,
       status: 418,
@@ -163,6 +182,7 @@ describe('api client', () => {
   })
 
   it('posts JSON bodies and supports 204 responses', async () => {
+    setAuthToken('csrf-token')
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ id: 1 }))
@@ -174,18 +194,19 @@ describe('api client', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(1, '/items', {
       method: 'POST',
       credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Dupi-CSRF-Token': 'csrf-token' },
       body: JSON.stringify({ name: 'A' }),
     })
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/items', {
       method: 'POST',
       credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Dupi-CSRF-Token': 'csrf-token' },
       body: undefined,
     })
   })
 
   it('sends PATCH requests and parses JSON responses', async () => {
+    setAuthToken('csrf-token')
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 'x' }))
     vi.stubGlobal('fetch', fetchMock)
 
@@ -193,12 +214,13 @@ describe('api client', () => {
     expect(fetchMock).toHaveBeenCalledWith('/resource', {
       method: 'PATCH',
       credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Dupi-CSRF-Token': 'csrf-token' },
       body: JSON.stringify({ title: 'New' }),
     })
   })
 
   it('uploads files through FormData', async () => {
+    setAuthToken('csrf-token')
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ uploaded: true }))
     vi.stubGlobal('fetch', fetchMock)
 
@@ -211,6 +233,7 @@ describe('api client', () => {
   })
 
   it('uploads multiple files through the batch FormData field', async () => {
+    setAuthToken('csrf-token')
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse([{ uploaded: true }]))
     vi.stubGlobal('fetch', fetchMock)
     const files = [new File(['abc'], 'a.txt'), new File(['def'], 'b.txt')]

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { checkHealth } from '@/api/client'
 import { cn } from '@/lib/utils'
-import { ClipboardList, Database, Home, LogOut, Users } from 'lucide-react'
+import { ClipboardList, Database, Home, LogOut, Shield, Users } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 export function AppLayout({ children, onLogout }: { children: React.ReactNode; onLogout?: () => void }) {
@@ -50,6 +50,13 @@ export function AppLayout({ children, onLogout }: { children: React.ReactNode; o
             >
               <Users className="h-4 w-4" />
               账号管理
+            </Link>
+            <Link
+              to="/ops/roles"
+              className="flex h-10 items-center gap-2 rounded-xl px-3 text-sm text-foreground hover:bg-muted"
+            >
+              <Shield className="h-4 w-4" />
+              角色管理
             </Link>
           </nav>
           {onLogout && (

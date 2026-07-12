@@ -196,4 +196,96 @@ describe('normalizeMarkdown', () => {
     expect(out).toContain('```text')
     expect(out).toContain('→ 后端服务写入向量库')
   })
+
+  it('repairs split venv commands and malformed numbered headings from chat answers', () => {
+    const input = [
+      '根据现有知识库资料，可以回答「venv是什么」。',
+      '',
+      '具体说明如下：',
+      '',
+      '- **创建虚拟环境： 使用`python',
+      '- mvenv.venv` 命令可以在项目根目录下创建名为.venv`的虚拟环境[1][2]。',
+      '- 指定Python版本： 可以通过`py',
+      '3.12',
+      '- mvenv.venv`指定使用Python',
+      '3.12版本来创建环境[3]。',
+      '-',
+      '1. 4venv的优缺点[4]',
+      '优点： **',
+      '- 内置，无需额外安装',
+    ].join('\n')
+
+    const out = normalizeMarkdown(input)
+
+    expect(out).toContain('- **创建虚拟环境**：使用`python -m venv .venv`')
+    expect(out).toContain('- **指定Python版本**：可以通过`py -3.12 -m venv .venv`指定使用Python')
+    expect(out).toContain('## venv的优缺点[4]')
+    expect(out).toContain('优点：')
+    expect(out).not.toContain('\n-\n')
+    expect(out).not.toContain('1. 12')
+    expect(out).not.toContain('mvenv.venv')
+    expect(out).not.toContain('优点： **')
+  })
+
+  it('removes citation-like numeric prefixes from venv section headings', () => {
+    const input = [
+      '根据现有知识库资料，可以回答「venv是什么」。',
+      '',
+      'venv 是 Python 内置的虚拟环境管理工具。',
+      '',
+      '## 3.4 venv 的优缺点 [4]',
+      '',
+      '**优点：**',
+      '- 内置，无需额外安装',
+    ].join('\n')
+
+    const out = normalizeMarkdown(input)
+
+    expect(out).toContain('## venv 的优缺点 [4]')
+    expect(out).not.toContain('## 3.4 venv 的优缺点')
+  })
+
+  it('preserves valid fenced code blocks and Python version numbers in venv answers', () => {
+    const input = [
+      '根据上下文资料，设置 Python 虚拟环境（venv）的步骤如下：',
+      '',
+      '## 在项目根目录执行',
+      '',
+      '在项目根目录运行以下命令，创建名为 `.venv` 的虚拟环境[1]：',
+      '',
+      '```bash',
+      'python -m venv .venv',
+      '```',
+      '',
+      '## 创建并激活虚拟环境',
+      '',
+      '执行创建命令后，需要激活该环境。完整的两步操作如下[2]：',
+      '',
+      '```bash',
+      'python -m venv .venv',
+      'source .venv/bin/activate',
+      '```',
+      '',
+      '## 指定某个 Python 创建环境',
+      '',
+      '如果你需要指定特定版本的 Python（例如 3.12）来创建环境，可以使用以下任一方式[3][5]：',
+      '',
+      '**在 Windows 上：**',
+      '```bash',
+      'py -3.12 -m venv .venv',
+      '```',
+    ].join('\n')
+
+    const out = normalizeMarkdown(input)
+
+    expect(out).toContain('## 创建并激活虚拟环境\n\n执行创建命令后')
+    expect(out).toContain('```bash\npython -m venv .venv\nsource .venv/bin/activate\n```')
+    expect(out).toContain('如果你需要指定特定版本的 Python（例如 3.12）来创建环境')
+    expect(out).toContain('```bash\npy -3.12 -m venv .venv\n```')
+    expect(out).toContain('```\n\n## 创建并激活虚拟环境')
+    expect(out).not.toContain('```bash\n\n## 创建并激活虚拟环境')
+    expect(out).not.toContain('执行创建命令后，需要激活该环境。完整的两步操作如下[2]：\n\n```bash\npython -m venv .venv\n```\n\nsource .venv/bin/activate')
+    expect(out).not.toContain('1. 12')
+    expect(out.match(/```/g)).toHaveLength(6)
+  })
 })
