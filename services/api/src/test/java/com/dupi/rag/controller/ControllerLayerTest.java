@@ -4,15 +4,20 @@ import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.config.ApiSecurityProperties;
 import com.dupi.rag.config.ApiTokenService;
+import com.dupi.rag.config.AuditProperties;
+import com.dupi.rag.config.RedisQueueProperties;
+import com.dupi.rag.config.UploadRateLimitProperties;
 import com.dupi.rag.dto.*;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.service.*;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.web.servlet.MultipartProperties;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.util.unit.DataSize;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 
@@ -225,7 +230,30 @@ class ControllerLayerTest {
         AuditLogService auditLogService = mock(AuditLogService.class);
         AccountService accountService = mock(AccountService.class);
         RoleService roleService = mock(RoleService.class);
-        OpsController controller = new OpsController(service, auditLogService, accountService, roleService);
+        IngestJobService ingestJobService = mock(IngestJobService.class);
+        UploadRateLimitProperties uploadRateLimitProperties = new UploadRateLimitProperties();
+        uploadRateLimitProperties.setEnabled(true);
+        uploadRateLimitProperties.setRequests(11);
+        uploadRateLimitProperties.setWindowSeconds(45);
+        RedisQueueProperties redisQueueProperties = new RedisQueueProperties();
+        redisQueueProperties.setMaxPendingJobs(123);
+        redisQueueProperties.setMaxRecoveryAttempts(5);
+        AuditProperties auditProperties = new AuditProperties();
+        auditProperties.setAlertWindowMinutes(12);
+        auditProperties.setAlertFailedThreshold(7);
+        MultipartProperties multipartProperties = new MultipartProperties();
+        multipartProperties.setMaxFileSize(DataSize.ofMegabytes(32));
+        OpsController controller = new OpsController(
+                service,
+                auditLogService,
+                accountService,
+                roleService,
+                ingestJobService,
+                uploadRateLimitProperties,
+                redisQueueProperties,
+                auditProperties,
+                multipartProperties
+        );
         UUID taskId = UUID.randomUUID();
         VectorCleanupTaskResponse response = VectorCleanupTaskResponse.builder()
                 .id(taskId)
@@ -253,6 +281,20 @@ class ControllerLayerTest {
                 .message("Too many failed audit events")
                 .count(3)
                 .threshold(2)
+                .build()));
+        when(ingestJobService.summarizeAlerts()).thenReturn(List.of(AuditAlertResponse.builder()
+                .code("INGEST_FAILURES_OPEN")
+                .severity("WARN")
+                .message("Open ingest failures")
+                .count(2)
+                .threshold(0)
+                .build()));
+        when(service.summarizeAlerts()).thenReturn(List.of(AuditAlertResponse.builder()
+                .code("VECTOR_CLEANUP_FAILURES_OPEN")
+                .severity("WARN")
+                .message("Open vector cleanup failures")
+                .count(1)
+                .threshold(0)
                 .build()));
         when(accountService.listUsers()).thenReturn(List.of(AccountResponse.builder()
                 .username("admin")
@@ -302,7 +344,7 @@ class ControllerLayerTest {
         assertThat(controller.exportAuditLogs("tenant-a", "DOCUMENT_DELETE", "DOCUMENT", "SUCCESS"))
                 .contains("createdAt,tenantId");
         assertThat(controller.listAuditAlerts()).extracting(AuditAlertResponse::getCode)
-                .containsExactly("AUDIT_FAILED_SPIKE");
+                .containsExactly("AUDIT_FAILED_SPIKE", "INGEST_FAILURES_OPEN", "VECTOR_CLEANUP_FAILURES_OPEN");
         assertThat(controller.listAccounts()).extracting(AccountResponse::getUsername)
                 .containsExactly("admin");
         assertThat(controller.createAccount(accountRequest)).isSameAs(analyst);
@@ -316,6 +358,14 @@ class ControllerLayerTest {
         assertThat(controller.generatePasswordHash(Map.of("password", "secret"))).containsEntry("passwordHash", "pbkdf2$hash");
         OpsMetadataResponse metadata = controller.metadata();
         assertThat(metadata.getPermissions()).contains("KB_READ", "ACCOUNT_PASSWORD_RESET");
+        assertThat(metadata.getGuardrails().getUploadRateLimit().isEnabled()).isTrue();
+        assertThat(metadata.getGuardrails().getUploadRateLimit().getRequests()).isEqualTo(11);
+        assertThat(metadata.getGuardrails().getUploadRateLimit().getWindowSeconds()).isEqualTo(45);
+        assertThat(metadata.getGuardrails().getIngestQueue().getMaxPendingJobs()).isEqualTo(123);
+        assertThat(metadata.getGuardrails().getIngestQueue().getMaxRecoveryAttempts()).isEqualTo(5);
+        assertThat(metadata.getGuardrails().getAudit().getAlertWindowMinutes()).isEqualTo(12);
+        assertThat(metadata.getGuardrails().getAudit().getAlertFailedThreshold()).isEqualTo(7);
+        assertThat(metadata.getGuardrails().getMultipart().getMaxFileSizeBytes()).isEqualTo(DataSize.ofMegabytes(32).toBytes());
         assertThat(metadata.getPermissionDetails())
                 .extracting(PermissionMetadataResponse::getCode)
                 .contains("KB_READ", "ACCOUNT_PASSWORD_RESET");
@@ -336,6 +386,8 @@ class ControllerLayerTest {
         verify(auditLogService).list(any(AuditLogQuery.class));
         verify(auditLogService).exportCsv(any(AuditLogQuery.class));
         verify(auditLogService).summarizeAlerts();
+        verify(ingestJobService).summarizeAlerts();
+        verify(service).summarizeAlerts();
         verify(accountService).listUsers();
         verify(accountService).create(accountRequest);
         verify(accountService).update("analyst", accountRequest);

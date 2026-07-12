@@ -11,6 +11,8 @@ import type {
   OpsMetadata,
   PasswordHashResponse,
   PasswordResetRequest,
+  RetrieveRequest,
+  RetrieveResponse,
   Role,
   RoleRequest,
   VectorCleanupTask,
@@ -33,6 +35,10 @@ export function createKnowledgeBase(req: CreateKnowledgeBaseRequest): Promise<Kn
 
 export function deleteKnowledgeBase(kbId: string): Promise<void> {
   return apiDelete(`${BASE}/${kbId}`)
+}
+
+export function retrieveKnowledgeBase(kbId: string, request: RetrieveRequest): Promise<RetrieveResponse> {
+  return apiPost<RetrieveResponse>(`${BASE}/${kbId}/retrieve`, request)
 }
 
 export function listIngestJobs(kbId: string): Promise<IngestJob[]> {

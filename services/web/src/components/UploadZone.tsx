@@ -1,16 +1,18 @@
 import { useCallback, useState } from 'react'
 import { useDropzone } from '@/hooks/useDropzone'
 import { Upload } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { cn, formatBytes } from '@/lib/utils'
+import type { OpsGuardrails } from '@/types'
 
 export type UploadProgressFn = (current: number, total: number, fileName: string) => void
 
 interface UploadZoneProps {
   onUpload: (files: File[], onProgress?: UploadProgressFn) => Promise<void>
   disabled?: boolean
+  guardrails?: OpsGuardrails | null
 }
 
-export function UploadZone({ onUpload, disabled }: UploadZoneProps) {
+export function UploadZone({ onUpload, disabled, guardrails }: UploadZoneProps) {
   const [uploading, setUploading] = useState(false)
   const [progress, setProgress] = useState<{
     current: number
@@ -92,6 +94,12 @@ export function UploadZone({ onUpload, disabled }: UploadZoneProps) {
       <p className="mt-1 text-xs text-muted-foreground">
         支持 PDF、DOCX、TXT、MD、Excel，可多选或拖拽多个文件
       </p>
+      {guardrails && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          rate {guardrails.uploadRateLimit.requests}/{guardrails.uploadRateLimit.windowSeconds}s · queue{' '}
+          {guardrails.ingestQueue.maxPendingJobs} · max {formatBytes(guardrails.multipart.maxFileSizeBytes)}
+        </p>
+      )}
     </div>
   )
 }

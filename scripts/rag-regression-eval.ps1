@@ -11,6 +11,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $results = [System.Collections.Generic.List[object]]::new()
+$caseResults = [System.Collections.Generic.List[object]]::new()
 $script:kbId = $KbId
 $script:docId = $null
 
@@ -46,6 +47,78 @@ function Join-HitText($Hits) {
     (($Hits | ForEach-Object {
         @($_.fileName, $_.content, ($_.metadata | ConvertTo-Json -Depth 6 -Compress)) -join " "
     }) -join "`n")
+}
+
+function Get-JsonProperty($Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Invoke-EvalCase($Case) {
+    $topK = if ($Case.topK) { [int]$Case.topK } else { 5 }
+    $failureReasons = [System.Collections.Generic.List[string]]::new()
+    $retrieval = $null
+    $hits = @()
+    $matchedFile = $null
+    $matchedToken = $null
+    $diagnostics = $null
+
+    try {
+        $retrieval = Invoke-Json "POST" "$BaseUrl/api/v1/knowledge-bases/$($script:kbId)/retrieve" @{
+            query = $Case.query
+            topK = $topK
+        }
+        $hits = @($retrieval.hits)
+        $diagnostics = $retrieval.diagnostics
+
+        if ($hits.Count -lt [int]$Case.minHits) {
+            $failureReasons.Add("expected at least $($Case.minHits) hits, got $($hits.Count)")
+        }
+        if ($Case.expectedFileName) {
+            $matchedFile = $hits | Where-Object { $_.fileName -eq $Case.expectedFileName } | Select-Object -First 1
+            if (-not $matchedFile) {
+                $failureReasons.Add("missing expected file $($Case.expectedFileName)")
+            }
+        }
+        if ($Case.mustContainAny) {
+            $joined = Join-HitText $hits
+            foreach ($token in @($Case.mustContainAny)) {
+                if ($joined -like "*$token*") {
+                    $matchedToken = $token
+                    break
+                }
+            }
+            if (-not $matchedToken) {
+                $failureReasons.Add("hits did not contain any expected token: $($Case.mustContainAny -join ', ')")
+            }
+        }
+    } catch {
+        $failureReasons.Add($_.Exception.Message)
+    }
+
+    $retrievalMode = Get-JsonProperty $diagnostics "retrievalMode"
+    if (-not $retrievalMode -and $retrieval) {
+        $retrievalMode = $retrieval.retrievalMode
+    }
+
+    return [ordered]@{
+        id = $Case.id
+        query = $Case.query
+        passed = ($failureReasons.Count -eq 0)
+        failureReasons = @($failureReasons)
+        hitCount = $hits.Count
+        minHits = [int]$Case.minHits
+        topK = $topK
+        expectedFileName = $Case.expectedFileName
+        matchedFileName = if ($matchedFile) { $matchedFile.fileName } else { $null }
+        matchedToken = $matchedToken
+        retrievalMode = $retrievalMode
+        fallbackReason = Get-JsonProperty $diagnostics "fallbackReason"
+        embeddingModel = Get-JsonProperty $diagnostics "embeddingModel"
+        embeddingDimension = Get-JsonProperty $diagnostics "embeddingDimension"
+    }
 }
 
 try {
@@ -109,33 +182,12 @@ try {
 
     foreach ($case in $script:cases) {
         Step "Eval: $($case.id)" {
-            $topK = if ($case.topK) { [int]$case.topK } else { 5 }
-            $retrieval = Invoke-Json "POST" "$BaseUrl/api/v1/knowledge-bases/$($script:kbId)/retrieve" @{
-                query = $case.query
-                topK = $topK
+            $result = Invoke-EvalCase $case
+            $caseResults.Add($result)
+            if (-not $result.passed) {
+                throw ($result.failureReasons -join "; ")
             }
-            $hitCount = if ($retrieval.hits) { $retrieval.hits.Count } else { 0 }
-            if ($hitCount -lt [int]$case.minHits) {
-                throw "expected at least $($case.minHits) hits, got $hitCount"
-            }
-            if ($case.expectedFileName) {
-                $matchedFile = $retrieval.hits | Where-Object { $_.fileName -eq $case.expectedFileName } | Select-Object -First 1
-                if (-not $matchedFile) { throw "missing expected file $($case.expectedFileName)" }
-            }
-            if ($case.mustContainAny) {
-                $joined = Join-HitText $retrieval.hits
-                $matched = $false
-                foreach ($token in $case.mustContainAny) {
-                    if ($joined -like "*$token*") {
-                        $matched = $true
-                        break
-                    }
-                }
-                if (-not $matched) {
-                    throw "hits did not contain any expected token: $($case.mustContainAny -join ', ')"
-                }
-            }
-            "hits=$hitCount"
+            "hits=$($result.hitCount) matchedFile=$($result.matchedFileName) matchedToken=$($result.matchedToken) mode=$($result.retrievalMode)"
         }
     }
 
@@ -147,6 +199,7 @@ try {
         kbId = $script:kbId
         docId = $script:docId
         casesFile = $CasesFile
+        caseResults = $caseResults
         steps = $results
     } | ConvertTo-Json -Depth 8 | Set-Content -Path $reportPath -Encoding utf8
     Write-Host "Report: $reportPath"
@@ -160,6 +213,7 @@ try {
         kbId = $script:kbId
         docId = $script:docId
         casesFile = $CasesFile
+        caseResults = $caseResults
         steps = $results
     } | ConvertTo-Json -Depth 8 | Set-Content -Path $reportPath -Encoding utf8
     exit 1

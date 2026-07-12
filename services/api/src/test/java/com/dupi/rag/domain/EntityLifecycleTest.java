@@ -9,6 +9,8 @@ import com.dupi.rag.domain.entity.DocumentTombstone;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.IngestOutboxEvent;
 import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.entity.Role;
+import com.dupi.rag.domain.entity.UserAccount;
 import com.dupi.rag.domain.entity.VectorCleanupTask;
 import com.dupi.rag.domain.enums.AuditLogStatus;
 import com.dupi.rag.domain.enums.ChatMessageRole;
@@ -61,6 +63,36 @@ class EntityLifecycleTest {
         assertThat(chunk.getId()).isNotNull();
         assertThat(chunk.getCreatedAt()).isNotNull();
         assertThat(chunk.getTokenCount()).isZero();
+
+        Role role = Role.builder()
+                .code("SUPPORT")
+                .name("Support")
+                .permissions("KB_READ")
+                .build();
+        invoke(role, "onCreate");
+        assertThat(role.getId()).isNotNull();
+        assertThat(role.getCreatedAt()).isNotNull();
+        assertThat(role.getUpdatedAt()).isNotNull();
+        Instant roleCreatedAt = role.getCreatedAt();
+        invoke(role, "onUpdate");
+        assertThat(role.getCreatedAt()).isEqualTo(roleCreatedAt);
+        assertThat(role.getUpdatedAt()).isNotNull();
+
+        UserAccount userAccount = UserAccount.builder()
+                .username("alice")
+                .passwordHash("hash")
+                .build();
+        invoke(userAccount, "onCreate");
+        assertThat(userAccount.getId()).isNotNull();
+        assertThat(userAccount.getTenantId()).isEqualTo("default");
+        assertThat(userAccount.getRoleCode()).isEqualTo("ANALYST");
+        assertThat(userAccount.getTokenVersion()).isEqualTo("1");
+        assertThat(userAccount.isDisabled()).isFalse();
+        assertThat(userAccount.getCreatedAt()).isNotNull();
+        assertThat(userAccount.getUpdatedAt()).isNotNull();
+        Instant userUpdatedAt = userAccount.getUpdatedAt();
+        invoke(userAccount, "onUpdate");
+        assertThat(userAccount.getUpdatedAt()).isAfterOrEqualTo(userUpdatedAt);
     }
 
     @Test
@@ -162,6 +194,18 @@ class EntityLifecycleTest {
         Thread.sleep(2L);
         invoke(event, "onUpdate");
         assertThat(event.getUpdatedAt()).isAfterOrEqualTo(previousUpdatedAt);
+
+        IngestOutboxEvent nullAttemptEvent = IngestOutboxEvent.builder()
+                .jobId(jobId)
+                .kbId(kbId)
+                .docId(docId)
+                .objectKey("kb/doc/b.md")
+                .fileName("b.md")
+                .mimeType("text/markdown")
+                .attemptCount(null)
+                .build();
+        invoke(nullAttemptEvent, "onCreate");
+        assertThat(nullAttemptEvent.getAttemptCount()).isZero();
     }
 
     @Test
@@ -185,6 +229,9 @@ class EntityLifecycleTest {
         assertThat(session.getId()).isNotNull();
         assertThat(session.getCreatedAt()).isNotNull();
         assertThat(session.getUpdatedAt()).isNotNull();
+        Instant sessionUpdatedAt = session.getUpdatedAt();
+        invoke(session, "onUpdate");
+        assertThat(session.getUpdatedAt()).isAfterOrEqualTo(sessionUpdatedAt);
         assertThat(message.getId()).isNotNull();
         assertThat(message.getCreatedAt()).isNotNull();
         assertThat(message.getSequenceNumber()).isZero();

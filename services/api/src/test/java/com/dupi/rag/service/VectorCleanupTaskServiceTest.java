@@ -219,6 +219,22 @@ class VectorCleanupTaskServiceTest {
         verifyNoInteractions(milvusVectorService);
     }
 
+    @Test
+    void summarizeAlertsReportsOpenVectorCleanupFailures() {
+        when(repository.countByStatusIn(List.of(
+                VectorCleanupStatus.PENDING,
+                VectorCleanupStatus.FAILED
+        ))).thenReturn(3L);
+
+        var alerts = service().summarizeAlerts();
+
+        assertThat(alerts).hasSize(1);
+        assertThat(alerts.get(0).getCode()).isEqualTo("VECTOR_CLEANUP_FAILURES_OPEN");
+        assertThat(alerts.get(0).getSeverity()).isEqualTo("WARN");
+        assertThat(alerts.get(0).getCount()).isEqualTo(3L);
+        assertThat(alerts.get(0).getMessage()).contains("vector cleanup");
+    }
+
     private VectorCleanupTaskService service() {
         return new VectorCleanupTaskService(repository, milvusVectorService, auditLogService);
     }

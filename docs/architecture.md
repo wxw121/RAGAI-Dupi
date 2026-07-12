@@ -40,12 +40,13 @@ dupi-RAG/
 | `KnowledgeBaseService` | 知识库 CRUD、分块/检索配置 | `KbController` |
 | `DocumentService` | 文档上传、MinIO 存储、创建摄入任务与 outbox 事件 | `DocumentController` |
 | `UploadRateLimitFilter` | 上传入口限流；已认证用户按租户 + principal 分桶，匿名/API Key 请求按租户 + IP + API Key 分桶 | `/documents`、`/documents/batch` |
-| `IngestJobService` | 摄入任务状态、重试、队列补偿扫描 | `IngestJobController` / 定时任务 |
+| `IngestJobService` | 摄入任务状态、重试、队列补偿扫描、摄入诊断和打开失败告警摘要 | `IngestJobController` / 定时任务 |
 | `IngestOutboxService` | transactional outbox 投递，将已提交摄入任务可靠投递到 Redis | 定时任务、上传/重试/reindex 后续投递 |
 | `DocumentTombstoneService` | 删除 tombstone，防止 outbox 或 Worker 迟到回调恢复已删文档 | 文档删除、outbox、Worker 回调 |
 | `RetrievalService` | 向量检索（V1 纯向量） | `RetrievalController` |
 | `ChatService` | RAG 编排、LLM 调用、SSE | `ChatController` |
 | `AuditLogService` | 高影响操作审计日志，记录租户、动作、目标和结果 | 删除、reindex、retry、账号/角色运维操作 |
+| `OpsController` | 运维元数据、上传/摄入/审计 guardrails、审计/摄入/向量清理聚合告警 | `/api/v1/ops/**` |
 | `AccountService` | 数据库账号管理，负责配置账号启动同步、创建/更新、密码重置、禁用/启用与 tokenVersion 轮换 | `/api/v1/ops/accounts/**` |
 | `RoleService` | 角色管理、权限点归一化与权限说明元数据，账号通过 `roleCode` 继承角色权限 | `/api/v1/ops/roles/**`、`/api/v1/ops/metadata` |
 | `VectorCleanupTaskService` | 文档/知识库删除后的残留 Milvus 向量补偿清理 | 定时任务、`/api/v1/ops/vector-cleanup-tasks` |
@@ -66,7 +67,7 @@ dupi-RAG/
 
 批量上传使用同一个后端 batch API，一次请求内仍按“一文件一 Document + 一 IngestJob”处理；单个文件失败会返回逐文件失败结果，不阻断同批次其他文件入队。上传入口默认启用轻量限流，配置项为 `UPLOAD_RATE_LIMIT_*`。限流 key 会优先使用当前安全上下文中的租户 + 用户主体；未登录或兼容 API Key 请求回退为租户 + 客户端 IP + API Key，避免同 NAT 下不同登录用户互相挤占上传额度。
 
-上传落 MinIO 前会先检查 Redis 摄入队列长度，`INGEST_QUEUE_MAX_PENDING_JOBS` 达到阈值时快速拒绝。上传事务内只写入 `documents`、`ingest_jobs` 和 `ingest_outbox_events`，由 `IngestOutboxService` 按 `INGEST_OUTBOX_DISPATCH_CRON` 在事务提交后投递 Redis。若 Redis 短暂不可用，outbox 事件会进入 `FAILED` 并按退避时间重试，文档和任务保持 `PENDING + QUEUED`；补偿成功后文档进入 `PROCESSING`。旧补偿扫描仍按 `INGEST_RECOVERY_CRON` 兼容历史 queued job，连续失败达到 `INGEST_RECOVERY_MAX_ATTEMPTS` 后任务进入 `DEAD_LETTER`，文档标记为 `FAILED`。Web 文档页提供“索引维护”面板，可查看最近摄入任务并对 `FAILED` / `DEAD_LETTER` 任务执行租户边界内的手动重试；同时展示向量清理补偿任务，并可触发手动重试。
+上传落 MinIO 前会先检查 Redis 摄入队列长度，`INGEST_QUEUE_MAX_PENDING_JOBS` 达到阈值时快速拒绝。上传事务内只写入 `documents`、`ingest_jobs` 和 `ingest_outbox_events`，由 `IngestOutboxService` 按 `INGEST_OUTBOX_DISPATCH_CRON` 在事务提交后投递 Redis。若 Redis 短暂不可用，outbox 事件会进入 `FAILED` 并按退避时间重试，文档和任务保持 `PENDING + QUEUED`；补偿成功后文档进入 `PROCESSING`。旧补偿扫描仍按 `INGEST_RECOVERY_CRON` 兼容历史 queued job，连续失败达到 `INGEST_RECOVERY_MAX_ATTEMPTS` 后任务进入 `DEAD_LETTER`，文档标记为 `FAILED`。Web 文档页提供“索引维护”面板，可查看最近摄入任务并对 `FAILED` / `DEAD_LETTER` 任务执行租户边界内的手动重试；同时展示向量清理补偿任务，并可触发手动重试。V1.1 起，摄入任务响应会带 `documentFileName`、`documentStatus` 与 `diagnosis`，诊断由任务状态、阶段、错误、重试次数和更新时间计算，直接给出严重级别、摘要、建议动作、是否可重试和是否停滞。
 
 切换 embedding 模型或维度后，可在 Web 文档页点击“重建索引”，或调用 `POST /api/v1/knowledge-bases/{kbId}/reindex` 重建旧知识库索引。该流程会更新知识库当前 embedding 配置、登记 Milvus 残留向量补偿清理、清空本地 chunks，并为库内所有文档重新创建摄入任务。API 启动时若发现已存在的 Milvus collection 中 `embedding` 字段不是 `FloatVector`，或 schema 维度与当前 `EMBEDDING_DIMENSION` 不一致，会 fail-fast 并提示重置 collection 或使用维度专用 collection，避免带错维度继续运行。
 
@@ -93,7 +94,7 @@ Worker 的 `embed_batch` 会按 `EMBEDDING_BATCH_SIZE`（默认 `32`）拆分 Em
   → LLM 流式生成 → SSE 推送（retrieval / token / done）
 ```
 
-`/retrieve` 响应包含 `diagnostics`（检索模式、TopK、命中数、embedding 模型/维度、fallback 原因）。Chat SSE 的 `retrieval` 事件返回 `{ citations, diagnostics }`，前端会展示检索诊断，便于排查“根据现有知识库资料无法回答”到底是命中数为 0、Milvus fallback，还是旧知识库 embedding 配置不一致。
+`/retrieve` 响应包含 `diagnostics`（检索模式、TopK、命中数、embedding 模型/维度、fallback 原因）。Chat SSE 的 `retrieval` 事件返回 `{ citations, diagnostics }`，前端会展示检索诊断，便于排查“根据现有知识库资料无法回答”到底是命中数为 0、Milvus fallback，还是旧知识库 embedding 配置不一致。知识库详情页的 `RAG 评估` 标签复用 `/retrieve`，按内置用例展示 pass/fail、命中数、期望文件、命中 token、检索模式和 fallback 原因；脚本侧同样把这些字段写入 `rag-regression-eval-last-run.json` 的 `caseResults`。
 
 ### V2 混合检索（已实现骨架）
 
@@ -127,7 +128,7 @@ query → 向量检索 + BM25 检索 → RRF 融合 → Rerank 模型 → Top-N 
 
 ## 测试与验收
 
-主流程 E2E 脚本 [`scripts/e2e-main-flow.ps1`](../scripts/e2e-main-flow.ps1) 经 Nginx `:8080` 模拟 Web 控制台操作，覆盖 KB CRUD、文档上传、Worker 摄入、检索与 SSE 问答。维护流程脚本 [`scripts/e2e-web-maintenance-flow.ps1`](../scripts/e2e-web-maintenance-flow.ps1) 覆盖批量上传、reindex、摄入任务与向量清理任务运维入口。RAG 回归评测脚本 [`scripts/rag-regression-eval.ps1`](../scripts/rag-regression-eval.ps1) 使用 [`examples/rag-eval-cases.json`](../examples/rag-eval-cases.json) 校验检索命中、引用文件和关键片段。详见 [e2e-testing.md](e2e-testing.md)。
+主流程 E2E 脚本 [`scripts/e2e-main-flow.ps1`](../scripts/e2e-main-flow.ps1) 经 Nginx `:8080` 模拟 Web 控制台操作，覆盖 KB CRUD、文档上传、Worker 摄入、检索与 SSE 问答。V1.1 新增真实浏览器门禁 [`scripts/e2e-browser-gate.ps1`](../scripts/e2e-browser-gate.ps1)，使用 Playwright 从登录页进入，验证 Cookie/CSRF 和核心页面渲染。维护流程脚本 [`scripts/e2e-web-maintenance-flow.ps1`](../scripts/e2e-web-maintenance-flow.ps1) 覆盖批量上传、reindex、摄入任务与向量清理任务运维入口。RAG 回归评测脚本 [`scripts/rag-regression-eval.ps1`](../scripts/rag-regression-eval.ps1) 使用 [`examples/rag-eval-cases.json`](../examples/rag-eval-cases.json) 校验检索命中、引用文件和关键片段。详见 [e2e-testing.md](e2e-testing.md)。
 
 ## Docker Compose 服务拓扑
 

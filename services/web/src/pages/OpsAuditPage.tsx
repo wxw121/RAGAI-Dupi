@@ -6,7 +6,7 @@ import { useToast } from '@/components/Toast'
 import { Badge, statusBadgeVariant } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { formatDate } from '@/lib/utils'
+import { formatBytes, formatDate } from '@/lib/utils'
 import { AlertTriangle, Download, Loader2, RefreshCw, Search } from 'lucide-react'
 
 export function OpsAuditPage({ onLogout }: { onLogout?: () => void }) {
@@ -83,11 +83,24 @@ export function OpsAuditPage({ onLogout }: { onLogout?: () => void }) {
                   </p>
                   <p className="mt-1">{alert.message}</p>
                   <p className="mt-1 text-xs text-amber-800">
-                    当前 {alert.count} 次，阈值 {alert.threshold}，窗口 {formatDate(alert.windowStart)} - {formatDate(alert.windowEnd)}
+                    {alert.windowStart && alert.windowEnd
+                      ? `当前 ${alert.count} 次，阈值 ${alert.threshold}，窗口 ${formatDate(alert.windowStart)} - ${formatDate(alert.windowEnd)}`
+                      : `当前 ${alert.count} 次，阈值 ${alert.threshold}`}
                   </p>
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {metadata?.guardrails && (
+          <div className="rounded-3xl border border-border bg-background p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-semibold">Guardrails</h2>
+              <p className="text-xs text-muted-foreground">
+                upload {metadata.guardrails.uploadRateLimit.requests}/{metadata.guardrails.uploadRateLimit.windowSeconds}s · queue {metadata.guardrails.ingestQueue.maxPendingJobs} · max {formatBytes(metadata.guardrails.multipart.maxFileSizeBytes)} · audit {metadata.guardrails.audit.alertFailedThreshold}/{metadata.guardrails.audit.alertWindowMinutes}m
+              </p>
+            </div>
           </div>
         )}
 

@@ -195,6 +195,48 @@ class DtoCoverageTest {
         assertThat(auditAlert.getThreshold()).isEqualTo(10);
         assertThat(auditAlert.getWindowStart()).isEqualTo(now.minusSeconds(60));
         assertThat(auditAlert.getWindowEnd()).isEqualTo(now);
+
+        PermissionMetadataResponse permission = PermissionMetadataResponse.builder()
+                .code("KB_READ")
+                .name("Read")
+                .description("read knowledge bases")
+                .allows(List.of("chat"))
+                .denies(List.of("delete"))
+                .build();
+        OpsMetadataResponse metadata = OpsMetadataResponse.builder()
+                .permissions(List.of("KB_READ", "CHAT_WRITE"))
+                .permissionDetails(List.of(permission))
+                .auditActions(List.of("LOGIN", "DOCUMENT_UPLOAD"))
+                .auditTargetTypes(List.of("USER", "DOCUMENT"))
+                .auditStatuses(List.of("SUCCESS", "FAILED"))
+                .guardrails(OpsGuardrailsResponse.builder()
+                        .uploadRateLimit(OpsGuardrailsResponse.UploadRateLimit.builder()
+                                .enabled(true)
+                                .requests(10)
+                                .windowSeconds(60)
+                                .build())
+                        .ingestQueue(OpsGuardrailsResponse.IngestQueue.builder()
+                                .maxPendingJobs(5)
+                                .maxRecoveryAttempts(3)
+                                .build())
+                        .audit(OpsGuardrailsResponse.Audit.builder()
+                                .alertWindowMinutes(15)
+                                .alertFailedThreshold(2)
+                                .build())
+                        .multipart(OpsGuardrailsResponse.Multipart.builder()
+                                .maxFileSizeBytes(10_485_760L)
+                                .build())
+                        .build())
+                .build();
+        assertThat(metadata.getPermissions()).containsExactly("KB_READ", "CHAT_WRITE");
+        assertThat(metadata.getPermissionDetails()).containsExactly(permission);
+        assertThat(metadata.getAuditActions()).containsExactly("LOGIN", "DOCUMENT_UPLOAD");
+        assertThat(metadata.getAuditTargetTypes()).containsExactly("USER", "DOCUMENT");
+        assertThat(metadata.getAuditStatuses()).containsExactly("SUCCESS", "FAILED");
+        assertThat(metadata.getGuardrails().getUploadRateLimit().isEnabled()).isTrue();
+        assertThat(metadata.getGuardrails().getIngestQueue().getMaxPendingJobs()).isEqualTo(5);
+        assertThat(metadata.getGuardrails().getAudit().getAlertFailedThreshold()).isEqualTo(2);
+        assertThat(metadata.getGuardrails().getMultipart().getMaxFileSizeBytes()).isEqualTo(10_485_760L);
     }
 
     @Test

@@ -14,4 +14,5 @@ public class OpsMetadataResponse {
     private List<String> auditActions;
     private List<String> auditTargetTypes;
     private List<String> auditStatuses;
+    private OpsGuardrailsResponse guardrails;
 }

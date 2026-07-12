@@ -28,6 +28,18 @@ class MinioStorageServiceTest {
     }
 
     @Test
+    void uploadWrapsPutObjectFailures() throws Exception {
+        MinioClient minioClient = mock(MinioClient.class);
+        when(minioClient.bucketExists(any())).thenReturn(true);
+        doThrow(new RuntimeException("put failed")).when(minioClient).putObject(any());
+        MinioStorageService service = new MinioStorageService(minioClient, props());
+
+        assertThatThrownBy(() -> service.upload("obj", new ByteArrayInputStream("abc".getBytes()), 3L, "text/plain"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to upload to MinIO");
+    }
+
+    @Test
     void ensureBucketSkipsCreationWhenBucketExistsAndWrapsFailures() throws Exception {
         MinioClient exists = mock(MinioClient.class);
         when(exists.bucketExists(any())).thenReturn(true);
@@ -57,6 +69,16 @@ class MinioStorageServiceTest {
 
         doThrow(new RuntimeException("delete failed")).when(minioClient).removeObject(any());
         service.delete("obj");
+        verify(minioClient).removeObject(any());
+    }
+
+    @Test
+    void deleteRemovesObjectWhenMinioSucceeds() throws Exception {
+        MinioClient minioClient = mock(MinioClient.class);
+        MinioStorageService service = new MinioStorageService(minioClient, props());
+
+        service.delete("obj");
+
         verify(minioClient).removeObject(any());
     }
 

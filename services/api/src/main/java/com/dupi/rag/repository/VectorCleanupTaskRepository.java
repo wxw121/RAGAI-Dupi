@@ -25,6 +25,8 @@ public interface VectorCleanupTaskRepository extends JpaRepository<VectorCleanup
 
     List<VectorCleanupTask> findTop50ByStatusInOrderByUpdatedAtDesc(List<VectorCleanupStatus> statuses);
 
+    long countByStatusIn(List<VectorCleanupStatus> statuses);
+
     @Query("""
             select d.kbId
             from Document d

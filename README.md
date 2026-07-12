@@ -1,6 +1,7 @@
 # dupi-RAG
 
 > 账号 / RBAC 与 ops 管理权限更新记录见 [docs/rbac-ops-admin-2026-07-06.md](docs/rbac-ops-admin-2026-07-06.md)；摄入 outbox、删除 tombstone、实例级授权与审计运维增强见 [docs/outbox-tombstone-rbac-ops-2026-07-07.md](docs/outbox-tombstone-rbac-ops-2026-07-07.md)。
+> V1.1（API `0.1.1-SNAPSHOT` / Web `0.1.1`）新增真实浏览器 E2E 门禁、摄入诊断、知识库详情 `RAG 评估`、上传治理提示与聚合运维告警；设计与实施记录见 [docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md](docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md) 与 [docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md](docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md)。
 
 企业级 RAG 知识库引擎 — 类似 Dify/扣子底层知识库模块。
 
@@ -69,6 +70,7 @@ docker compose up -d --build
 1. **新建知识库** → 点击卡片或「去问答」进入详情
 2. **文档管理** → 上传文件，等待状态 `COMPLETED`
 3. **智能问答** → 基于已摄入文档提问（需配置 `CHAT_API_KEY` 与 `EMBEDDING_API_KEY`）
+4. **RAG 评估** → 在知识库详情页运行内置用例，检查命中数、引用文件、关键片段和检索诊断
 
 ### 4. 验证
 
@@ -108,12 +110,20 @@ powershell -NoProfile -File scripts/e2e-main-flow.ps1
 新增维护与回归验证脚本：
 
 ```powershell
+# 真实浏览器 E2E 门禁：使用真实登录、Cookie 与 CSRF，不依赖本地开放模式
+$env:E2E_BASE_URL="http://localhost:8080"
+$env:E2E_ADMIN_USERNAME="<admin>"
+$env:E2E_ADMIN_PASSWORD="<password>"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-browser-gate.ps1
+
 # 索引维护流程：批量上传、reindex、摄入任务重试入口、向量清理任务入口
 powershell -NoProfile -File scripts/e2e-web-maintenance-flow.ps1
 
 # RAG 检索回归评测：按 examples/rag-eval-cases.json 校验命中与引用文件
 powershell -NoProfile -File scripts/rag-regression-eval.ps1
 ```
+
+`e2e-browser-gate.ps1` 需要 `E2E_ADMIN_USERNAME` 与 `E2E_ADMIN_PASSWORD`，缺少凭据时会明确失败；`rag-regression-eval.ps1` 会写入 `scripts/rag-regression-eval-last-run.json`，其中 `caseResults` 包含每条用例的 query、pass/fail、命中数、期望/命中文件、命中 token、检索模式、fallback 原因和 embedding 信息。
 
 ### 5. API 示例
 
@@ -140,6 +150,9 @@ curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/reindex
 # 重试失败或死信摄入任务
 curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs/{jobId}/retry
 
+# 查看摄入任务诊断；响应包含 documentFileName、documentStatus、diagnosis
+curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs
+
 # 查看并重试残留向量补偿清理任务
 curl http://localhost:8080/api/v1/ops/vector-cleanup-tasks
 curl -X POST http://localhost:8080/api/v1/ops/vector-cleanup-tasks/{taskId}/retry
@@ -151,6 +164,9 @@ curl http://localhost:8080/api/v1/ops/audit-alerts
 curl http://localhost:8080/api/v1/ops/metadata
 curl http://localhost:8080/api/v1/ops/accounts
 curl http://localhost:8080/api/v1/ops/roles
+
+# /ops/metadata 返回 guardrails：上传限流、摄入队列、审计阈值和 multipart 最大文件大小
+# /ops/audit-alerts 聚合审计失败峰值、摄入失败/死信任务和向量清理失败任务
 
 # 新建/更新账号、重置密码、禁用/启用账号、轮换 tokenVersion
 curl -X POST http://localhost:8080/api/v1/ops/accounts \
@@ -213,6 +229,7 @@ cd services/api
 | 版本 | 能力 |
 |------|------|
 | V1 | 知识库 CRUD、异步摄入、纯向量检索、SSE RAG、Web 控制台 |
+| V1.1 | 真实浏览器 E2E 门禁、摄入诊断、RAG 评估闭环、上传治理提示、聚合运维告警 |
 | V2 | BM25 混合检索、Rerank、语义分块、Excel、生成中断 |
 | V3 | Parent-Child 索引、多模态 OCR、Pipeline DSL |
 | V4 | K8s、多租户、合规审计 |

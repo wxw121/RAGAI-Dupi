@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -497,6 +498,45 @@ class ConfigAndExceptionTest {
         verifyNoInteractions(chain);
         assertThat(response.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST.value());
         assertThat(response.getContentAsString()).contains("Invalid tenant id");
+    }
+
+    @Test
+    void tenantContextDefaultsBlankOrNullTenantIds() {
+        try {
+            TenantContext.setTenantId(null);
+            assertThat(TenantContext.getTenantId()).isEqualTo(TenantContext.DEFAULT_TENANT_ID);
+            assertThat(TenantContext.hasTenantId()).isTrue();
+
+            TenantContext.setTenantId(" ");
+            assertThat(TenantContext.getTenantId()).isEqualTo(TenantContext.DEFAULT_TENANT_ID);
+        } finally {
+            TenantContext.clear();
+        }
+    }
+
+    @Test
+    void securityContextHandlesEmptyInputsAndScopedKnowledgeBases() {
+        try {
+            SecurityContext.clear();
+            assertThat(SecurityContext.getRole()).isNull();
+            assertThat(SecurityContext.hasRole("ADMIN")).isFalse();
+            assertThat(SecurityContext.canAccessKnowledgeBase("kb-a")).isFalse();
+
+            SecurityContext.set(
+                    "alice",
+                    null,
+                    List.of("kb-read", " ", "chat-write"),
+                    List.of(" kb-a ", " ")
+            );
+
+            assertThat(SecurityContext.getRole()).isEqualTo("USER");
+            assertThat(SecurityContext.hasPermission("kb-read")).isTrue();
+            assertThat(SecurityContext.hasPermission("document-delete")).isFalse();
+            assertThat(SecurityContext.canAccessKnowledgeBase("kb-a")).isTrue();
+            assertThat(SecurityContext.canAccessKnowledgeBase("kb-b")).isFalse();
+        } finally {
+            SecurityContext.clear();
+        }
     }
 
     @Test

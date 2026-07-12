@@ -10,6 +10,8 @@ import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
 import com.dupi.rag.domain.enums.IngestStage;
+import com.dupi.rag.dto.AuditAlertResponse;
+import com.dupi.rag.dto.IngestDiagnosisResponse;
 import com.dupi.rag.dto.IngestJobResponse;
 import com.dupi.rag.dto.IngestStatusUpdate;
 import com.dupi.rag.exception.ResourceNotFoundException;
@@ -22,6 +24,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -30,6 +33,8 @@ import java.util.UUID;
 @RequiredArgsConstructor
 @Slf4j
 public class IngestJobService {
+
+    private static final long STALLED_JOB_SECONDS = 900;
 
     private final IngestJobRepository ingestJobRepository;
     private final DocumentRepository documentRepository;
@@ -55,6 +60,24 @@ public class IngestJobService {
         return ingestJobRepository.findByKbIdOrderByCreatedAtDesc(kbId).stream()
                 .map(this::toResponse)
                 .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public List<AuditAlertResponse> summarizeAlerts() {
+        long openFailures = ingestJobRepository.countByStatusIn(List.of(
+                IngestJobStatus.FAILED,
+                IngestJobStatus.DEAD_LETTER
+        ));
+        if (openFailures <= 0) {
+            return List.of();
+        }
+        return List.of(AuditAlertResponse.builder()
+                .code("INGEST_FAILURES_OPEN")
+                .severity("WARN")
+                .message("Open ingest failed or dead-letter jobs need operator review")
+                .count(openFailures)
+                .threshold(0)
+                .build());
     }
 
     @Transactional
@@ -157,7 +180,7 @@ public class IngestJobService {
                 "Retried ingest job " + job.getId() + " for knowledge base " + kb.getId()
         );
 
-        return toResponse(job);
+        return toResponse(job, doc);
     }
 
     @Transactional
@@ -250,7 +273,7 @@ public class IngestJobService {
         doc.setErrorMessage(null);
         ingestOutboxService.record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
         documentRepository.save(doc);
-        return toResponse(job);
+        return toResponse(job, doc);
     }
 
     private void markRecoveryFailure(IngestJob job, Document doc, Exception e) {
@@ -289,16 +312,129 @@ public class IngestJobService {
     }
 
     private IngestJobResponse toResponse(IngestJob job) {
+        Document doc = documentRepository.findById(job.getDocId()).orElse(null);
+        return toResponse(job, doc);
+    }
+
+    private IngestJobResponse toResponse(IngestJob job, Document doc) {
         return IngestJobResponse.builder()
                 .id(job.getId())
                 .kbId(job.getKbId())
                 .docId(job.getDocId())
+                .documentFileName(doc == null ? null : doc.getFileName())
+                .documentStatus(doc == null ? null : doc.getStatus())
                 .status(job.getStatus())
                 .stage(job.getStage())
                 .retryCount(job.getRetryCount())
                 .errorMessage(job.getErrorMessage())
+                .diagnosis(diagnose(job, doc))
                 .createdAt(job.getCreatedAt())
                 .updatedAt(job.getUpdatedAt())
                 .build();
+    }
+
+    private IngestDiagnosisResponse diagnose(IngestJob job, Document doc) {
+        Instant now = Instant.now();
+        long ageSeconds = elapsedSeconds(job.getCreatedAt(), now);
+        long lastUpdatedSeconds = elapsedSeconds(job.getUpdatedAt(), now);
+        boolean running = job.getStatus() == IngestJobStatus.PENDING || job.getStatus() == IngestJobStatus.PROCESSING;
+        boolean stalled = running && lastUpdatedSeconds >= STALLED_JOB_SECONDS;
+        if (stalled) {
+            return IngestDiagnosisResponse.builder()
+                    .severity("warning")
+                    .summary("摄入任务长时间无进展")
+                    .nextAction(stalledNextAction(job))
+                    .retryable(false)
+                    .stalled(true)
+                    .ageSeconds(ageSeconds)
+                    .lastUpdatedSeconds(lastUpdatedSeconds)
+                    .build();
+        }
+        if (job.getStatus() == IngestJobStatus.COMPLETED) {
+            return IngestDiagnosisResponse.builder()
+                    .severity("info")
+                    .summary("文档索引已完成")
+                    .nextAction("可以开始提问，或在 RAG 评估页检查检索命中质量。")
+                    .retryable(false)
+                    .stalled(false)
+                    .ageSeconds(ageSeconds)
+                    .lastUpdatedSeconds(lastUpdatedSeconds)
+                    .build();
+        }
+        if (job.getStatus() == IngestJobStatus.DEAD_LETTER) {
+            return IngestDiagnosisResponse.builder()
+                    .severity("error")
+                    .summary("摄入任务已进入死信：" + failureReason(job, doc))
+                    .nextAction("检查队列、Worker、对象存储和 Embedding 配置后，再手动重试摄入。")
+                    .retryable(true)
+                    .stalled(false)
+                    .ageSeconds(ageSeconds)
+                    .lastUpdatedSeconds(lastUpdatedSeconds)
+                    .build();
+        }
+        if (job.getStatus() == IngestJobStatus.FAILED || (doc != null && doc.getStatus() == DocumentStatus.FAILED)) {
+            return IngestDiagnosisResponse.builder()
+                    .severity("error")
+                    .summary("摄入失败：" + failureReason(job, doc))
+                    .nextAction("检查文档格式、Embedding 配置和 Worker 日志，必要时手动重试摄入。")
+                    .retryable(canRetry(job))
+                    .stalled(false)
+                    .ageSeconds(ageSeconds)
+                    .lastUpdatedSeconds(lastUpdatedSeconds)
+                    .build();
+        }
+        if (job.getStatus() == IngestJobStatus.PROCESSING) {
+            return IngestDiagnosisResponse.builder()
+                    .severity("info")
+                    .summary("文档正在摄入和索引")
+                    .nextAction("等待 Worker 完成当前阶段；如长时间无进展再检查 Worker 日志。")
+                    .retryable(false)
+                    .stalled(false)
+                    .ageSeconds(ageSeconds)
+                    .lastUpdatedSeconds(lastUpdatedSeconds)
+                    .build();
+        }
+        return IngestDiagnosisResponse.builder()
+                .severity("info")
+                .summary("文档等待摄入队列处理")
+                .nextAction("等待队列调度；如果持续停留在队列中，请检查 Redis 队列和 Worker。")
+                .retryable(false)
+                .stalled(false)
+                .ageSeconds(ageSeconds)
+                .lastUpdatedSeconds(lastUpdatedSeconds)
+                .build();
+    }
+
+    private String stalledNextAction(IngestJob job) {
+        if (job.getStage() == IngestStage.QUEUED) {
+            return "检查 Redis 队列积压和 Worker 是否在线，确认后等待恢复任务重新投递。";
+        }
+        return "检查 Worker 当前阶段日志、Embedding 配置和外部向量服务状态。";
+    }
+
+    private boolean canRetry(IngestJob job) {
+        return job.getStatus() == IngestJobStatus.DEAD_LETTER || safeRetryCount(job) < maxRecoveryAttempts();
+    }
+
+    private String failureReason(IngestJob job, Document doc) {
+        String reason = firstText(job.getErrorMessage(), doc == null ? null : doc.getErrorMessage());
+        return reason == null ? "未提供错误信息" : reason;
+    }
+
+    private String firstText(String first, String second) {
+        if (first != null && !first.isBlank()) {
+            return first;
+        }
+        if (second != null && !second.isBlank()) {
+            return second;
+        }
+        return null;
+    }
+
+    private long elapsedSeconds(Instant start, Instant end) {
+        if (start == null || end == null) {
+            return 0;
+        }
+        return Math.max(0, Duration.between(start, end).getSeconds());
     }
 }

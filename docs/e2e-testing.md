@@ -2,13 +2,14 @@
 
 ## 目的
 
-从 **Web 控制台按钮操作** 出发，用脚本自动调用同一套 HTTP 接口，验证「健康检查 → 知识库 → 上传 → 摄入 → 检索 → 问答」主链路。
+从 **Web 控制台按钮操作** 出发，用脚本自动调用同一套 HTTP 接口，验证「健康检查 → 知识库 → 上传 → 摄入 → 检索 → 问答」主链路；V1.1 额外加入真实浏览器门禁，用 Playwright 覆盖登录、Cookie/CSRF 与核心页面渲染。
 
 脚本路径：[`scripts/e2e-main-flow.ps1`](../scripts/e2e-main-flow.ps1)  
 最近一次运行报告：[`scripts/e2e-last-run.json`](../scripts/e2e-last-run.json)（每次运行覆盖）
 
 补充脚本：
 
+- [`scripts/e2e-browser-gate.ps1`](../scripts/e2e-browser-gate.ps1)：真实浏览器 E2E 门禁，使用管理员账号从登录页进入，不依赖本地开放模式。
 - [`scripts/e2e-web-maintenance-flow.ps1`](../scripts/e2e-web-maintenance-flow.ps1)：覆盖批量上传、reindex、摄入任务重试入口、向量清理任务列表/重试入口。
 - [`scripts/rag-regression-eval.ps1`](../scripts/rag-regression-eval.ps1)：读取 [`examples/rag-eval-cases.json`](../examples/rag-eval-cases.json)，校验检索命中、引用文件和关键片段。
 
@@ -52,8 +53,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rag-regression-eval.
 ```
 
 `rag-regression-eval.ps1` 可通过 `-KbId` 复用已有知识库；未传时会新建临时评测知识库并上传 `examples/sample-knowledge.md`。
+报告写入 `scripts/rag-regression-eval-last-run.json`，`caseResults` 会记录每条用例的 query、pass/fail、命中数、期望/命中文件、命中 token、检索模式、fallback 原因、embedding 模型与维度。
 
 退出码：`0` 全部通过；`1` 任一步失败（报告仍写入 `e2e-last-run.json`）。
+
+## 真实浏览器 E2E 门禁（V1.1）
+
+该门禁位于 `services/web/e2e/browser-gate.spec.ts`，通过根脚本运行：
+
+```powershell
+$env:E2E_BASE_URL="http://localhost:8080"
+$env:E2E_ADMIN_USERNAME="<admin>"
+$env:E2E_ADMIN_PASSWORD="<password>"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-browser-gate.ps1
+```
+
+门禁会启动干净浏览器上下文，真实输入用户名和密码登录，检查知识库创建、详情页文档/问答/`RAG 评估` 标签，以及审计、账号、角色页面。脚本会监听页面异常、应用控制台错误和关键请求失败。缺少 `E2E_ADMIN_USERNAME` 或 `E2E_ADMIN_PASSWORD` 时会直接退出并提示缺少凭据；这属于前置条件失败，不代表产品流程通过。
 
 ## 最近一次运行结果（2026-06-19）
 

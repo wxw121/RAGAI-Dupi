@@ -54,12 +54,25 @@ export interface IngestJob {
   id: string
   kbId: string
   docId: string
+  documentFileName?: string | null
+  documentStatus?: Document['status'] | null
   status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'DEAD_LETTER'
   stage: string | null
   retryCount: number
   errorMessage: string | null
+  diagnosis?: IngestDiagnosis | null
   createdAt: string
   updatedAt: string
+}
+
+export interface IngestDiagnosis {
+  severity: 'info' | 'warning' | 'error'
+  summary: string
+  nextAction: string
+  retryable: boolean
+  stalled: boolean
+  ageSeconds: number
+  lastUpdatedSeconds: number
 }
 
 export interface VectorCleanupTask {
@@ -100,8 +113,8 @@ export interface AuditAlert {
   message: string
   count: number
   threshold: number
-  windowStart: string
-  windowEnd: string
+  windowStart?: string | null
+  windowEnd?: string | null
 }
 
 export interface Account {
@@ -172,6 +185,26 @@ export interface OpsMetadata {
   auditActions: string[]
   auditTargetTypes: string[]
   auditStatuses: string[]
+  guardrails?: OpsGuardrails
+}
+
+export interface OpsGuardrails {
+  uploadRateLimit: {
+    enabled: boolean
+    requests: number
+    windowSeconds: number
+  }
+  ingestQueue: {
+    maxPendingJobs: number
+    maxRecoveryAttempts: number
+  }
+  audit: {
+    alertWindowMinutes: number
+    alertFailedThreshold: number
+  }
+  multipart: {
+    maxFileSizeBytes: number
+  }
 }
 
 export interface Citation {
@@ -189,6 +222,54 @@ export interface RetrievalDiagnostics {
   embeddingModel?: string
   embeddingDimension?: number
   fallbackReason?: string
+  [key: string]: unknown
+}
+
+export interface RetrievalHit {
+  chunkId: string
+  docId: string
+  fileName: string
+  content: string
+  score: number
+  metadata?: Record<string, unknown> | null
+}
+
+export interface RetrieveRequest {
+  query: string
+  topK?: number
+  useRerank?: boolean
+}
+
+export interface RetrieveResponse {
+  query: string
+  retrievalMode?: string | null
+  hits: RetrievalHit[]
+  diagnostics?: RetrievalDiagnostics | null
+}
+
+export interface RagEvalCase {
+  id: string
+  query: string
+  minHits: number
+  topK?: number
+  expectedFileName?: string
+  mustContainAny?: string[]
+}
+
+export interface RagEvalResult {
+  id: string
+  query: string
+  passed: boolean
+  failureReasons: string[]
+  hitCount: number
+  expectedFileName: string | null
+  matchedFileName: string | null
+  matchedToken: string | null
+  retrievalMode: string | null
+  fallbackReason: string | null
+  embeddingModel: string | null
+  embeddingDimension: number | null
+  topK: number | null
 }
 
 export interface ChatMessage {

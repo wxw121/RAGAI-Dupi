@@ -10,6 +10,7 @@ import {
   listAccounts,
   exportAuditLogs,
   createAccount,
+  retrieveKnowledgeBase,
   listVectorCleanupTasks,
   reindexKnowledgeBase,
   rotateAccountToken,
@@ -64,6 +65,7 @@ describe('resource API wrappers', () => {
     apiClient.apiGetText.mockResolvedValueOnce('csv-body')
     apiClient.apiPost
       .mockResolvedValueOnce({ id: 'kb2' })
+      .mockResolvedValueOnce({ query: 'q', hits: [] })
       .mockResolvedValueOnce([{ id: 'job2' }])
       .mockResolvedValueOnce({ id: 'job3' })
       .mockResolvedValueOnce({ id: 'cleanup1' })
@@ -78,6 +80,7 @@ describe('resource API wrappers', () => {
     await expect(listKnowledgeBases()).resolves.toEqual([{ id: 'kb1' }])
     await expect(getKnowledgeBase('kb1')).resolves.toEqual({ id: 'kb1' })
     await expect(createKnowledgeBase({ name: 'KB' })).resolves.toEqual({ id: 'kb2' })
+    await expect(retrieveKnowledgeBase('kb1', { query: 'q', topK: 3 })).resolves.toEqual({ query: 'q', hits: [] })
     await expect(listIngestJobs('kb1')).resolves.toEqual([{ id: 'job1' }])
     await expect(listVectorCleanupTasks()).resolves.toEqual([{ id: 'cleanup1' }])
     await expect(listAuditLogs({ tenantId: 'tenant-a', action: 'DOCUMENT_DELETE', status: 'SUCCESS', limit: 25 }))
@@ -111,18 +114,19 @@ describe('resource API wrappers', () => {
       '/api/v1/ops/audit-logs/export?tenantId=tenant-a&targetType=DOCUMENT&status=FAILED',
     )
     expect(apiClient.apiPost).toHaveBeenNthCalledWith(1, '/api/v1/knowledge-bases', { name: 'KB' })
-    expect(apiClient.apiPost).toHaveBeenNthCalledWith(2, '/api/v1/knowledge-bases/kb1/reindex')
-    expect(apiClient.apiPost).toHaveBeenNthCalledWith(3, '/api/v1/knowledge-bases/kb1/ingest-jobs/job3/retry')
-    expect(apiClient.apiPost).toHaveBeenNthCalledWith(4, '/api/v1/ops/vector-cleanup-tasks/cleanup1/retry')
-    expect(apiClient.apiPost).toHaveBeenNthCalledWith(5, '/api/v1/ops/accounts', { username: 'analyst', password: 'secret' })
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(2, '/api/v1/knowledge-bases/kb1/retrieve', { query: 'q', topK: 3 })
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(3, '/api/v1/knowledge-bases/kb1/reindex')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(4, '/api/v1/knowledge-bases/kb1/ingest-jobs/job3/retry')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(5, '/api/v1/ops/vector-cleanup-tasks/cleanup1/retry')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(6, '/api/v1/ops/accounts', { username: 'analyst', password: 'secret' })
     expect(apiClient.apiPatch).toHaveBeenCalledWith('/api/v1/ops/accounts/analyst', {
       role: 'USER',
       permissions: ['KB_READ'],
     })
-    expect(apiClient.apiPost).toHaveBeenNthCalledWith(6, '/api/v1/ops/accounts/analyst/disable')
-    expect(apiClient.apiPost).toHaveBeenNthCalledWith(7, '/api/v1/ops/accounts/analyst/enable')
-    expect(apiClient.apiPost).toHaveBeenNthCalledWith(8, '/api/v1/ops/accounts/analyst/rotate-token')
-    expect(apiClient.apiPost).toHaveBeenNthCalledWith(9, '/api/v1/ops/accounts/password-hash', { password: 'secret' })
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(7, '/api/v1/ops/accounts/analyst/disable')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(8, '/api/v1/ops/accounts/analyst/enable')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(9, '/api/v1/ops/accounts/analyst/rotate-token')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(10, '/api/v1/ops/accounts/password-hash', { password: 'secret' })
     expect(apiClient.apiDelete).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb1')
   })
 

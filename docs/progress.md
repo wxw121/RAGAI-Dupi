@@ -2,9 +2,16 @@
 
 ## 当前状态
 
-V1 MVP 全栈可运行：**Web 控制台**（`:8080`）+ API + Worker + Milvus；对话 DeepSeek、向量化智谱 `embedding-2`（1024 维）；**E2E 主流程 8/8 通过**（`scripts/e2e-main-flow.ps1`）。
+V1.1 观测与评估小版本代码已接入：**Web 控制台**（`:8080`）+ API + Worker + Milvus；对话 DeepSeek、向量化智谱 `embedding-2`（1024 维）；保留 API 级 E2E 主流程，并新增真实浏览器 E2E 门禁、摄入诊断、知识库详情 `RAG 评估`、上传治理提示与聚合运维告警。
 
 ## 最近进展
+
+### 2026-07-12（V1.1 观测与评估小版本）
+- [版本升级] — API 升至 `0.1.1-SNAPSHOT`，Web 升至 `0.1.1`。
+- [真实浏览器 E2E 门禁] — 新增 `services/web/playwright.config.ts`、`services/web/e2e/browser-gate.spec.ts` 和根脚本 `scripts/e2e-browser-gate.ps1`；门禁使用 `E2E_BASE_URL`、`E2E_ADMIN_USERNAME`、`E2E_ADMIN_PASSWORD`，从真实登录页进入并检查 Cookie/CSRF、知识库详情、`RAG 评估`、审计、账号和角色页面。
+- [摄入诊断闭环] — `IngestJobResponse` 增加 `documentFileName`、`documentStatus`、`diagnosis`；诊断由任务/文档状态、阶段、错误、重试次数和更新时间计算，标记严重级别、建议动作、是否可重试和是否停滞。文档表格展示诊断摘要和下一步动作。
+- [RAG 评估闭环] — 知识库详情新增 `RAG 评估` 标签，复用 `/retrieve` 运行内置用例并展示 pass/fail、命中数、期望/命中文件、命中 token、检索模式、fallback 原因和 embedding 维度；`scripts/rag-regression-eval.ps1` 的报告新增 `caseResults` 明细。
+- [上传治理与运维告警] — `/api/v1/ops/metadata` 返回 `guardrails`（上传限流、摄入队列、摄入补偿、审计阈值和 multipart 最大文件大小）；上传区展示支持格式与可见 guardrail；`/api/v1/ops/audit-alerts` 聚合审计失败峰值、摄入失败/死信任务和向量清理失败任务。
 
 ### 2026-07-12（账号/角色管理小版本）
 - [数据库账号与角色] — 新增 `roles`、`user_accounts` 持久化模型和 Flyway V6；`DUPI_SECURITY_USERS_*` 改为启动同步来源，登录、token 解析和账号管理优先使用数据库账号与角色。
