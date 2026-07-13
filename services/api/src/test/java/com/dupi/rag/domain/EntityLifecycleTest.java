@@ -9,12 +9,16 @@ import com.dupi.rag.domain.entity.DocumentTombstone;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.IngestOutboxEvent;
 import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.entity.RagEvalCase;
+import com.dupi.rag.domain.entity.RagEvalRun;
+import com.dupi.rag.domain.entity.RagEvalRunResult;
 import com.dupi.rag.domain.entity.Role;
 import com.dupi.rag.domain.entity.UserAccount;
 import com.dupi.rag.domain.entity.VectorCleanupTask;
 import com.dupi.rag.domain.enums.AuditLogStatus;
 import com.dupi.rag.domain.enums.ChatMessageRole;
 import com.dupi.rag.domain.enums.DocumentStatus;
+import com.dupi.rag.domain.enums.RagEvalRunStatus;
 import com.dupi.rag.domain.enums.VectorCleanupStatus;
 import com.dupi.rag.domain.enums.VectorCleanupTargetType;
 import com.dupi.rag.domain.enums.IngestOutboxStatus;
@@ -22,6 +26,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -237,6 +242,85 @@ class EntityLifecycleTest {
         assertThat(message.getSequenceNumber()).isZero();
         assertThat(message.getRole()).isEqualTo(ChatMessageRole.USER);
         assertThat(message.getCitations()).containsEntry("source", "a.md");
+    }
+
+    @Test
+    void ragEvaluationEntitiesExposeFieldsAndPopulateLifecycleValues() throws Exception {
+        UUID kbId = UUID.randomUUID();
+        RagEvalCase evalCase = RagEvalCase.builder()
+                .kbId(kbId)
+                .caseKey("case-1")
+                .query("query")
+                .minHits(2)
+                .topK(8)
+                .expectedFileName("guide.md")
+                .mustContainAny(List.of("token"))
+                .build();
+        invoke(evalCase, "onCreate");
+        Instant caseCreatedAt = evalCase.getCreatedAt();
+        invoke(evalCase, "onUpdate");
+        assertThat(evalCase.getId()).isNotNull();
+        assertThat(evalCase.getKbId()).isEqualTo(kbId);
+        assertThat(evalCase.getCaseKey()).isEqualTo("case-1");
+        assertThat(evalCase.getQuery()).isEqualTo("query");
+        assertThat(evalCase.getMinHits()).isEqualTo(2);
+        assertThat(evalCase.getTopK()).isEqualTo(8);
+        assertThat(evalCase.getExpectedFileName()).isEqualTo("guide.md");
+        assertThat(evalCase.getMustContainAny()).containsExactly("token");
+        assertThat(evalCase.getCreatedAt()).isEqualTo(caseCreatedAt);
+        assertThat(evalCase.getUpdatedAt()).isAfterOrEqualTo(caseCreatedAt);
+
+        RagEvalRun run = RagEvalRun.builder()
+                .kbId(kbId)
+                .useRerank(true)
+                .passedCount(1)
+                .totalCount(2)
+                .build();
+        invoke(run, "onCreate");
+        assertThat(run.getId()).isNotNull();
+        assertThat(run.getKbId()).isEqualTo(kbId);
+        assertThat(run.getUseRerank()).isTrue();
+        assertThat(run.getPassedCount()).isEqualTo(1);
+        assertThat(run.getTotalCount()).isEqualTo(2);
+        assertThat(run.getStatus()).isEqualTo(RagEvalRunStatus.RUNNING);
+        assertThat(run.getFailureMessage()).isNull();
+        assertThat(run.getCreatedAt()).isNotNull();
+
+        RagEvalRunResult result = RagEvalRunResult.builder()
+                .runId(run.getId())
+                .caseId(evalCase.getId())
+                .caseKey(evalCase.getCaseKey())
+                .query(evalCase.getQuery())
+                .passed(true)
+                .failureReasons(List.of("none"))
+                .hitCount(3)
+                .expectedFileName("guide.md")
+                .matchedFileName("guide.md")
+                .matchedToken("token")
+                .retrievalMode("hybrid_rerank")
+                .fallbackReason("none")
+                .embeddingModel("bge-m3")
+                .embeddingDimension(1024)
+                .topK(8)
+                .build();
+        invoke(result, "onCreate");
+        assertThat(result.getId()).isNotNull();
+        assertThat(result.getRunId()).isEqualTo(run.getId());
+        assertThat(result.getCaseId()).isEqualTo(evalCase.getId());
+        assertThat(result.getCaseKey()).isEqualTo("case-1");
+        assertThat(result.getQuery()).isEqualTo("query");
+        assertThat(result.isPassed()).isTrue();
+        assertThat(result.getFailureReasons()).containsExactly("none");
+        assertThat(result.getHitCount()).isEqualTo(3);
+        assertThat(result.getExpectedFileName()).isEqualTo("guide.md");
+        assertThat(result.getMatchedFileName()).isEqualTo("guide.md");
+        assertThat(result.getMatchedToken()).isEqualTo("token");
+        assertThat(result.getRetrievalMode()).isEqualTo("hybrid_rerank");
+        assertThat(result.getFallbackReason()).isEqualTo("none");
+        assertThat(result.getEmbeddingModel()).isEqualTo("bge-m3");
+        assertThat(result.getEmbeddingDimension()).isEqualTo(1024);
+        assertThat(result.getTopK()).isEqualTo(8);
+        assertThat(result.getCreatedAt()).isNotNull();
     }
 
     private static void invoke(Object target, String methodName) throws Exception {

@@ -4,7 +4,9 @@ import com.dupi.rag.dto.*;
 import com.dupi.rag.service.ChatService;
 import com.dupi.rag.service.ChatSessionService;
 import com.dupi.rag.service.IngestJobService;
+import com.dupi.rag.service.KnowledgeBaseExportService;
 import com.dupi.rag.service.KnowledgeBaseService;
+import com.dupi.rag.service.RagEvalService;
 import com.dupi.rag.service.RetrievalService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -26,6 +28,8 @@ public class KnowledgeBaseController {
     private final ChatService chatService;
     private final IngestJobService ingestJobService;
     private final ChatSessionService chatSessionService;
+    private final RagEvalService ragEvalService;
+    private final KnowledgeBaseExportService knowledgeBaseExportService;
 
     @PostMapping
     public KnowledgeBaseResponse create(@Valid @RequestBody CreateKnowledgeBaseRequest request) {
@@ -45,6 +49,16 @@ public class KnowledgeBaseController {
     @DeleteMapping("/{kbId}")
     public void delete(@PathVariable UUID kbId) {
         knowledgeBaseService.delete(kbId);
+    }
+
+    @GetMapping("/{kbId}/export")
+    public KnowledgeBaseExportResponse exportKnowledgeBase(@PathVariable UUID kbId) {
+        return knowledgeBaseExportService.exportKnowledgeBase(kbId);
+    }
+
+    @PostMapping("/import")
+    public KnowledgeBaseResponse importKnowledgeBase(@Valid @RequestBody KnowledgeBaseImportRequest request) {
+        return knowledgeBaseExportService.restore(request);
     }
 
     @PostMapping("/{kbId}/retrieve")
@@ -124,5 +138,45 @@ public class KnowledgeBaseController {
     @PostMapping("/{kbId}/reindex")
     public java.util.List<IngestJobResponse> reindex(@PathVariable UUID kbId) {
         return ingestJobService.reindexKnowledgeBase(kbId);
+    }
+
+    @GetMapping("/{kbId}/rag-eval/cases")
+    public java.util.List<RagEvalCaseResponse> listRagEvalCases(@PathVariable UUID kbId) {
+        return ragEvalService.listCases(kbId);
+    }
+
+    @PostMapping("/{kbId}/rag-eval/cases")
+    public RagEvalCaseResponse createRagEvalCase(
+            @PathVariable UUID kbId,
+            @Valid @RequestBody RagEvalCaseRequest request
+    ) {
+        return ragEvalService.createCase(kbId, request);
+    }
+
+    @PatchMapping("/{kbId}/rag-eval/cases/{caseId}")
+    public RagEvalCaseResponse updateRagEvalCase(
+            @PathVariable UUID kbId,
+            @PathVariable UUID caseId,
+            @Valid @RequestBody RagEvalCaseRequest request
+    ) {
+        return ragEvalService.updateCase(kbId, caseId, request);
+    }
+
+    @DeleteMapping("/{kbId}/rag-eval/cases/{caseId}")
+    public void deleteRagEvalCase(@PathVariable UUID kbId, @PathVariable UUID caseId) {
+        ragEvalService.deleteCase(kbId, caseId);
+    }
+
+    @GetMapping("/{kbId}/rag-eval/runs")
+    public java.util.List<RagEvalRunResponse> listRagEvalRuns(@PathVariable UUID kbId) {
+        return ragEvalService.listRuns(kbId);
+    }
+
+    @PostMapping("/{kbId}/rag-eval/runs")
+    public RagEvalRunResponse runRagEval(
+            @PathVariable UUID kbId,
+            @RequestBody(required = false) RagEvalRunRequest request
+    ) {
+        return ragEvalService.run(kbId, request != null && Boolean.TRUE.equals(request.getUseRerank()));
     }
 }

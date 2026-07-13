@@ -2,7 +2,7 @@
 
 ## 目的
 
-从 **Web 控制台按钮操作** 出发，用脚本自动调用同一套 HTTP 接口，验证「健康检查 → 知识库 → 上传 → 摄入 → 检索 → 问答」主链路；V1.1 额外加入真实浏览器门禁，用 Playwright 覆盖登录、Cookie/CSRF 与核心页面渲染。
+从 **Web 控制台按钮操作** 出发，用脚本自动调用同一套 HTTP 接口，验证「健康检查 → 知识库 → 上传 → 摄入 → 检索 → 问答」主链路；V1.2 的真实浏览器门禁进一步覆盖混合检索建库、持久化 RAG 用例和真实账号写操作，并拦截 Cookie/CSRF、控制台、网络和页面错误。
 
 脚本路径：[`scripts/e2e-main-flow.ps1`](../scripts/e2e-main-flow.ps1)  
 最近一次运行报告：[`scripts/e2e-last-run.json`](../scripts/e2e-last-run.json)（每次运行覆盖）
@@ -57,7 +57,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rag-regression-eval.
 
 退出码：`0` 全部通过；`1` 任一步失败（报告仍写入 `e2e-last-run.json`）。
 
-## 真实浏览器 E2E 门禁（V1.1）
+## 真实浏览器 E2E 门禁（V1.2）
 
 该门禁位于 `services/web/e2e/browser-gate.spec.ts`，通过根脚本运行：
 
@@ -68,7 +68,22 @@ $env:E2E_ADMIN_PASSWORD="<password>"
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-browser-gate.ps1
 ```
 
-门禁会启动干净浏览器上下文，真实输入用户名和密码登录，检查知识库创建、详情页文档/问答/`RAG 评估` 标签，以及审计、账号、角色页面。脚本会监听页面异常、应用控制台错误和关键请求失败。缺少 `E2E_ADMIN_USERNAME` 或 `E2E_ADMIN_PASSWORD` 时会直接退出并提示缺少凭据；这属于前置条件失败，不代表产品流程通过。
+门禁会启动干净 Chromium 上下文并执行以下真实 UI 路径：
+
+1. 输入管理员用户名/密码登录，不使用本地开放模式。
+2. 选择 `HYBRID` 创建知识库，进入文档、问答和 `RAG 评估` 页签。
+3. 新建持久化 RAG 评估用例并确认列表回显。
+4. 打开审计页；在账号页创建临时账号，确认没有 `CSRF token required`，随后禁用该账号；最后打开角色页。
+5. 每个阶段检查页面异常、控制台 error、关键 API 4xx/5xx、请求失败和错误 Toast。
+
+缺少 `E2E_ADMIN_USERNAME` 或 `E2E_ADMIN_PASSWORD` 时会直接退出并提示缺少凭据；这属于前置条件失败，不代表产品流程通过。门禁会保留已禁用的随机临时账号作为审计证据，定期测试环境可按 `e2e_account_*` 清理。
+
+### 最近一次浏览器门禁（2026-07-13）
+
+- URL：`http://localhost:8080`
+- 浏览器：Playwright Chromium / Desktop Chrome 配置
+- 结果：`1 passed (3.6s)`，核心测试流程耗时 `2.7s`
+- 检查结果：登录、混合检索建库、知识库三个页签、RAG 用例保存、审计、账号创建/禁用、角色页均通过；未捕获控制台、页面、请求、Toast 或 CSRF 错误。
 
 ## 最近一次运行结果（2026-06-19）
 

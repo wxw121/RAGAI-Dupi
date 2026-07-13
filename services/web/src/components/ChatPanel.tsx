@@ -7,7 +7,7 @@ import {
   listChatSessions,
   renameChatSession,
 } from '@/api/chatSessions'
-import type { ChatMessage, ChatSession, Citation, RetrievalDiagnostics } from '@/types'
+import type { ChatMessage, ChatSession, Citation, RetrievalDiagnostics, StructuredChatError } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/components/Toast'
@@ -16,6 +16,7 @@ import { cn } from '@/lib/utils'
 import { MarkdownContent } from '@/components/MarkdownContent'
 import { ChatHistorySidebar } from '@/components/ChatHistorySidebar'
 import { ChatHistoryDrawer } from '@/components/ChatHistoryDrawer'
+import { ChatErrorNotice } from '@/components/ChatErrorNotice'
 
 interface ChatPanelProps {
   kbId: string
@@ -316,14 +317,14 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
             )
             setStreaming(false)
           },
-          onError: (msg) => {
+          onError: (msg, structuredError?: StructuredChatError) => {
             if (!isCurrentStream()) return
             const formatted = formatChatError(msg)
             showError(formatted)
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantId
-                  ? { ...m, content: m.content || `错误：${formatted}`, streaming: false }
+                  ? { ...m, content: m.content || `错误：${formatted}`, error: structuredError, streaming: false }
                   : m,
               ),
             )
@@ -429,9 +430,13 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
                       {msg.role === 'user' ? (
                         <p className="whitespace-pre-wrap">{msg.content}</p>
                       ) : (
-                        <div className="rounded-none bg-transparent">
-                          <MarkdownContent content={msg.content} />
-                        </div>
+                        msg.error ? (
+                          <ChatErrorNotice error={msg.error} />
+                        ) : (
+                          <div className="rounded-none bg-transparent">
+                            <MarkdownContent content={msg.content} />
+                          </div>
+                        )
                       )}
                       {msg.streaming && (
                         <Loader2 className="mt-2 h-4 w-4 animate-spin opacity-60" />

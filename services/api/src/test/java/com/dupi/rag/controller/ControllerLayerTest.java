@@ -100,7 +100,8 @@ class ControllerLayerTest {
     void documentControllerDelegatesAllRoutesAndValidatesIngestJobOwnership() {
         DocumentService documentService = mock(DocumentService.class);
         IngestJobService ingestJobService = mock(IngestJobService.class);
-        DocumentController controller = new DocumentController(documentService, ingestJobService);
+        DocumentIndexInspectionService documentIndexInspectionService = mock(DocumentIndexInspectionService.class);
+        DocumentController controller = new DocumentController(documentService, ingestJobService, documentIndexInspectionService);
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         MockMultipartFile file = new MockMultipartFile("file", "a.txt", "text/plain", "x".getBytes());
@@ -118,11 +119,16 @@ class ControllerLayerTest {
                         .build()))
                 .build();
         IngestJobResponse jobResponse = IngestJobResponse.builder().docId(docId).build();
+        DocumentIndexDetailResponse detailResponse = DocumentIndexDetailResponse.builder()
+                .document(docResponse)
+                .objectKey("key")
+                .build();
         when(documentService.upload(kbId, file)).thenReturn(docResponse);
         when(documentService.uploadBatch(kbId, List.of(batchFile))).thenReturn(batchUploadResponse);
         when(documentService.listByKb(kbId)).thenReturn(List.of(docResponse));
         when(documentService.get(kbId, docId)).thenReturn(docResponse);
         when(ingestJobService.getLatestByDoc(docId)).thenReturn(jobResponse);
+        when(documentIndexInspectionService.inspect(kbId, docId)).thenReturn(detailResponse);
 
         assertThat(controller.upload(kbId, file)).isSameAs(docResponse);
         assertThat(controller.uploadBatch(kbId, List.of(batchFile))).isSameAs(batchUploadResponse);
@@ -130,6 +136,7 @@ class ControllerLayerTest {
         assertThat(controller.get(kbId, docId)).isSameAs(docResponse);
         controller.delete(kbId, docId);
         assertThat(controller.getIngestJob(kbId, docId)).isSameAs(jobResponse);
+        assertThat(controller.getIndexDetail(kbId, docId)).isSameAs(detailResponse);
 
         verify(documentService).findOrThrow(kbId, docId);
         verify(documentService).delete(kbId, docId);
@@ -156,8 +163,10 @@ class ControllerLayerTest {
         ChatService chatService = mock(ChatService.class);
         IngestJobService ingestJobService = mock(IngestJobService.class);
         ChatSessionService chatSessionService = mock(ChatSessionService.class);
+        RagEvalService ragEvalService = mock(RagEvalService.class);
+        KnowledgeBaseExportService knowledgeBaseExportService = mock(KnowledgeBaseExportService.class);
         KnowledgeBaseController controller = new KnowledgeBaseController(kbService, retrievalService, chatService,
-                ingestJobService, chatSessionService);
+                ingestJobService, chatSessionService, ragEvalService, knowledgeBaseExportService);
         UUID kbId = UUID.randomUUID();
         UUID sessionId = UUID.randomUUID();
         UUID secondSessionId = UUID.randomUUID();
@@ -179,6 +188,33 @@ class ControllerLayerTest {
         RetrieveResponse retrieveResponse = RetrieveResponse.builder().query("q").hits(List.of()).build();
         IngestJobResponse jobResponse = IngestJobResponse.builder().kbId(kbId).build();
         IngestJobResponse retryResponse = IngestJobResponse.builder().id(UUID.randomUUID()).kbId(kbId).build();
+        RagEvalRunResponse ragEvalRun = RagEvalRunResponse.builder()
+                .id(UUID.randomUUID())
+                .kbId(kbId)
+                .passedCount(0)
+                .totalCount(0)
+                .results(List.of())
+                .build();
+        RagEvalCaseResponse ragEvalCase = RagEvalCaseResponse.builder()
+                .id(UUID.randomUUID())
+                .kbId(kbId)
+                .caseKey("case")
+                .query("q")
+                .build();
+        KnowledgeBaseExportResponse exportResponse = KnowledgeBaseExportResponse.builder()
+                .knowledgeBase(KnowledgeBaseExportResponse.KnowledgeBaseSnapshot.builder()
+                        .originalId(kbId)
+                        .name("KB")
+                        .build())
+                .documents(List.of())
+                .chunks(List.of())
+                .evalCases(List.of())
+                .build();
+        KnowledgeBaseImportRequest importRequest = new KnowledgeBaseImportRequest();
+        KnowledgeBaseImportRequest.KnowledgeBaseSnapshot importSnapshot =
+                new KnowledgeBaseImportRequest.KnowledgeBaseSnapshot();
+        importSnapshot.setName("KB");
+        importRequest.setKnowledgeBase(importSnapshot);
         ChatSessionResponse sessionResponse = ChatSessionResponse.builder().id(sessionId).kbId(kbId).title("Session").build();
         ChatSessionDetailResponse sessionDetail = ChatSessionDetailResponse.builder()
                 .session(sessionResponse)
@@ -197,6 +233,13 @@ class ControllerLayerTest {
         when(chatSessionService.getDetail(kbId, sessionId)).thenReturn(sessionDetail);
         when(chatSessionService.rename(kbId, sessionId, renameSession)).thenReturn(sessionResponse);
         when(ingestJobService.reindexKnowledgeBase(kbId)).thenReturn(List.of(jobResponse));
+        when(ragEvalService.listCases(kbId)).thenReturn(List.of(ragEvalCase));
+        when(ragEvalService.createCase(eq(kbId), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
+        when(ragEvalService.updateCase(eq(kbId), eq(ragEvalCase.getId()), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
+        when(ragEvalService.listRuns(kbId)).thenReturn(List.of(ragEvalRun));
+        when(ragEvalService.run(eq(kbId), eq(true))).thenReturn(ragEvalRun);
+        when(knowledgeBaseExportService.exportKnowledgeBase(kbId)).thenReturn(exportResponse);
+        when(knowledgeBaseExportService.restore(importRequest)).thenReturn(kbResponse);
 
         assertThat(controller.create(create)).isSameAs(kbResponse);
         assertThat(controller.list()).containsExactly(kbResponse);
@@ -210,18 +253,32 @@ class ControllerLayerTest {
         assertThat(controller.listJobs(kbId)).containsExactly(jobResponse);
         assertThat(controller.retryJob(kbId, retryResponse.getId())).isSameAs(retryResponse);
         assertThat(controller.reindex(kbId)).containsExactly(jobResponse);
+        assertThat(controller.exportKnowledgeBase(kbId)).isSameAs(exportResponse);
+        assertThat(controller.importKnowledgeBase(importRequest)).isSameAs(kbResponse);
         assertThat(controller.listChatSessions(kbId)).containsExactly(sessionResponse);
         assertThat(controller.createChatSession(kbId, createSession)).isSameAs(sessionResponse);
         assertThat(controller.getChatSession(kbId, sessionId)).isSameAs(sessionDetail);
         assertThat(controller.renameChatSession(kbId, sessionId, renameSession)).isSameAs(sessionResponse);
         controller.deleteChatSession(kbId, sessionId);
         controller.batchDeleteChatSessions(kbId, batchDeleteSessions);
+        RagEvalCaseRequest ragEvalRequest = new RagEvalCaseRequest();
+        ragEvalRequest.setCaseKey("case");
+        ragEvalRequest.setQuery("q");
+        assertThat(controller.listRagEvalCases(kbId)).containsExactly(ragEvalCase);
+        assertThat(controller.createRagEvalCase(kbId, ragEvalRequest)).isSameAs(ragEvalCase);
+        assertThat(controller.updateRagEvalCase(kbId, ragEvalCase.getId(), ragEvalRequest)).isSameAs(ragEvalCase);
+        controller.deleteRagEvalCase(kbId, ragEvalCase.getId());
+        assertThat(controller.listRagEvalRuns(kbId)).containsExactly(ragEvalRun);
+        RagEvalRunRequest ragEvalRunRequest = new RagEvalRunRequest();
+        ragEvalRunRequest.setUseRerank(true);
+        assertThat(controller.runRagEval(kbId, ragEvalRunRequest)).isSameAs(ragEvalRun);
 
         verify(kbService).delete(kbId);
         verify(chatService).cancel("s1");
         verify(chatService, never()).cancel(null);
         verify(chatSessionService).delete(kbId, sessionId);
         verify(chatSessionService).batchDelete(kbId, List.of(sessionId, secondSessionId));
+        verify(ragEvalService).deleteCase(kbId, ragEvalCase.getId());
     }
 
     @Test
@@ -243,6 +300,7 @@ class ControllerLayerTest {
         auditProperties.setAlertFailedThreshold(7);
         MultipartProperties multipartProperties = new MultipartProperties();
         multipartProperties.setMaxFileSize(DataSize.ofMegabytes(32));
+        OpsNotificationService opsNotificationService = mock(OpsNotificationService.class);
         OpsController controller = new OpsController(
                 service,
                 auditLogService,
@@ -252,7 +310,8 @@ class ControllerLayerTest {
                 uploadRateLimitProperties,
                 redisQueueProperties,
                 auditProperties,
-                multipartProperties
+                multipartProperties,
+                opsNotificationService
         );
         UUID taskId = UUID.randomUUID();
         VectorCleanupTaskResponse response = VectorCleanupTaskResponse.builder()
@@ -336,6 +395,13 @@ class ControllerLayerTest {
         when(roleService.create(any(RoleRequest.class))).thenReturn(role);
         when(roleService.update(eq(role.getId()), any(RoleRequest.class))).thenReturn(role);
         when(roleService.disable(role.getId())).thenReturn(role);
+        OpsNotificationResponse notification = OpsNotificationResponse.builder()
+                .configured(true)
+                .delivered(true)
+                .alertCount(3)
+                .statusCode(202)
+                .build();
+        when(opsNotificationService.notifyAlerts(any())).thenReturn(notification);
 
         assertThat(controller.listVectorCleanupTasks()).containsExactly(response);
         assertThat(controller.retryVectorCleanupTask(taskId)).isSameAs(response);
@@ -345,6 +411,7 @@ class ControllerLayerTest {
                 .contains("createdAt,tenantId");
         assertThat(controller.listAuditAlerts()).extracting(AuditAlertResponse::getCode)
                 .containsExactly("AUDIT_FAILED_SPIKE", "INGEST_FAILURES_OPEN", "VECTOR_CLEANUP_FAILURES_OPEN");
+        assertThat(controller.notifyAuditAlerts()).isSameAs(notification);
         assertThat(controller.listAccounts()).extracting(AccountResponse::getUsername)
                 .containsExactly("admin");
         assertThat(controller.createAccount(accountRequest)).isSameAs(analyst);
@@ -357,7 +424,7 @@ class ControllerLayerTest {
         assertThat(controller.resetAccountPassword("analyst", passwordResetRequest)).isSameAs(analyst);
         assertThat(controller.generatePasswordHash(Map.of("password", "secret"))).containsEntry("passwordHash", "pbkdf2$hash");
         OpsMetadataResponse metadata = controller.metadata();
-        assertThat(metadata.getPermissions()).contains("KB_READ", "ACCOUNT_PASSWORD_RESET");
+        assertThat(metadata.getPermissions()).contains("KB_READ", "ACCOUNT_PASSWORD_RESET", "OPS_ALERT_NOTIFY");
         assertThat(metadata.getGuardrails().getUploadRateLimit().isEnabled()).isTrue();
         assertThat(metadata.getGuardrails().getUploadRateLimit().getRequests()).isEqualTo(11);
         assertThat(metadata.getGuardrails().getUploadRateLimit().getWindowSeconds()).isEqualTo(45);
@@ -377,6 +444,18 @@ class ControllerLayerTest {
                     assertThat(detail.getAllows()).contains("重置其他账号密码");
                     assertThat(detail.getDenies()).contains("创建、禁用或编辑账号基础信息");
                 });
+        assertThat(metadata.getPermissionDetails())
+                .filteredOn(detail -> "KB_READ".equals(detail.getCode()))
+                .singleElement()
+                .satisfies(detail -> assertThat(detail.getAllows()).contains("查看 RAG 评估用例和历史", "导出知识库快照"));
+        assertThat(metadata.getPermissionDetails())
+                .filteredOn(detail -> "KB_WRITE".equals(detail.getCode()))
+                .singleElement()
+                .satisfies(detail -> assertThat(detail.getAllows()).contains("导入知识库快照", "管理 RAG 评估用例"));
+        assertThat(metadata.getPermissionDetails())
+                .filteredOn(detail -> "MAINTENANCE".equals(detail.getCode()))
+                .singleElement()
+                .satisfies(detail -> assertThat(detail.getAllows()).contains("运行 RAG 评估"));
         assertThat(controller.listRoles()).containsExactly(role);
         RoleRequest roleRequest = new RoleRequest();
         roleRequest.setCode("ANALYST");
@@ -385,9 +464,11 @@ class ControllerLayerTest {
         assertThat(controller.disableRole(role.getId())).isSameAs(role);
         verify(auditLogService).list(any(AuditLogQuery.class));
         verify(auditLogService).exportCsv(any(AuditLogQuery.class));
-        verify(auditLogService).summarizeAlerts();
-        verify(ingestJobService).summarizeAlerts();
-        verify(service).summarizeAlerts();
+        verify(auditLogService, times(2)).summarizeAlerts();
+        verify(ingestJobService, times(2)).summarizeAlerts();
+        verify(service, times(2)).summarizeAlerts();
+        verify(opsNotificationService).notifyAlerts(any());
+        verify(auditLogService).recordSuccess(eq("AUDIT_ALERT_NOTIFY"), eq("AUDIT_ALERT"), isNull(), anyString());
         verify(accountService).listUsers();
         verify(accountService).create(accountRequest);
         verify(accountService).update("analyst", accountRequest);

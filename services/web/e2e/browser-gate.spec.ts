@@ -12,6 +12,8 @@ test.beforeAll(() => {
 test('real login and core authenticated UI flows work without browser errors', async ({ page }) => {
   const gate = installBrowserErrorGate(page)
   const kbName = `e2e-browser-${Date.now()}`
+  const accountName = `e2e_account_${Date.now()}`
+  const accountPassword = `E2e-${Date.now()}-Aa1!`
 
   await page.goto('/')
   await page.locator('input').nth(0).fill(username!)
@@ -22,6 +24,10 @@ test('real login and core authenticated UI flows work without browser errors', a
 
   await page.getByRole('button', { name: /新建知识库/ }).first().click()
   await page.locator('input').nth(0).fill(kbName)
+  const retrievalMode = page.locator('select[name="retrievalMode"]')
+  await expect(retrievalMode).toBeVisible()
+  await retrievalMode.selectOption('HYBRID')
+  await expect(retrievalMode).toHaveValue('HYBRID')
   await page.getByRole('button', { name: /^创建$/ }).click()
   await expect(page.getByText(kbName)).toBeVisible()
   await gate.expectClean('create knowledge base')
@@ -38,6 +44,10 @@ test('real login and core authenticated UI flows work without browser errors', a
 
   await page.getByRole('button', { name: /RAG 评估/ }).click()
   await expect(page.getByRole('button', { name: /运行评估/ })).toBeVisible()
+  await page.getByLabel('用例标识').fill('browser-smoke')
+  await page.getByLabel('检索问题').fill('browser smoke query')
+  await page.getByRole('button', { name: /保存用例/ }).click()
+  await expect(page.getByText('browser-smoke', { exact: true })).toBeVisible()
   await gate.expectClean('knowledge base rag eval tab')
 
   await page.goto('/ops/audit-logs')
@@ -46,7 +56,18 @@ test('real login and core authenticated UI flows work without browser errors', a
 
   await page.goto('/ops/accounts')
   await expect(page.getByRole('heading', { name: /账号管理|账户管理/ })).toBeVisible()
-  await gate.expectClean('ops accounts page')
+  await page.getByRole('button', { name: /新建账号/ }).click()
+  await page.getByLabel('账号名').fill(accountName)
+  await page.getByLabel('初始密码').fill(accountPassword)
+  await page.getByRole('button', { name: /^保存$/ }).click()
+  const accountRow = page.locator('tr').filter({ hasText: accountName })
+  await expect(accountRow).toBeVisible()
+  await expect(page.locator('body')).not.toContainText(/CSRF token required/i)
+  await gate.expectClean('ops account create with CSRF')
+
+  await accountRow.getByRole('button', { name: /^禁用$/ }).click()
+  await expect(accountRow).toContainText('已禁用')
+  await gate.expectClean('disable browser gate account')
 
   await page.goto('/ops/roles')
   await expect(page.getByRole('heading', { name: /角色管理/ })).toBeVisible()
@@ -67,7 +88,9 @@ function installBrowserErrorGate(page: Page) {
     pageErrors.push(error.message)
   })
   page.on('requestfailed', (request) => {
-    failedRequests.push(`${request.method()} ${request.url()} ${request.failure()?.errorText ?? ''}`.trim())
+    const errorText = request.failure()?.errorText ?? ''
+    if (request.method() === 'GET' && errorText.includes('net::ERR_ABORTED')) return
+    failedRequests.push(`${request.method()} ${request.url()} ${errorText}`.trim())
   })
   page.on('response', (response) => {
     const url = response.url()
@@ -79,7 +102,7 @@ function installBrowserErrorGate(page: Page) {
   return {
     async expectClean(stage: string) {
       const toastText = (await page.locator('.fixed.bottom-4').textContent().catch(() => '')) ?? ''
-      const visibleError = /失败|错误|HTTP 5\d{2}|Unauthorized|Forbidden/i.test(toastText)
+      const visibleError = /失败|错误|CSRF token required|HTTP 5\d{2}|Unauthorized|Forbidden/i.test(toastText)
         ? [`toast: ${toastText}`]
         : []
       const errors = [...pageErrors, ...consoleErrors, ...failedRequests, ...visibleError]

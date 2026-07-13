@@ -22,6 +22,7 @@ export interface CreateKnowledgeBaseRequest {
   chunkSize?: number
   chunkOverlap?: number
   topK?: number
+  retrievalMode?: 'VECTOR' | 'HYBRID'
 }
 
 export interface Document {
@@ -249,6 +250,19 @@ export interface RetrieveResponse {
 
 export interface RagEvalCase {
   id: string
+  kbId?: string
+  caseKey?: string
+  query: string
+  minHits: number
+  topK?: number
+  expectedFileName?: string
+  mustContainAny?: string[]
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface RagEvalCaseRequest {
+  caseKey: string
   query: string
   minHits: number
   topK?: number
@@ -258,6 +272,8 @@ export interface RagEvalCase {
 
 export interface RagEvalResult {
   id: string
+  caseId?: string | null
+  caseKey?: string
   query: string
   passed: boolean
   failureReasons: string[]
@@ -272,11 +288,134 @@ export interface RagEvalResult {
   topK: number | null
 }
 
+export interface RagEvalRun {
+  id: string
+  kbId: string
+  useRerank: boolean
+  passedCount: number
+  totalCount: number
+  status: 'RUNNING' | 'COMPLETED' | 'FAILED'
+  failureMessage: string | null
+  createdAt: string
+  results: RagEvalResult[]
+}
+
+export interface RagEvalRunRequest {
+  useRerank?: boolean
+}
+
+export interface DocumentIndexDetail {
+  document: Document
+  latestJob: IngestJob | null
+  objectKey: string
+  objectAvailable: boolean
+  indexReady: boolean
+  chunkCount: number
+  chunks: Array<{
+    id: string
+    chunkIndex: number
+    contentPreview: string
+    tokenCount: number
+    metadata: Record<string, unknown>
+    milvusId: string | null
+  }>
+}
+
+export interface KnowledgeBaseSnapshot {
+  originalId: string
+  tenantId: string
+  name: string
+  description: string | null
+  chunkSize: number
+  chunkOverlap: number
+  topK: number
+  embeddingModel: string
+  embeddingDimension: number
+  chunkStrategy: 'RECURSIVE' | 'SEMANTIC' | 'MARKDOWN'
+  retrievalMode: 'VECTOR' | 'HYBRID'
+}
+
+export interface DocumentSnapshot {
+  originalId: string
+  fileName: string
+  objectKey: string
+  mimeType: string
+  fileSize: number
+  status: Document['status']
+  errorMessage: string | null
+}
+
+export interface ChunkSnapshot {
+  originalId: string
+  originalDocId: string
+  chunkIndex: number
+  content: string
+  tokenCount: number
+  metadata: Record<string, unknown>
+  milvusId: string | null
+}
+
+export interface RagEvalCaseSnapshot {
+  id: string
+  kbId: string
+  caseKey: string
+  query: string
+  minHits: number
+  topK: number
+  expectedFileName: string | null
+  mustContainAny: string[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface KnowledgeBaseExport {
+  schemaVersion: 1
+  knowledgeBase: KnowledgeBaseSnapshot
+  documents: DocumentSnapshot[]
+  chunks: ChunkSnapshot[]
+  evalCases: RagEvalCaseSnapshot[]
+  exportedAt?: string
+}
+
+export interface KnowledgeBaseImport {
+  schemaVersion?: 1
+  knowledgeBase: {
+    name: string
+    description?: string | null
+    chunkSize?: number
+    chunkOverlap?: number
+    topK?: number
+    embeddingModel?: string
+    embeddingDimension?: number
+    chunkStrategy?: KnowledgeBaseSnapshot['chunkStrategy']
+    retrievalMode?: KnowledgeBaseSnapshot['retrievalMode']
+  }
+  evalCases?: RagEvalCaseRequest[]
+}
+
+export interface OpsNotification {
+  configured: boolean
+  delivered: boolean
+  alertCount: number
+  statusCode?: number | null
+  message?: string | null
+}
+
+export interface StructuredChatError {
+  error: string
+  message: string
+  stage?: string
+  suggestion?: string
+  requestId?: string
+  timestamp?: string
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
   content: string
   citations?: Citation[]
+  error?: StructuredChatError
   streaming?: boolean
 }
 
@@ -306,5 +445,8 @@ export interface ChatSessionDetail {
 export interface ApiError {
   error: string
   message: string
+  stage?: string
+  suggestion?: string
+  requestId?: string
   timestamp?: string
 }

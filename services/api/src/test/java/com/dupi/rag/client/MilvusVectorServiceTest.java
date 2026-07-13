@@ -16,9 +16,11 @@ import io.milvus.param.R;
 import io.milvus.param.collection.CreateCollectionParam;
 import io.milvus.param.collection.GetLoadingProgressParam;
 import io.milvus.param.collection.GetLoadStateParam;
+import io.milvus.param.collection.LoadCollectionParam;
 import io.milvus.param.dml.DeleteParam;
 import io.milvus.param.dml.SearchParam;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.UUID;
@@ -31,7 +33,7 @@ import static org.mockito.Mockito.*;
 class MilvusVectorServiceTest {
 
     @Test
-    void ensureCollectionLoadsExistingCollection() {
+    void ensureCollectionLoadsExistingCollectionAsynchronously() {
         MilvusServiceClient client = mock(MilvusServiceClient.class);
         when(client.hasCollection(any())).thenReturn(R.success(true));
         when(client.describeCollection(any())).thenReturn(R.success(describeCollection(1536)));
@@ -40,7 +42,9 @@ class MilvusVectorServiceTest {
 
         verify(client, never()).createCollection(any(CreateCollectionParam.class));
         verify(client, never()).createIndex(any());
-        verify(client).loadCollection(any());
+        ArgumentCaptor<LoadCollectionParam> load = ArgumentCaptor.forClass(LoadCollectionParam.class);
+        verify(client).loadCollection(load.capture());
+        assertThat(load.getValue().isSyncLoad()).isFalse();
     }
 
     @Test

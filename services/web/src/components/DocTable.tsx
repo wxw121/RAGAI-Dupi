@@ -2,17 +2,25 @@ import type { Document, IngestDiagnosis, IngestJob } from '@/types'
 import { formatBytes, formatDate } from '@/lib/utils'
 import { Badge, statusBadgeVariant } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
-import { Loader2, Trash2 } from 'lucide-react'
+import { Eye, Loader2, Trash2 } from 'lucide-react'
 
 interface DocTableProps {
   documents: Document[]
   jobStages: Record<string, string | null>
   ingestJobs?: IngestJob[]
+  onInspect?: (doc: Document) => void
   onDelete?: (doc: Document) => void
   deletingId?: string | null
 }
 
-export function DocTable({ documents, jobStages, ingestJobs = [], onDelete, deletingId }: DocTableProps) {
+export function DocTable({
+  documents,
+  jobStages,
+  ingestJobs = [],
+  onInspect,
+  onDelete,
+  deletingId,
+}: DocTableProps) {
   const jobsByDocId = new Map(ingestJobs.map((job) => [job.docId, job]))
 
   if (documents.length === 0) {
@@ -33,7 +41,7 @@ export function DocTable({ documents, jobStages, ingestJobs = [], onDelete, dele
             <th className="px-5 py-3 text-left font-medium">状态</th>
             <th className="px-5 py-3 text-left font-medium">阶段</th>
             <th className="px-5 py-3 text-left font-medium">上传时间</th>
-            {onDelete && <th className="px-5 py-3 text-right font-medium">操作</th>}
+            {(onInspect || onDelete) && <th className="px-5 py-3 text-right font-medium">操作</th>}
           </tr>
         </thead>
         <tbody>
@@ -51,24 +59,39 @@ export function DocTable({ documents, jobStages, ingestJobs = [], onDelete, dele
                   <Badge variant={statusBadgeVariant(doc.status)}>{doc.status}</Badge>
                 </td>
                 <td className="px-5 py-3 text-muted-foreground">
-                  {job?.stage ?? jobStages[doc.id] ?? '—'}
+                  {job?.stage ?? jobStages[doc.id] ?? '-'}
                 </td>
                 <td className="px-5 py-3 text-muted-foreground">{formatDate(doc.createdAt)}</td>
-                {onDelete && (
+                {(onInspect || onDelete) && (
                   <td className="px-5 py-3 text-right">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={deletingId === doc.id}
-                      onClick={() => onDelete(doc)}
-                      aria-label={`删除 ${doc.fileName}`}
-                    >
-                      {deletingId === doc.id ? (
-                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                      ) : (
-                        <Trash2 className="h-4 w-4 text-destructive" />
+                    <div className="inline-flex items-center justify-end gap-1">
+                      {onInspect && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => onInspect(doc)}
+                          aria-label={`Inspect ${doc.fileName}`}
+                          title="Inspect index detail"
+                        >
+                          <Eye className="h-4 w-4 text-muted-foreground" />
+                        </Button>
                       )}
-                    </Button>
+                      {onDelete && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={deletingId === doc.id}
+                          onClick={() => onDelete(doc)}
+                          aria-label={`删除 ${doc.fileName}`}
+                        >
+                          {deletingId === doc.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                          ) : (
+                            <Trash2 className="h-4 w-4 text-destructive" />
+                          )}
+                        </Button>
+                      )}
+                    </div>
                   </td>
                 )}
               </tr>

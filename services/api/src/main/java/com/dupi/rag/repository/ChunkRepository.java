@@ -9,7 +9,13 @@ import java.util.UUID;
 public interface ChunkRepository extends JpaRepository<Chunk, UUID> {
     List<Chunk> findByDocIdOrderByChunkIndexAsc(UUID docId);
 
+    List<Chunk> findTop20ByDocIdOrderByChunkIndexAsc(UUID docId);
+
+    long countByDocId(UUID docId);
+
     List<Chunk> findByKbIdOrderByChunkIndexAsc(UUID kbId);
+
+    List<Chunk> findTop10001ByKbIdOrderByChunkIndexAsc(UUID kbId);
 
     void deleteByDocId(UUID docId);
 

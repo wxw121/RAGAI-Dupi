@@ -11,6 +11,7 @@ import com.dupi.rag.dto.AuditLogQuery;
 import com.dupi.rag.dto.AuditLogResponse;
 import com.dupi.rag.dto.OpsGuardrailsResponse;
 import com.dupi.rag.dto.OpsMetadataResponse;
+import com.dupi.rag.dto.OpsNotificationResponse;
 import com.dupi.rag.dto.PasswordResetRequest;
 import com.dupi.rag.dto.RoleRequest;
 import com.dupi.rag.dto.RoleResponse;
@@ -19,6 +20,7 @@ import jakarta.validation.Valid;
 import com.dupi.rag.service.AccountService;
 import com.dupi.rag.service.AuditLogService;
 import com.dupi.rag.service.IngestJobService;
+import com.dupi.rag.service.OpsNotificationService;
 import com.dupi.rag.service.RoleService;
 import com.dupi.rag.service.VectorCleanupTaskService;
 import lombok.RequiredArgsConstructor;
@@ -50,6 +52,7 @@ public class OpsController {
     private final RedisQueueProperties redisQueueProperties;
     private final AuditProperties auditProperties;
     private final MultipartProperties multipartProperties;
+    private final OpsNotificationService opsNotificationService;
 
     @GetMapping("/vector-cleanup-tasks")
     public List<VectorCleanupTaskResponse> listVectorCleanupTasks() {
@@ -97,6 +100,27 @@ public class OpsController {
         return alerts;
     }
 
+    @PostMapping("/audit-alerts/notify")
+    public OpsNotificationResponse notifyAuditAlerts() {
+        OpsNotificationResponse response = opsNotificationService.notifyAlerts(listAuditAlerts());
+        if (response.isDelivered()) {
+            auditLogService.recordSuccess(
+                    "AUDIT_ALERT_NOTIFY",
+                    "AUDIT_ALERT",
+                    null,
+                    "Delivered " + response.getAlertCount() + " alerts to the configured webhook"
+            );
+        } else {
+            auditLogService.recordFailure(
+                    "AUDIT_ALERT_NOTIFY",
+                    "AUDIT_ALERT",
+                    null,
+                    new IllegalStateException(response.getMessage() == null ? "webhook delivery failed" : response.getMessage())
+            );
+        }
+        return response;
+    }
+
     @GetMapping("/accounts")
     public List<AccountResponse> listAccounts() {
         return accountService.listUsers();
@@ -121,9 +145,10 @@ public class OpsController {
                         "KNOWLEDGE_BASE_DELETE",
                         "REINDEX",
                         "INGEST_RETRY",
-                        "VECTOR_CLEANUP_RETRY"
+                        "VECTOR_CLEANUP_RETRY",
+                        "AUDIT_ALERT_NOTIFY"
                 ))
-                .auditTargetTypes(List.of("ACCOUNT", "ROLE", "DOCUMENT", "KNOWLEDGE_BASE", "INGEST_JOB", "VECTOR_CLEANUP_TASK", "CHAT_SESSION"))
+                .auditTargetTypes(List.of("ACCOUNT", "ROLE", "DOCUMENT", "KNOWLEDGE_BASE", "INGEST_JOB", "VECTOR_CLEANUP_TASK", "CHAT_SESSION", "AUDIT_ALERT"))
                 .auditStatuses(List.of("SUCCESS", "FAILED"))
                 .guardrails(guardrails())
                 .build();

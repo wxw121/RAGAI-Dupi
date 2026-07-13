@@ -9,11 +9,19 @@ import {
   retryIngestJob,
   retryVectorCleanupTask,
 } from '@/api/knowledgeBase'
-import { deleteDocument, getIngestJob, listDocuments, uploadDocuments } from '@/api/documents'
-import type { Document, IngestJob, KnowledgeBase, OpsGuardrails, VectorCleanupTask } from '@/types'
+import { deleteDocument, getDocumentIndexDetail, getIngestJob, listDocuments, uploadDocuments } from '@/api/documents'
+import type {
+  Document,
+  DocumentIndexDetail,
+  IngestJob,
+  KnowledgeBase,
+  OpsGuardrails,
+  VectorCleanupTask,
+} from '@/types'
 import { AppLayout } from '@/components/AppLayout'
 import { ChatPanel } from '@/components/ChatPanel'
 import { DocTable } from '@/components/DocTable'
+import { DocumentIndexDetailPanel } from '@/components/DocumentIndexDetailPanel'
 import { RagEvalPanel } from '@/components/RagEvalPanel'
 import { UploadZone } from '@/components/UploadZone'
 import { useToast } from '@/components/Toast'
@@ -51,6 +59,8 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const [reindexing, setReindexing] = useState(false)
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
   const [retryingCleanupTaskId, setRetryingCleanupTaskId] = useState<string | null>(null)
+  const [indexDetail, setIndexDetail] = useState<DocumentIndexDetail | null>(null)
+  const [indexDetailLoadingId, setIndexDetailLoadingId] = useState<string | null>(null)
   const { showError, showSuccess } = useToast()
 
   const completedCount = documents.filter((d) => d.status === 'COMPLETED').length
@@ -217,6 +227,18 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       showError(e instanceof Error ? e.message : '删除失败')
     } finally {
       setDeletingId(null)
+    }
+  }
+
+  const handleInspectDocument = async (doc: Document) => {
+    if (!kbId) return
+    setIndexDetailLoadingId(doc.id)
+    try {
+      setIndexDetail(await getDocumentIndexDetail(kbId, doc.id))
+    } catch (e) {
+      showError(e instanceof Error ? e.message : '加载索引详情失败')
+    } finally {
+      setIndexDetailLoadingId(null)
     }
   }
 
@@ -486,9 +508,17 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
             documents={documents}
             jobStages={jobStages}
             ingestJobs={ingestJobs}
+            onInspect={handleInspectDocument}
             onDelete={handleDelete}
             deletingId={deletingId}
           />
+          {indexDetailLoadingId && (
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-background p-4 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading index detail...
+            </div>
+          )}
+          {indexDetail && <DocumentIndexDetailPanel detail={indexDetail} />}
         </div>
       ) : tab === 'chat' ? (
         <ChatPanel kbId={kbId!} completedDocCount={completedCount} />

@@ -49,6 +49,7 @@ public class MilvusVectorService {
             validateExistingCollectionSchema(collection);
             client.loadCollection(LoadCollectionParam.newBuilder()
                     .withCollectionName(collection)
+                    .withSyncLoad(false)
                     .build());
             return;
         }
@@ -104,8 +105,9 @@ public class MilvusVectorService {
         client.createIndex(index);
         client.loadCollection(LoadCollectionParam.newBuilder()
                 .withCollectionName(collection)
+                .withSyncLoad(false)
                 .build());
-        log.info("Milvus collection {} ready", collection);
+        log.info("Milvus collection {} load requested asynchronously", collection);
     }
 
     private void validateExistingCollectionSchema(String collection) {

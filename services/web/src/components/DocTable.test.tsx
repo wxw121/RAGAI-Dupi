@@ -67,4 +67,35 @@ describe('DocTable', () => {
     expect(container.textContent).toContain('Worker')
     expect(container.textContent).toContain('可重试')
   })
+
+  it('calls inspect handler from the document row action', () => {
+    const onInspect = vi.fn()
+    const doc: Document = {
+      id: 'doc-1',
+      kbId: 'kb-1',
+      fileName: 'sample.md',
+      mimeType: 'text/markdown',
+      fileSize: 1024,
+      status: 'COMPLETED',
+      errorMessage: null,
+      createdAt: '2026-07-12T00:00:00Z',
+      updatedAt: '2026-07-12T00:00:00Z',
+    }
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    act(() => {
+      root?.render(<DocTable documents={[doc]} jobStages={{}} onInspect={onInspect} />)
+    })
+
+    const inspectButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.getAttribute('aria-label')?.includes('Inspect'),
+    )
+    expect(inspectButton).toBeTruthy()
+    act(() => {
+      inspectButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onInspect).toHaveBeenCalledWith(doc)
+  })
 })

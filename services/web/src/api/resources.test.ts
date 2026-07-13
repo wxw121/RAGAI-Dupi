@@ -20,8 +20,17 @@ import {
   disableAccount,
   enableAccount,
   generatePasswordHash,
+  listRagEvalCases,
+  createRagEvalCase,
+  updateRagEvalCase,
+  deleteRagEvalCase,
+  listRagEvalRuns,
+  runRagEval,
+  exportKnowledgeBase,
+  importKnowledgeBase,
+  notifyAuditAlerts,
 } from './knowledgeBase'
-import { deleteDocument, getIngestJob, listDocuments, uploadDocument, uploadDocuments } from './documents'
+import { deleteDocument, getDocumentIndexDetail, getIngestJob, listDocuments, uploadDocument, uploadDocuments } from './documents'
 import {
   batchDeleteChatSessions,
   createChatSession,
@@ -62,6 +71,9 @@ describe('resource API wrappers', () => {
     apiClient.apiGet.mockResolvedValueOnce([{ id: 'audit1' }])
     apiClient.apiGet.mockResolvedValueOnce([{ code: 'AUDIT_FAILED_SPIKE' }])
     apiClient.apiGet.mockResolvedValueOnce([{ username: 'admin' }])
+    apiClient.apiGet.mockResolvedValueOnce([{ id: 'case1' }])
+    apiClient.apiGet.mockResolvedValueOnce([{ id: 'run1' }])
+    apiClient.apiGet.mockResolvedValueOnce({ knowledgeBase: { name: 'KB' } })
     apiClient.apiGetText.mockResolvedValueOnce('csv-body')
     apiClient.apiPost
       .mockResolvedValueOnce({ id: 'kb2' })
@@ -74,7 +86,12 @@ describe('resource API wrappers', () => {
       .mockResolvedValueOnce({ username: 'analyst', disabled: false })
       .mockResolvedValueOnce({ username: 'analyst', tokenVersion: '2' })
       .mockResolvedValueOnce({ passwordHash: 'pbkdf2$hash' })
+      .mockResolvedValueOnce({ id: 'case1' })
+      .mockResolvedValueOnce({ id: 'run1' })
+      .mockResolvedValueOnce({ id: 'imported' })
+      .mockResolvedValueOnce({ delivered: true })
     apiClient.apiPatch.mockResolvedValueOnce({ username: 'analyst' })
+    apiClient.apiPatch.mockResolvedValueOnce({ id: 'case1', query: 'new' })
     apiClient.apiDelete.mockResolvedValue(undefined)
 
     await expect(listKnowledgeBases()).resolves.toEqual([{ id: 'kb1' }])
@@ -87,6 +104,9 @@ describe('resource API wrappers', () => {
       .resolves.toEqual([{ id: 'audit1' }])
     await expect(listAuditAlerts()).resolves.toEqual([{ code: 'AUDIT_FAILED_SPIKE' }])
     await expect(listAccounts()).resolves.toEqual([{ username: 'admin' }])
+    await expect(listRagEvalCases('kb1')).resolves.toEqual([{ id: 'case1' }])
+    await expect(listRagEvalRuns('kb1')).resolves.toEqual([{ id: 'run1' }])
+    await expect(exportKnowledgeBase('kb1')).resolves.toEqual({ knowledgeBase: { name: 'KB' } })
     await expect(exportAuditLogs({ tenantId: 'tenant-a', targetType: 'DOCUMENT', status: 'FAILED' }))
       .resolves.toEqual('csv-body')
     await expect(reindexKnowledgeBase('kb1')).resolves.toEqual([{ id: 'job2' }])
@@ -98,6 +118,12 @@ describe('resource API wrappers', () => {
     await expect(enableAccount('analyst')).resolves.toEqual({ username: 'analyst', disabled: false })
     await expect(rotateAccountToken('analyst')).resolves.toEqual({ username: 'analyst', tokenVersion: '2' })
     await expect(generatePasswordHash('secret')).resolves.toEqual({ passwordHash: 'pbkdf2$hash' })
+    await expect(createRagEvalCase('kb1', { caseKey: 'case', query: 'q', minHits: 1 })).resolves.toEqual({ id: 'case1' })
+    await expect(updateRagEvalCase('kb1', 'case1', { caseKey: 'case', query: 'new', minHits: 1 })).resolves.toEqual({ id: 'case1', query: 'new' })
+    await expect(runRagEval('kb1', { useRerank: true })).resolves.toEqual({ id: 'run1' })
+    await expect(importKnowledgeBase({ knowledgeBase: { name: 'KB' }, evalCases: [] })).resolves.toEqual({ id: 'imported' })
+    await expect(notifyAuditAlerts()).resolves.toEqual({ delivered: true })
+    await expect(deleteRagEvalCase('kb1', 'case1')).resolves.toBeUndefined()
     await expect(deleteKnowledgeBase('kb1')).resolves.toBeUndefined()
 
     expect(apiClient.apiGet).toHaveBeenNthCalledWith(1, '/api/v1/knowledge-bases')
@@ -110,6 +136,9 @@ describe('resource API wrappers', () => {
     )
     expect(apiClient.apiGet).toHaveBeenNthCalledWith(6, '/api/v1/ops/audit-alerts')
     expect(apiClient.apiGet).toHaveBeenNthCalledWith(7, '/api/v1/ops/accounts')
+    expect(apiClient.apiGet).toHaveBeenNthCalledWith(8, '/api/v1/knowledge-bases/kb1/rag-eval/cases')
+    expect(apiClient.apiGet).toHaveBeenNthCalledWith(9, '/api/v1/knowledge-bases/kb1/rag-eval/runs')
+    expect(apiClient.apiGet).toHaveBeenNthCalledWith(10, '/api/v1/knowledge-bases/kb1/export')
     expect(apiClient.apiGetText).toHaveBeenCalledWith(
       '/api/v1/ops/audit-logs/export?tenantId=tenant-a&targetType=DOCUMENT&status=FAILED',
     )
@@ -127,13 +156,19 @@ describe('resource API wrappers', () => {
     expect(apiClient.apiPost).toHaveBeenNthCalledWith(8, '/api/v1/ops/accounts/analyst/enable')
     expect(apiClient.apiPost).toHaveBeenNthCalledWith(9, '/api/v1/ops/accounts/analyst/rotate-token')
     expect(apiClient.apiPost).toHaveBeenNthCalledWith(10, '/api/v1/ops/accounts/password-hash', { password: 'secret' })
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(11, '/api/v1/knowledge-bases/kb1/rag-eval/cases', { caseKey: 'case', query: 'q', minHits: 1 })
+    expect(apiClient.apiPatch).toHaveBeenNthCalledWith(2, '/api/v1/knowledge-bases/kb1/rag-eval/cases/case1', { caseKey: 'case', query: 'new', minHits: 1 })
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(12, '/api/v1/knowledge-bases/kb1/rag-eval/runs', { useRerank: true })
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(13, '/api/v1/knowledge-bases/import', { knowledgeBase: { name: 'KB' }, evalCases: [] })
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(14, '/api/v1/ops/audit-alerts/notify')
+    expect(apiClient.apiDelete).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb1/rag-eval/cases/case1')
     expect(apiClient.apiDelete).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb1')
   })
 
   it('builds document API paths', async () => {
     const file = new File(['abc'], 'a.txt')
     const secondFile = new File(['def'], 'b.txt')
-    apiClient.apiGet.mockResolvedValueOnce([{ id: 'd1' }]).mockResolvedValueOnce({ id: 'j1' })
+    apiClient.apiGet.mockResolvedValueOnce([{ id: 'd1' }]).mockResolvedValueOnce({ id: 'j1' }).mockResolvedValueOnce({ chunkCount: 2 })
     apiClient.apiUpload.mockResolvedValue({ id: 'd2' })
     const batchUpload = {
       total: 2,
@@ -149,12 +184,14 @@ describe('resource API wrappers', () => {
     await expect(uploadDocuments('kb', [file, secondFile])).resolves.toEqual(batchUpload)
     await expect(deleteDocument('kb', 'doc')).resolves.toBeUndefined()
     await expect(getIngestJob('kb', 'doc')).resolves.toEqual({ id: 'j1' })
+    await expect(getDocumentIndexDetail('kb', 'doc')).resolves.toEqual({ chunkCount: 2 })
 
     expect(apiClient.apiGet).toHaveBeenNthCalledWith(1, '/api/v1/knowledge-bases/kb/documents')
     expect(apiClient.apiUpload).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb/documents', file)
     expect(apiClient.apiUploadMany).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb/documents/batch', [file, secondFile])
     expect(apiClient.apiDelete).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb/documents/doc')
     expect(apiClient.apiGet).toHaveBeenNthCalledWith(2, '/api/v1/knowledge-bases/kb/documents/doc/ingest-job')
+    expect(apiClient.apiGet).toHaveBeenNthCalledWith(3, '/api/v1/knowledge-bases/kb/documents/doc/index-detail')
   })
 
   it('builds chat session API paths', async () => {

@@ -1,9 +1,11 @@
 package com.dupi.rag.controller;
 
 import com.dupi.rag.dto.BatchDocumentUploadResponse;
+import com.dupi.rag.dto.DocumentIndexDetailResponse;
 import com.dupi.rag.dto.DocumentResponse;
 import com.dupi.rag.dto.IngestJobResponse;
 import com.dupi.rag.service.DocumentService;
+import com.dupi.rag.service.DocumentIndexInspectionService;
 import com.dupi.rag.service.IngestJobService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
@@ -20,6 +22,7 @@ public class DocumentController {
 
     private final DocumentService documentService;
     private final IngestJobService ingestJobService;
+    private final DocumentIndexInspectionService documentIndexInspectionService;
 
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public DocumentResponse upload(@PathVariable UUID kbId, @RequestParam("file") MultipartFile file) {
@@ -50,5 +53,10 @@ public class DocumentController {
     public IngestJobResponse getIngestJob(@PathVariable UUID kbId, @PathVariable UUID docId) {
         documentService.findOrThrow(kbId, docId);
         return ingestJobService.getLatestByDoc(docId);
+    }
+
+    @GetMapping("/{docId}/index-detail")
+    public DocumentIndexDetailResponse getIndexDetail(@PathVariable UUID kbId, @PathVariable UUID docId) {
+        return documentIndexInspectionService.inspect(kbId, docId);
     }
 }

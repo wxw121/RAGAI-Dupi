@@ -2,9 +2,20 @@
 
 ## 当前状态
 
-V1.1 观测与评估小版本代码已接入：**Web 控制台**（`:8080`）+ API + Worker + Milvus；对话 DeepSeek、向量化智谱 `embedding-2`（1024 维）；保留 API 级 E2E 主流程，并新增真实浏览器 E2E 门禁、摄入诊断、知识库详情 `RAG 评估`、上传治理提示与聚合运维告警。
+V1.2 质量闭环小版本已接入：**Web 控制台**（`:8080`）+ API + Worker + Milvus；在 V1.1 观测能力上补齐文档索引详情、结构化 Chat 错误、持久化 RAG 评估、混合检索/Rerank 控制、Webhook 告警通知和知识库快照导出恢复，并扩展真实浏览器写操作门禁。
 
 ## 最近进展
+
+### 2026-07-13（V1.2 质量闭环小版本）
+- [版本升级] — API 升至 `0.1.2-SNAPSHOT`，Web 升至 `0.1.2`，Flyway 升至 V8。
+- [真实浏览器回归扩展] — Playwright 真实登录后选择 `HYBRID` 创建知识库，覆盖文档/问答/RAG 页签、持久化评估用例保存、审计、账号创建/禁用和角色页；拦截控制台、页面、关键请求、错误 Toast 与 `CSRF token required`。
+- [上传/摄入/索引详情] — 新增 `GET .../documents/{docId}/index-detail` 与文档查看面板，聚合对象 key/可用性、最近摄入任务诊断、分块总数、最多 20 个分块样例和 `indexReady`。
+- [结构化 Chat 错误] — HTTP 与 SSE 错误统一携带 `error/message/stage/suggestion/requestId`，前端按 retrieval/llm/auth/unknown 阶段显示友好提示，并兼容旧纯文本错误。
+- [持久化 RAG 评估] — 新增评估用例 CRUD、最近 10 次运行及逐用例不可变结果；空库自动创建内置用例，每库最多 100 条，并以知识库级悲观锁避免初始化/创建竞态；运行状态支持 `RUNNING/COMPLETED/FAILED`，执行要求 `MAINTENANCE + KB_READ`。Web 支持新增/编辑/删除用例、Rerank 开关、运行摘要和诊断明细。
+- [P1 检索与运维] — 新建知识库可选 `VECTOR/HYBRID`；评估运行支持 `useRerank`；`POST /ops/audit-alerts/notify` 要求 `OPS_ADMIN + OPS_AUDIT_READ + OPS_ALERT_NOTIFY`，支持可选 `AUDIT_ALERT_WEBHOOK_URL` 和默认 10 秒超时，并记录 `AUDIT_ALERT_NOTIFY` 审计；知识库支持 `schemaVersion=1` 元数据、文档/分块快照和评估用例导出/导入，单次限制 1,000 个文档和 10,000 个分块。
+- [启动韧性] — Milvus collection 改为异步加载，保留 schema fail-fast；QueryNode 加载较慢时不再阻塞 API 健康检查，检索期间沿用本地文本 fallback。
+- [恢复边界] — V1.2 导入只接受经过校验的 `schemaVersion=1` 请求，通过现有服务创建新知识库并恢复配置/评估用例，不重新上传 MinIO 原始二进制、不恢复文档主记录或直接写回 Milvus；完整灾备仍需三类存储联合备份。
+- [验证] — API `./mvnw.cmd verify` 通过 240 个测试，JaCoCo 行覆盖率 95.1913%；Web `npm test` 通过 57 个测试，`npm run build` 通过；Docker V8 迁移成功；真实 Chromium 门禁 `1 passed (3.6s)`，核心流程 `2.7s`。
 
 ### 2026-07-12（V1.1 观测与评估小版本）
 - [版本升级] — API 升至 `0.1.1-SNAPSHOT`，Web 升至 `0.1.1`。

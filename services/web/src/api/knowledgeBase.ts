@@ -7,10 +7,17 @@ import type {
   AuditLogQuery,
   CreateKnowledgeBaseRequest,
   IngestJob,
+  KnowledgeBaseExport,
+  KnowledgeBaseImport,
   KnowledgeBase,
+  OpsNotification,
   OpsMetadata,
   PasswordHashResponse,
   PasswordResetRequest,
+  RagEvalCase,
+  RagEvalCaseRequest,
+  RagEvalRun,
+  RagEvalRunRequest,
   RetrieveRequest,
   RetrieveResponse,
   Role,
@@ -37,6 +44,14 @@ export function deleteKnowledgeBase(kbId: string): Promise<void> {
   return apiDelete(`${BASE}/${kbId}`)
 }
 
+export function exportKnowledgeBase(kbId: string): Promise<KnowledgeBaseExport> {
+  return apiGet<KnowledgeBaseExport>(`${BASE}/${kbId}/export`)
+}
+
+export function importKnowledgeBase(request: KnowledgeBaseImport): Promise<KnowledgeBase> {
+  return apiPost<KnowledgeBase>(`${BASE}/import`, request)
+}
+
 export function retrieveKnowledgeBase(kbId: string, request: RetrieveRequest): Promise<RetrieveResponse> {
   return apiPost<RetrieveResponse>(`${BASE}/${kbId}/retrieve`, request)
 }
@@ -51,6 +66,30 @@ export function reindexKnowledgeBase(kbId: string): Promise<IngestJob[]> {
 
 export function retryIngestJob(kbId: string, jobId: string): Promise<IngestJob> {
   return apiPost<IngestJob>(`${BASE}/${kbId}/ingest-jobs/${jobId}/retry`)
+}
+
+export function listRagEvalCases(kbId: string): Promise<RagEvalCase[]> {
+  return apiGet<RagEvalCase[]>(`${BASE}/${kbId}/rag-eval/cases`)
+}
+
+export function createRagEvalCase(kbId: string, request: RagEvalCaseRequest): Promise<RagEvalCase> {
+  return apiPost<RagEvalCase>(`${BASE}/${kbId}/rag-eval/cases`, request)
+}
+
+export function updateRagEvalCase(kbId: string, caseId: string, request: RagEvalCaseRequest): Promise<RagEvalCase> {
+  return apiPatch<RagEvalCase>(`${BASE}/${kbId}/rag-eval/cases/${caseId}`, request)
+}
+
+export function deleteRagEvalCase(kbId: string, caseId: string): Promise<void> {
+  return apiDelete(`${BASE}/${kbId}/rag-eval/cases/${caseId}`)
+}
+
+export function listRagEvalRuns(kbId: string): Promise<RagEvalRun[]> {
+  return apiGet<RagEvalRun[]>(`${BASE}/${kbId}/rag-eval/runs`)
+}
+
+export function runRagEval(kbId: string, request: RagEvalRunRequest = {}): Promise<RagEvalRun> {
+  return apiPost<RagEvalRun>(`${BASE}/${kbId}/rag-eval/runs`, request)
 }
 
 export function listVectorCleanupTasks(): Promise<VectorCleanupTask[]> {
@@ -71,6 +110,10 @@ export function exportAuditLogs(query: AuditLogQuery = {}): Promise<string> {
 
 export function listAuditAlerts(): Promise<AuditAlert[]> {
   return apiGet<AuditAlert[]>(`${OPS_BASE}/audit-alerts`)
+}
+
+export function notifyAuditAlerts(): Promise<OpsNotification> {
+  return apiPost<OpsNotification>(`${OPS_BASE}/audit-alerts/notify`)
 }
 
 export function listAccounts(): Promise<Account[]> {

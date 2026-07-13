@@ -2,6 +2,7 @@
 
 > 账号 / RBAC 与 ops 管理权限更新记录见 [docs/rbac-ops-admin-2026-07-06.md](docs/rbac-ops-admin-2026-07-06.md)；摄入 outbox、删除 tombstone、实例级授权与审计运维增强见 [docs/outbox-tombstone-rbac-ops-2026-07-07.md](docs/outbox-tombstone-rbac-ops-2026-07-07.md)。
 > V1.1（API `0.1.1-SNAPSHOT` / Web `0.1.1`）新增真实浏览器 E2E 门禁、摄入诊断、知识库详情 `RAG 评估`、上传治理提示与聚合运维告警；设计与实施记录见 [docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md](docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md) 与 [docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md](docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md)。
+> V1.2（API `0.1.2-SNAPSHOT` / Web `0.1.2`）扩展真实浏览器门禁，新增文档索引详情、结构化 Chat 错误、持久化 RAG 评估用例/历史、混合检索与 Rerank 控制、审计告警 Webhook，以及知识库元数据/分块快照导出恢复；实施计划见 [docs/superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md](docs/superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md)。
 
 企业级 RAG 知识库引擎 — 类似 Dify/扣子底层知识库模块。
 
@@ -48,6 +49,8 @@ cp deploy/.env.example deploy/.env
 | `AUDIT_RETENTION_CRON` | 审计日志保留清理 cron | 默认每天 `02:15` |
 | `AUDIT_ALERT_WINDOW_MINUTES` | 审计失败告警统计窗口 | 默认 `30` 分钟 |
 | `AUDIT_ALERT_FAILED_THRESHOLD` | 审计失败告警阈值 | 默认 `10` 次 |
+| `AUDIT_ALERT_WEBHOOK_URL` | 可选审计告警 Webhook 地址 | 留空时通知接口返回 `configured=false` |
+| `AUDIT_ALERT_WEBHOOK_TIMEOUT_SECONDS` | 审计告警 Webhook 超时 | 默认 `10` 秒 |
 
 配置后重启应用容器：
 
@@ -67,10 +70,10 @@ docker compose up -d --build
 
 浏览器打开 **http://localhost:8080**
 
-1. **新建知识库** → 点击卡片或「去问答」进入详情
-2. **文档管理** → 上传文件，等待状态 `COMPLETED`
+1. **新建知识库** → 选择向量检索或混合检索，点击卡片进入详情
+2. **文档管理** → 上传文件，等待状态 `COMPLETED`；点击查看按钮检查对象、摄入任务、分块总数、最多 20 个分块样例与索引就绪状态
 3. **智能问答** → 基于已摄入文档提问（需配置 `CHAT_API_KEY` 与 `EMBEDDING_API_KEY`）
-4. **RAG 评估** → 在知识库详情页运行内置用例，检查命中数、引用文件、关键片段和检索诊断
+4. **RAG 评估** → 管理持久化用例（空库自动创建内置用例，每库最多 100 条），选择是否启用 Rerank，运行并查看最近 10 次结果与逐用例诊断
 
 ### 4. 验证
 
@@ -96,6 +99,7 @@ powershell -ExecutionPolicy Bypass -NoProfile -File scripts/compose-config-redac
 - **前端构建 Node 版本问题**：Web 脚本已通过 `services/web/scripts/node16-webcrypto.cjs` 兼容本机 Node 16；生产构建仍建议使用项目 Dockerfile 中固定的构建环境或 Node 18+。
 - **CORS 或端口访问异常**：默认只访问 `http://localhost:8080`，由 Web Nginx 反代 `/api`；如需直连 API、PostgreSQL、Redis、Milvus 或 MinIO，请使用临时 Compose override 显式暴露端口。
 - **Milvus 维度不一致**：`EMBEDDING_DIMENSION` 必须与当前 `MILVUS_COLLECTION` 的 `embedding` 向量维度一致。切换 embedding 模型/维度后，旧知识库可用 `POST /api/v1/knowledge-bases/{kbId}/reindex` 重建；如果 collection 本身维度不匹配，API 会在启动时 fail-fast，需要删除/重建 collection，或把 `MILVUS_COLLECTION` 指向新的维度专用集合。
+- **Milvus 集合加载较慢**：API 启动只异步发起 collection load，不再同步等待 QueryNode 导致 Web 长时间 502；集合未就绪期间检索会沿用已有本地文本 fallback，并在诊断中报告原因。
 
 ### 4.2 端到端主流程自动化（推荐）
 
@@ -131,7 +135,7 @@ powershell -NoProfile -File scripts/rag-regression-eval.ps1
 # 创建知识库
 curl -X POST http://localhost:8080/api/v1/knowledge-bases \
   -H "Content-Type: application/json" \
-  -d '{"name":"demo","description":"测试库","chunkSize":512,"chunkOverlap":64,"topK":5}'
+  -d '{"name":"demo","description":"测试库","chunkSize":512,"chunkOverlap":64,"topK":5,"retrievalMode":"HYBRID"}'
 
 # 上传文档
 curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/documents \
@@ -153,6 +157,19 @@ curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs/{jo
 # 查看摄入任务诊断；响应包含 documentFileName、documentStatus、diagnosis
 curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs
 
+# 查看单文档上传/摄入/索引详情；包含对象状态、最近任务、分块数与分块样例
+curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/documents/{docId}/index-detail
+
+# 管理持久化 RAG 评估用例、运行评估并查看最近历史
+curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/rag-eval/cases
+curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/rag-eval/cases \
+  -H "Content-Type: application/json" \
+  -d '{"caseKey":"format-check","query":"支持哪些格式？","minHits":1,"topK":5,"expectedFileName":"guide.md","mustContainAny":["PDF"]}'
+curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/rag-eval/runs \
+  -H "Content-Type: application/json" \
+  -d '{"useRerank":true}'
+curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/rag-eval/runs
+
 # 查看并重试残留向量补偿清理任务
 curl http://localhost:8080/api/v1/ops/vector-cleanup-tasks
 curl -X POST http://localhost:8080/api/v1/ops/vector-cleanup-tasks/{taskId}/retry
@@ -161,12 +178,22 @@ curl -X POST http://localhost:8080/api/v1/ops/vector-cleanup-tasks/{taskId}/retr
 curl "http://localhost:8080/api/v1/ops/audit-logs?limit=50"
 curl "http://localhost:8080/api/v1/ops/audit-logs/export" -o audit-logs.csv
 curl http://localhost:8080/api/v1/ops/audit-alerts
+curl -X POST http://localhost:8080/api/v1/ops/audit-alerts/notify
 curl http://localhost:8080/api/v1/ops/metadata
 curl http://localhost:8080/api/v1/ops/accounts
 curl http://localhost:8080/api/v1/ops/roles
 
 # /ops/metadata 返回 guardrails：上传限流、摄入队列、审计阈值和 multipart 最大文件大小
 # /ops/audit-alerts 聚合审计失败峰值、摄入失败/死信任务和向量清理失败任务
+# /ops/audit-alerts/notify 仅在 AUDIT_ALERT_WEBHOOK_URL 非空时投递，响应返回 configured/delivered/statusCode
+# 调用主体须同时拥有 OPS_ADMIN、OPS_AUDIT_READ、OPS_ALERT_NOTIFY；超时由 AUDIT_ALERT_WEBHOOK_TIMEOUT_SECONDS 控制
+
+# schemaVersion=1；单次最多导出 1,000 个文档快照和 10,000 个分块快照
+# 导入时创建新知识库，仅通过业务服务恢复知识库配置和评估用例
+curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/export -o kb-export.json
+curl -X POST http://localhost:8080/api/v1/knowledge-bases/import \
+  -H "Content-Type: application/json" \
+  --data-binary @kb-export.json
 
 # 新建/更新账号、重置密码、禁用/启用账号、轮换 tokenVersion
 curl -X POST http://localhost:8080/api/v1/ops/accounts \
@@ -197,7 +224,7 @@ curl -N -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/chat \
   -d '{"query":"你的问题","stream":true}'
 ```
 
-问答 SSE 的 `retrieval` 事件返回 `{ citations, diagnostics }`；当回答提示“根据现有知识库资料无法回答”时，优先检查 `diagnostics.hitCount`、`fallbackReason`，以及知识库详情页是否提示 embedding 模型/维度与当前运行配置不一致。
+问答 SSE 的 `retrieval` 事件返回 `{ citations, diagnostics }`；HTTP 与 SSE 错误都返回结构化 JSON（`error`、`message`、`stage`、`suggestion`、`requestId`），前端会按检索、LLM、鉴权等阶段给出可执行提示。知识库导入仅接受 `schemaVersion=1`，当前不重新上传 MinIO 原始二进制、不恢复文档主记录，也不直接重建向量；导出中的文档/分块属于审计与迁移快照，完整灾备仍需对象存储备份配合。
 
 ### 6. 本地前端开发（可选）
 
@@ -230,7 +257,8 @@ cd services/api
 |------|------|
 | V1 | 知识库 CRUD、异步摄入、纯向量检索、SSE RAG、Web 控制台 |
 | V1.1 | 真实浏览器 E2E 门禁、摄入诊断、RAG 评估闭环、上传治理提示、聚合运维告警 |
-| V2 | BM25 混合检索、Rerank、语义分块、Excel、生成中断 |
+| V1.2 | 索引详情、结构化 Chat 错误、持久化 RAG 评估、混合检索/Rerank 控制、Webhook、导出恢复 |
+| V2 | BM25 sparse 生产调优、语义分块、生成中断、完整对象/向量灾备恢复 |
 | V3 | Parent-Child 索引、多模态 OCR、Pipeline DSL |
 | V4 | K8s、多租户、合规审计 |
 

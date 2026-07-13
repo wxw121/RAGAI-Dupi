@@ -316,7 +316,7 @@ public class IngestJobService {
         return toResponse(job, doc);
     }
 
-    private IngestJobResponse toResponse(IngestJob job, Document doc) {
+    public IngestJobResponse toResponse(IngestJob job, Document doc) {
         return IngestJobResponse.builder()
                 .id(job.getId())
                 .kbId(job.getKbId())

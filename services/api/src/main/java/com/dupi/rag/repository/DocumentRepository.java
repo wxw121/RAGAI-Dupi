@@ -8,4 +8,6 @@ import java.util.UUID;
 
 public interface DocumentRepository extends JpaRepository<Document, UUID> {
     List<Document> findByKbIdOrderByCreatedAtDesc(UUID kbId);
+
+    List<Document> findTop1001ByKbIdOrderByCreatedAtDesc(UUID kbId);
 }

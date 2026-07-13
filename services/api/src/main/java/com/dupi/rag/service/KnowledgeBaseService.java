@@ -90,6 +90,11 @@ public class KnowledgeBaseService {
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found: " + id));
     }
 
+    public KnowledgeBase findForUpdateOrThrow(UUID id) {
+        return repository.findByIdAndTenantIdForUpdate(id, TenantContext.getTenantId())
+                .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found: " + id));
+    }
+
     public KnowledgeBase findSystemOrThrow(UUID id) {
         return repository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found: " + id));

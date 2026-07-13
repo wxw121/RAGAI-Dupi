@@ -1,0 +1,3 @@
+ALTER TABLE rag_eval_runs
+    ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'COMPLETED',
+    ADD COLUMN failure_message TEXT;
