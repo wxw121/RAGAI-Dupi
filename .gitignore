@@ -38,6 +38,7 @@ scripts/e2e-last-run.json
 scripts/e2e-chat-session-history-last-run.json
 handoff.md
 .superpowers/
+.worktrees/
 
 # Docker local overrides
 docker-compose.override.yml
