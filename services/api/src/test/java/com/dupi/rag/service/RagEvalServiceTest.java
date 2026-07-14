@@ -2,18 +2,24 @@ package com.dupi.rag.service;
 
 import com.dupi.rag.domain.entity.RagEvalCase;
 import com.dupi.rag.domain.entity.RagEvalRun;
+import com.dupi.rag.domain.entity.RagQualityPolicy;
+import com.dupi.rag.domain.enums.RagQualityGateStatus;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
 import com.dupi.rag.dto.RagEvalCaseRequest;
+import com.dupi.rag.dto.RagQualityPolicyResponse;
 import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveResponse;
 import com.dupi.rag.repository.RagEvalCaseRepository;
 import com.dupi.rag.repository.RagEvalRunRepository;
 import com.dupi.rag.repository.RagEvalRunResultRepository;
+import com.dupi.rag.repository.RagQualityPolicyRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionSynchronizationUtils;
 
 import java.time.Instant;
 import java.util.List;
@@ -27,6 +33,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
@@ -40,6 +47,8 @@ class RagEvalServiceTest {
     @Mock RagEvalRunRepository runRepository;
     @Mock RagEvalRunResultRepository resultRepository;
     @Mock RagEvalCaseCoordinator caseCoordinator;
+    @Mock RagQualityPolicyRepository policyRepository;
+    @Mock AuditLogService auditLogService;
 
     @Test
     void listCasesSeedsBuiltInCasesWhenKnowledgeBaseHasNoPersistedCases() {
@@ -162,6 +171,10 @@ class RagEvalServiceTest {
         assertThat(response.getTotalCount()).isEqualTo(1);
         assertThat(response.getStatus()).isEqualTo(RagEvalRunStatus.COMPLETED);
         assertThat(response.getFailureMessage()).isNull();
+        assertThat(response.getGateStatus()).isEqualTo(RagQualityGateStatus.UNBASELINED);
+        assertThat(response.getMetrics()).containsEntry("passRate", 100.0);
+        assertThat(response.getPolicySnapshot()).containsEntry("minimumPassRate", 80);
+        assertThat(response.getProfileSnapshot()).containsEntry("retrievalMode", "hybrid_rerank");
         assertThat(savedStatuses).containsExactly(RagEvalRunStatus.RUNNING, RagEvalRunStatus.COMPLETED);
         assertThat(response.getResults()).singleElement().satisfies(result -> {
             assertThat(result.isPassed()).isTrue();
@@ -169,6 +182,7 @@ class RagEvalServiceTest {
             assertThat(result.getMatchedToken()).isEqualTo("install");
             assertThat(result.getRetrievalMode()).isEqualTo("hybrid_rerank");
             assertThat(result.getEmbeddingDimension()).isEqualTo(1024);
+            assertThat(result.getCaseFingerprint()).hasSize(64);
         });
         ArgumentCaptor<RagEvalRun> runCaptor = ArgumentCaptor.forClass(RagEvalRun.class);
         verify(runRepository, times(2)).save(runCaptor.capture());
@@ -178,6 +192,78 @@ class RagEvalServiceTest {
                         && "guide.md".equals(result.getMatchedFileName())
                         && "install".equals(result.getMatchedToken())
         ));
+    }
+
+    @Test
+    void promoteBaselineRejectsBlockedRuns() {
+        UUID kbId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        when(runRepository.findById(runId)).thenReturn(Optional.of(RagEvalRun.builder()
+                .id(runId)
+                .kbId(kbId)
+                .status(RagEvalRunStatus.COMPLETED)
+                .gateStatus(RagQualityGateStatus.BLOCKED)
+                .build()));
+
+        assertThatThrownBy(() -> service().promoteBaseline(kbId, runId))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("passing quality gate");
+    }
+
+    @Test
+    void promoteBaselineAcceptsFirstThresholdPassingUnbaselinedRun() {
+        UUID kbId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        RagQualityPolicy policy = RagQualityPolicy.builder().id(UUID.randomUUID()).kbId(kbId).build();
+        when(policyRepository.findByKbIdForUpdate(kbId)).thenReturn(Optional.of(policy));
+        when(runRepository.findById(runId)).thenReturn(Optional.of(RagEvalRun.builder()
+                .id(runId)
+                .kbId(kbId)
+                .status(RagEvalRunStatus.COMPLETED)
+                .gateStatus(RagQualityGateStatus.UNBASELINED)
+                .passedCount(1)
+                .totalCount(1)
+                .build()));
+
+        TransactionSynchronizationManager.initSynchronization();
+        RagQualityPolicyResponse response;
+        try {
+            response = service().promoteBaseline(kbId, runId);
+            verify(auditLogService, never()).recordSuccess(any(), any(), any(), any());
+            TransactionSynchronizationUtils.triggerAfterCommit();
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+
+        assertThat(response.getBaselineRunId()).isEqualTo(runId);
+        verify(policyRepository).saveAndFlush(argThat(saved -> runId.equals(saved.getBaselineRunId())));
+        verify(auditLogService).recordSuccess("RAG_BASELINE_PROMOTE", "KNOWLEDGE_BASE", kbId,
+                "Promoted RAG evaluation baseline " + runId);
+    }
+
+    @Test
+    void promoteBaselineRechecksRunAgainstCurrentPolicy() {
+        UUID kbId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        RagQualityPolicy policy = RagQualityPolicy.builder()
+                .id(UUID.randomUUID())
+                .kbId(kbId)
+                .minimumPassRate(80)
+                .build();
+        when(policyRepository.findByKbIdForUpdate(kbId)).thenReturn(Optional.of(policy));
+        when(runRepository.findById(runId)).thenReturn(Optional.of(RagEvalRun.builder()
+                .id(runId)
+                .kbId(kbId)
+                .status(RagEvalRunStatus.COMPLETED)
+                .gateStatus(RagQualityGateStatus.UNBASELINED)
+                .passedCount(1)
+                .totalCount(2)
+                .build()));
+        when(resultRepository.findByRunIdOrderByCaseKeyAsc(runId)).thenReturn(List.of());
+
+        assertThatThrownBy(() -> service().promoteBaseline(kbId, runId))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("passing quality gate");
     }
 
     @Test
@@ -212,7 +298,10 @@ class RagEvalServiceTest {
                 caseRepository,
                 runRepository,
                 resultRepository,
-                caseCoordinator
+                caseCoordinator,
+                policyRepository,
+                new RagQualityGateService(),
+                auditLogService
         );
     }
 

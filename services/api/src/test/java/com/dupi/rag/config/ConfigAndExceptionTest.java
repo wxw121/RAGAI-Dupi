@@ -397,9 +397,12 @@ class ConfigAndExceptionTest {
         ApiSecurityProperties.UserAccount reader = user("reader", "pw", "tenant-a", "USER");
         ApiSecurityProperties.UserAccount maintenanceOnly = user("maintenance", "pw", "tenant-a", "USER");
         maintenanceOnly.setPermissions("MAINTENANCE");
+        ApiSecurityProperties.UserAccount baselineAdmin = user("baseline-admin", "pw", "tenant-a", "USER");
+        baselineAdmin.setPermissions("OPS_ADMIN,KB_READ");
         properties.getUsers().add(operator);
         properties.getUsers().add(reader);
         properties.getUsers().add(maintenanceOnly);
+        properties.getUsers().add(baselineAdmin);
         ApiTokenService tokenService = new ApiTokenService(properties, Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC));
         ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties, tokenService);
 
@@ -415,6 +418,8 @@ class ConfigAndExceptionTest {
         assertAllowed(filter, tokenService, "operator", "PATCH", "/api/v1/knowledge-bases/kb/rag-eval/cases/case");
         assertAllowed(filter, tokenService, "operator", "DELETE", "/api/v1/knowledge-bases/kb/rag-eval/cases/case");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs");
+        assertAllowed(filter, tokenService, "operator", "PATCH", "/api/v1/knowledge-bases/kb/rag-eval/policy");
+        assertAllowed(filter, tokenService, "baseline-admin", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs/run/baseline");
         assertAllowed(filter, tokenService, "operator", "DELETE", "/api/v1/knowledge-bases/kb");
         assertAllowed(filter, tokenService, "operator", "DELETE", "/api/v1/knowledge-bases/kb/chat-sessions/session");
 
@@ -443,6 +448,21 @@ class ConfigAndExceptionTest {
         MockHttpServletResponse maintenanceWithoutReadResponse = new MockHttpServletResponse();
         filter.doFilter(maintenanceWithoutRead, maintenanceWithoutReadResponse, mock(FilterChain.class));
 
+        MockHttpServletRequest promoteBaseline = bearerRequest(
+                tokenService, "reader", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs/run/baseline");
+        MockHttpServletResponse promoteBaselineResponse = new MockHttpServletResponse();
+        filter.doFilter(promoteBaseline, promoteBaselineResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest maintenancePromoteWithoutRead = bearerRequest(
+                tokenService, "maintenance", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs/run/baseline");
+        MockHttpServletResponse maintenancePromoteWithoutReadResponse = new MockHttpServletResponse();
+        filter.doFilter(maintenancePromoteWithoutRead, maintenancePromoteWithoutReadResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest operatorPromote = bearerRequest(
+                tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs/run/baseline");
+        MockHttpServletResponse operatorPromoteResponse = new MockHttpServletResponse();
+        filter.doFilter(operatorPromote, operatorPromoteResponse, mock(FilterChain.class));
+
         assertThat(createKbResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
         assertThat(createKbResponse.getContentAsString()).contains("permission required: KB_WRITE");
         assertThat(reindexResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
@@ -455,6 +475,9 @@ class ConfigAndExceptionTest {
         assertThat(runEvalResponse.getContentAsString()).contains("permission required: MAINTENANCE");
         assertThat(maintenanceWithoutReadResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
         assertThat(maintenanceWithoutReadResponse.getContentAsString()).contains("permission required: KB_READ");
+        assertThat(promoteBaselineResponse.getContentAsString()).contains("permission required: OPS_ADMIN");
+        assertThat(maintenancePromoteWithoutReadResponse.getContentAsString()).contains("permission required: OPS_ADMIN");
+        assertThat(operatorPromoteResponse.getContentAsString()).contains("permission required: OPS_ADMIN");
         assertThat(SecurityContext.hasPermission(null)).isFalse();
         assertThat(SecurityContext.hasPermission(" ")).isFalse();
     }

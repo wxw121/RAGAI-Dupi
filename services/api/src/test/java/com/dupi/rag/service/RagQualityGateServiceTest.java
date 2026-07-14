@@ -119,4 +119,36 @@ class RagQualityGateServiceTest {
         assertThat(service.fingerprint(first)).isEqualTo(service.fingerprint(equivalent));
         assertThat(service.fingerprint(first)).isNotEqualTo(service.fingerprint(changedAssertion));
     }
+
+    @Test
+    void relativeDropIgnoresNewOrChangedCases() {
+        var comparison = service.compareCases(
+                List.of(new RagQualityGateService.CaseEvidence("matched", "same", true),
+                        new RagQualityGateService.CaseEvidence("changed", "old", true)),
+                List.of(new RagQualityGateService.CaseEvidence("matched", "same", true),
+                        new RagQualityGateService.CaseEvidence("changed", "new", false)));
+
+        var status = service.decide(new RagQualityGateService.Policy(40, 10, 0, false),
+                new RagQualityGateService.RunSummary(2, 2),
+                new RagQualityGateService.RunSummary(2, 1), comparison);
+
+        assertThat(status).isEqualTo(RagQualityGateStatus.WARN);
+    }
+
+    @Test
+    void newPassingCasesCannotHideComparableRegression() {
+        var baseline = List.of(new RagQualityGateService.CaseEvidence("matched", "same", true));
+        var current = new java.util.ArrayList<RagQualityGateService.CaseEvidence>();
+        current.add(new RagQualityGateService.CaseEvidence("matched", "same", false));
+        for (int index = 0; index < 9; index++) {
+            current.add(new RagQualityGateService.CaseEvidence("new-" + index, "v1", true));
+        }
+        var comparison = service.compareCases(baseline, current);
+
+        var status = service.decide(new RagQualityGateService.Policy(80, 20, 1, false),
+                new RagQualityGateService.RunSummary(1, 1),
+                new RagQualityGateService.RunSummary(10, 9), comparison);
+
+        assertThat(status).isEqualTo(RagQualityGateStatus.BLOCKED);
+    }
 }

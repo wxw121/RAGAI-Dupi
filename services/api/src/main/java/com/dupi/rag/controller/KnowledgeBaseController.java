@@ -179,4 +179,27 @@ public class KnowledgeBaseController {
     ) {
         return ragEvalService.run(kbId, request != null && Boolean.TRUE.equals(request.getUseRerank()));
     }
+
+    @GetMapping("/{kbId}/rag-eval/policy")
+    public RagQualityPolicyResponse getRagQualityPolicy(@PathVariable UUID kbId) {
+        return ragEvalService.getPolicy(kbId);
+    }
+
+    @PatchMapping("/{kbId}/rag-eval/policy")
+    public RagQualityPolicyResponse updateRagQualityPolicy(
+            @PathVariable UUID kbId,
+            @Valid @RequestBody RagQualityPolicyRequest request
+    ) {
+        return ragEvalService.updatePolicy(kbId, request);
+    }
+
+    @PostMapping("/{kbId}/rag-eval/runs/{runId}/baseline")
+    public RagQualityPolicyResponse promoteRagEvalBaseline(@PathVariable UUID kbId, @PathVariable UUID runId) {
+        return ragEvalService.promoteBaseline(kbId, runId);
+    }
+
+    @GetMapping("/{kbId}/rag-eval/runs/{runId}/comparison")
+    public RagEvalRunResponse getRagEvalRunComparison(@PathVariable UUID kbId, @PathVariable UUID runId) {
+        return ragEvalService.getRunComparison(kbId, runId);
+    }
 }

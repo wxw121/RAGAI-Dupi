@@ -69,6 +69,14 @@ public class RagEvalRun {
     @Builder.Default
     private Map<String, Object> profileSnapshot = Map.of();
 
+    @Column(name = "baseline_run_id")
+    private UUID baselineRunId;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "policy_snapshot", nullable = false, columnDefinition = "jsonb")
+    @Builder.Default
+    private Map<String, Object> policySnapshot = Map.of();
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

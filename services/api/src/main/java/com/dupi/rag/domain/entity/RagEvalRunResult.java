@@ -87,6 +87,10 @@ public class RagEvalRunResult {
     @Column(name = "comparison_status")
     private RagEvalComparisonStatus comparisonStatus;
 
+    @Column(name = "latency_ms", nullable = false)
+    @Builder.Default
+    private Long latencyMs = 0L;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

@@ -220,6 +220,9 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
             return List.of("KB_WRITE");
         }
         if (uri.contains("/rag-eval/")) {
+            if ("POST".equalsIgnoreCase(method) && uri.endsWith("/baseline")) {
+                return List.of("OPS_ADMIN", "KB_READ");
+            }
             if ("POST".equalsIgnoreCase(method) && uri.endsWith("/runs")) {
                 return List.of("MAINTENANCE", "KB_READ");
             }

@@ -37,7 +37,19 @@ public class RagQualityGateService {
         if (baseline == null) {
             return policy.blockWhenUnbaselined() ? RagQualityGateStatus.BLOCKED : RagQualityGateStatus.UNBASELINED;
         }
-        if (baseline.passRate() - current.passRate() > policy.maximumPassRateDrop()) {
+        RunSummary relativeBaseline = baseline;
+        RunSummary relativeCurrent = current;
+        if (comparison != null) {
+            List<CaseComparison> comparable = comparison.currentCases().stream()
+                    .filter(item -> item.status() != RagEvalComparisonStatus.NEW)
+                    .toList();
+            relativeBaseline = new RunSummary(comparable.size(),
+                    (int) comparable.stream().filter(item -> item.baseline().passed()).count());
+            relativeCurrent = new RunSummary(comparable.size(),
+                    (int) comparable.stream().filter(item -> item.current().passed()).count());
+        }
+        if (relativeBaseline.totalCount() > 0
+                && relativeBaseline.passRate() - relativeCurrent.passRate() > policy.maximumPassRateDrop()) {
             return RagQualityGateStatus.BLOCKED;
         }
         return comparison == null || !comparison.fullyComparable()
@@ -80,7 +92,7 @@ public class RagQualityGateService {
                     : compare(baseline.caseKey(), baseline.fingerprint(), current.caseKey(), current.fingerprint(),
                     baseline.passed(), current.passed());
             if (status == RagEvalComparisonStatus.REGRESSED) newFailureCount++;
-            comparisons.add(new CaseComparison(current, status));
+            comparisons.add(new CaseComparison(baseline, current, status));
         }
 
         List<CaseEvidence> removed = baselineCases.stream()
@@ -149,7 +161,7 @@ public class RagQualityGateService {
 
     public record CaseEvidence(String caseKey, String fingerprint, boolean passed) { }
 
-    public record CaseComparison(CaseEvidence current, RagEvalComparisonStatus status) { }
+    public record CaseComparison(CaseEvidence baseline, CaseEvidence current, RagEvalComparisonStatus status) { }
 
     public record ComparisonReport(List<CaseComparison> currentCases, List<CaseEvidence> removedBaselineCases,
                                    int newFailureCount, boolean fullyComparable) { }

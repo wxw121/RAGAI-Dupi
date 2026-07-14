@@ -3,11 +3,16 @@ package com.dupi.rag.service;
 import com.dupi.rag.domain.entity.RagEvalCase;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.entity.RagEvalRunResult;
+import com.dupi.rag.domain.entity.RagQualityPolicy;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
+import com.dupi.rag.domain.enums.RagEvalComparisonStatus;
+import com.dupi.rag.domain.enums.RagQualityGateStatus;
 import com.dupi.rag.dto.RagEvalCaseRequest;
 import com.dupi.rag.dto.RagEvalCaseResponse;
 import com.dupi.rag.dto.RagEvalRunResponse;
 import com.dupi.rag.dto.RagEvalRunResultResponse;
+import com.dupi.rag.dto.RagQualityPolicyRequest;
+import com.dupi.rag.dto.RagQualityPolicyResponse;
 import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.dto.RetrieveResponse;
@@ -15,9 +20,13 @@ import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.RagEvalCaseRepository;
 import com.dupi.rag.repository.RagEvalRunRepository;
 import com.dupi.rag.repository.RagEvalRunResultRepository;
+import com.dupi.rag.repository.RagQualityPolicyRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -36,6 +45,9 @@ public class RagEvalService {
     private final RagEvalRunRepository runRepository;
     private final RagEvalRunResultRepository resultRepository;
     private final RagEvalCaseCoordinator caseCoordinator;
+    private final RagQualityPolicyRepository policyRepository;
+    private final RagQualityGateService qualityGateService;
+    private final AuditLogService auditLogService;
 
     @Transactional
     public List<RagEvalCaseResponse> listCases(UUID kbId) {
@@ -76,12 +88,24 @@ public class RagEvalService {
 
     public RagEvalRunResponse run(UUID kbId, boolean useRerank) {
         List<RagEvalCase> cases = caseCoordinator.loadOrSeed(kbId);
+        RagQualityPolicy policy = getOrCreatePolicy(kbId);
+        RagEvalRun baselineRun = policy.getBaselineRunId() == null
+                ? null
+                : runRepository.findById(policy.getBaselineRunId())
+                .filter(candidate -> kbId.equals(candidate.getKbId()))
+                .orElseThrow(() -> new IllegalStateException("RAG baseline run is unavailable"));
+        List<RagEvalRunResult> baselineResults = baselineRun == null
+                ? List.of()
+                : resultRepository.findByRunIdOrderByCaseKeyAsc(baselineRun.getId());
         RagEvalRun run = RagEvalRun.builder()
                 .kbId(kbId)
                 .useRerank(useRerank)
                 .totalCount(cases.size())
                 .passedCount(0)
                 .status(RagEvalRunStatus.RUNNING)
+                .profileSnapshot(Map.of("useRerank", useRerank))
+                .baselineRunId(baselineRun == null ? null : baselineRun.getId())
+                .policySnapshot(policySnapshot(policy))
                 .createdAt(Instant.now())
                 .build();
         run = runRepository.save(run);
@@ -89,17 +113,29 @@ public class RagEvalService {
         List<RagEvalRunResult> results = new ArrayList<>();
         try {
             for (RagEvalCase evalCase : cases) {
-                RagEvalRunResult result = evaluate(kbId, run.getId(), evalCase, useRerank);
+                results.add(evaluate(kbId, run.getId(), evalCase, useRerank));
+            }
+            RagQualityGateService.ComparisonReport comparison = baselineRun == null
+                    ? null
+                    : qualityGateService.compareCases(toEvidence(baselineResults), toEvidence(results));
+            applyComparison(results, comparison);
+            for (RagEvalRunResult result : results) {
                 RagEvalRunResult saved = resultRepository.save(result);
-                results.add(saved == null ? result : saved);
+                if (saved != null && saved != result) {
+                    results.set(results.indexOf(result), saved);
+                }
             }
             int passed = (int) results.stream().filter(RagEvalRunResult::isPassed).count();
             run.setPassedCount(passed);
             run.setTotalCount(results.size());
             run.setStatus(RagEvalRunStatus.COMPLETED);
             run.setFailureMessage(null);
+            run.setMetrics(metrics(cases, results));
+            run.setProfileSnapshot(retrievalSnapshot(useRerank, results));
+            run.setGateStatus(qualityGateService.decide(toPolicy(policy),
+                    baselineRun == null ? null : summary(baselineRun), summary(run), comparison));
             run = runRepository.save(run);
-            return toRunResponse(run, results);
+            return toRunResponse(run, results, comparison);
         } catch (Exception ex) {
             run.setPassedCount((int) results.stream().filter(RagEvalRunResult::isPassed).count());
             run.setStatus(RagEvalRunStatus.FAILED);
@@ -114,6 +150,7 @@ public class RagEvalService {
     }
 
     private RagEvalRunResult evaluate(UUID kbId, UUID runId, RagEvalCase evalCase, boolean useRerank) {
+        long startedAt = System.nanoTime();
         List<String> failureReasons = new ArrayList<>();
         RetrieveResponse response = null;
         List<RetrievalHit> hits = List.of();
@@ -144,6 +181,9 @@ public class RagEvalService {
                 .caseId(evalCase.getId())
                 .caseKey(evalCase.getCaseKey())
                 .query(evalCase.getQuery())
+                .caseFingerprint(qualityGateService.fingerprint(new RagQualityGateService.CaseDefinition(
+                        evalCase.getQuery(), safeMinHits(evalCase), safeTopK(evalCase),
+                        evalCase.getExpectedFileName(), evalCase.getMustContainAny())))
                 .passed(failureReasons.isEmpty())
                 .failureReasons(failureReasons)
                 .hitCount(hits.size())
@@ -155,8 +195,68 @@ public class RagEvalService {
                 .embeddingModel(stringDiagnostic(diagnostics, "embeddingModel", null))
                 .embeddingDimension(intDiagnostic(diagnostics, "embeddingDimension"))
                 .topK(safeTopK(evalCase))
+                .latencyMs(Math.max(0L, (System.nanoTime() - startedAt) / 1_000_000L))
                 .createdAt(Instant.now())
                 .build();
+    }
+
+    @Transactional
+    public RagQualityPolicyResponse getPolicy(UUID kbId) {
+        return toPolicyResponse(getOrCreatePolicyForUpdate(kbId));
+    }
+
+    @Transactional
+    public RagQualityPolicyResponse updatePolicy(UUID kbId, RagQualityPolicyRequest request) {
+        knowledgeBaseService.findOrThrow(kbId);
+        RagQualityPolicy policy = getOrCreatePolicyForUpdate(kbId);
+        policy.setMinimumPassRate(request.getMinimumPassRate());
+        policy.setMaximumPassRateDrop(request.getMaximumPassRateDrop());
+        policy.setMaximumNewFailures(request.getMaximumNewFailures());
+        policy.setBlockWhenUnbaselined(request.getBlockWhenUnbaselined());
+        RagQualityPolicy saved = policyRepository.saveAndFlush(policy);
+        auditAfterCommit("RAG_QUALITY_POLICY_UPDATE", kbId, "Updated RAG quality policy");
+        return toPolicyResponse(saved == null ? policy : saved);
+    }
+
+    @Transactional
+    public RagQualityPolicyResponse promoteBaseline(UUID kbId, UUID runId) {
+        knowledgeBaseService.findOrThrow(kbId);
+        RagEvalRun run = runRepository.findById(runId)
+                .filter(candidate -> kbId.equals(candidate.getKbId()))
+                .orElseThrow(() -> new ResourceNotFoundException("RAG evaluation run not found: " + runId));
+        if (run.getStatus() != RagEvalRunStatus.COMPLETED
+                || run.getGateStatus() == RagQualityGateStatus.BLOCKED
+                || run.getGateStatus() == RagQualityGateStatus.WARN) {
+            throw new IllegalArgumentException("A completed run with a passing quality gate is required");
+        }
+        RagQualityPolicy policy = getOrCreatePolicyForUpdate(kbId);
+        boolean firstBaseline = policy.getBaselineRunId() == null;
+        RagQualityGateStatus currentDecision = recalculateGate(run, policy);
+        boolean promotable = currentDecision == RagQualityGateStatus.PASS
+                || firstBaseline && currentDecision == RagQualityGateStatus.UNBASELINED;
+        if (!promotable) {
+            throw new IllegalArgumentException("A completed run with a passing quality gate is required");
+        }
+        policy.setBaselineRunId(runId);
+        RagQualityPolicy saved = policyRepository.saveAndFlush(policy);
+        auditAfterCommit("RAG_BASELINE_PROMOTE", kbId, "Promoted RAG evaluation baseline " + runId);
+        return toPolicyResponse(saved == null ? policy : saved);
+    }
+
+    @Transactional(readOnly = true)
+    public RagEvalRunResponse getRunComparison(UUID kbId, UUID runId) {
+        knowledgeBaseService.findOrThrow(kbId);
+        RagEvalRun run = runRepository.findById(runId)
+                .filter(candidate -> kbId.equals(candidate.getKbId()))
+                .orElseThrow(() -> new ResourceNotFoundException("RAG evaluation run not found: " + runId));
+        List<RagEvalRunResult> results = resultRepository.findByRunIdOrderByCaseKeyAsc(runId);
+        RagQualityGateService.ComparisonReport comparison = null;
+        if (run.getBaselineRunId() != null) {
+            List<RagEvalRunResult> baselineResults = resultRepository
+                    .findByRunIdOrderByCaseKeyAsc(run.getBaselineRunId());
+            comparison = qualityGateService.compareCases(toEvidence(baselineResults), toEvidence(results));
+        }
+        return toRunResponse(run, results, comparison);
     }
 
     private String matchFile(RagEvalCase evalCase, List<RetrievalHit> hits, List<String> failureReasons) {
@@ -212,6 +312,149 @@ public class RagEvalService {
         return evalCase.getMinHits() == null ? 1 : evalCase.getMinHits();
     }
 
+    private RagQualityPolicy getOrCreatePolicy(UUID kbId) {
+        return policyRepository.findByKbId(kbId).orElseGet(() -> {
+            RagQualityPolicy policy = RagQualityPolicy.builder().kbId(kbId).build();
+            try {
+                RagQualityPolicy saved = policyRepository.save(policy);
+                return saved == null ? policy : saved;
+            } catch (DataIntegrityViolationException conflict) {
+                return policyRepository.findByKbId(kbId).orElseThrow(() -> conflict);
+            }
+        });
+    }
+
+    private RagQualityPolicy getOrCreatePolicyForUpdate(UUID kbId) {
+        knowledgeBaseService.findForUpdateOrThrow(kbId);
+        return policyRepository.findByKbIdForUpdate(kbId).orElseGet(() -> {
+            RagQualityPolicy policy = RagQualityPolicy.builder().kbId(kbId).build();
+            return policyRepository.saveAndFlush(policy);
+        });
+    }
+
+    private RagQualityGateService.Policy toPolicy(RagQualityPolicy policy) {
+        return new RagQualityGateService.Policy(policy.getMinimumPassRate(), policy.getMaximumPassRateDrop(),
+                policy.getMaximumNewFailures(), Boolean.TRUE.equals(policy.getBlockWhenUnbaselined()));
+    }
+
+    private RagQualityGateService.RunSummary summary(RagEvalRun run) {
+        return new RagQualityGateService.RunSummary(run.getTotalCount(), run.getPassedCount());
+    }
+
+    private RagQualityGateStatus recalculateGate(RagEvalRun run, RagQualityPolicy policy) {
+        List<RagEvalRunResult> currentResults = resultRepository.findByRunIdOrderByCaseKeyAsc(run.getId());
+        if (policy.getBaselineRunId() == null) {
+            return qualityGateService.decide(toPolicy(policy), null, summary(run), null);
+        }
+        RagEvalRun baseline = runRepository.findById(policy.getBaselineRunId())
+                .filter(candidate -> run.getKbId().equals(candidate.getKbId()))
+                .orElseThrow(() -> new IllegalStateException("RAG baseline run is unavailable"));
+        List<RagEvalRunResult> baselineResults = resultRepository
+                .findByRunIdOrderByCaseKeyAsc(baseline.getId());
+        RagQualityGateService.ComparisonReport comparison = qualityGateService
+                .compareCases(toEvidence(baselineResults), toEvidence(currentResults));
+        return qualityGateService.decide(toPolicy(policy), summary(baseline), summary(run), comparison);
+    }
+
+    private Map<String, Object> policySnapshot(RagQualityPolicy policy) {
+        return Map.of(
+                "minimumPassRate", policy.getMinimumPassRate(),
+                "maximumPassRateDrop", policy.getMaximumPassRateDrop(),
+                "maximumNewFailures", policy.getMaximumNewFailures(),
+                "blockWhenUnbaselined", Boolean.TRUE.equals(policy.getBlockWhenUnbaselined())
+        );
+    }
+
+    private Map<String, Object> retrievalSnapshot(boolean useRerank, List<RagEvalRunResult> results) {
+        Map<String, Object> snapshot = new java.util.LinkedHashMap<>();
+        snapshot.put("useRerank", useRerank);
+        results.stream().findFirst().ifPresent(result -> {
+            if (hasText(result.getRetrievalMode())) snapshot.put("retrievalMode", result.getRetrievalMode());
+            if (hasText(result.getEmbeddingModel())) snapshot.put("embeddingModel", result.getEmbeddingModel());
+            if (result.getEmbeddingDimension() != null) snapshot.put("embeddingDimension", result.getEmbeddingDimension());
+            if (result.getTopK() != null) snapshot.put("topK", result.getTopK());
+        });
+        return Map.copyOf(snapshot);
+    }
+
+    private void auditAfterCommit(String action, UUID kbId, String message) {
+        Runnable audit = () -> auditLogService.recordSuccess(action, "KNOWLEDGE_BASE", kbId, message);
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            audit.run();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                audit.run();
+            }
+        });
+    }
+
+    private List<RagQualityGateService.CaseEvidence> toEvidence(List<RagEvalRunResult> results) {
+        return results.stream()
+                .map(result -> new RagQualityGateService.CaseEvidence(
+                        result.getCaseKey(), result.getCaseFingerprint(), result.isPassed()))
+                .toList();
+    }
+
+    private void applyComparison(List<RagEvalRunResult> results,
+                                 RagQualityGateService.ComparisonReport comparison) {
+        if (comparison == null) {
+            results.forEach(result -> result.setComparisonStatus(RagEvalComparisonStatus.NEW));
+            return;
+        }
+        Map<String, RagEvalComparisonStatus> statusByKey = comparison.currentCases().stream()
+                .collect(java.util.stream.Collectors.toMap(
+                        item -> item.current().caseKey(), RagQualityGateService.CaseComparison::status));
+        results.forEach(result -> result.setComparisonStatus(statusByKey.get(result.getCaseKey())));
+    }
+
+    private Map<String, Object> metrics(List<RagEvalCase> cases, List<RagEvalRunResult> results) {
+        int total = results.size();
+        long passed = results.stream().filter(RagEvalRunResult::isPassed).count();
+        Map<UUID, RagEvalCase> caseById = cases.stream()
+                .collect(java.util.stream.Collectors.toMap(RagEvalCase::getId, item -> item));
+        List<RagEvalRunResult> fileEligible = results.stream()
+                .filter(result -> hasText(result.getExpectedFileName()))
+                .toList();
+        List<RagEvalRunResult> tokenEligible = results.stream()
+                .filter(result -> {
+                    RagEvalCase evalCase = caseById.get(result.getCaseId());
+                    return evalCase != null && evalCase.getMustContainAny() != null
+                            && !evalCase.getMustContainAny().isEmpty();
+                })
+                .toList();
+        List<Long> latencies = results.stream().map(RagEvalRunResult::getLatencyMs).sorted().toList();
+        return Map.of(
+                "passRate", rate(passed, total),
+                "eligibleExpectedFileHitRate", rate(fileEligible.stream()
+                        .filter(result -> hasText(result.getMatchedFileName())).count(), fileEligible.size()),
+                "eligibleKeywordHitRate", rate(tokenEligible.stream()
+                        .filter(result -> hasText(result.getMatchedToken())).count(), tokenEligible.size()),
+                "averageHitCount", total == 0 ? 0.0 : results.stream()
+                        .mapToInt(result -> result.getHitCount() == null ? 0 : result.getHitCount()).average().orElse(0.0),
+                "fallbackCount", results.stream().filter(result -> hasText(result.getFallbackReason())
+                        && !"none".equalsIgnoreCase(result.getFallbackReason())).count(),
+                "latencyP50Ms", percentile(latencies, 0.50),
+                "latencyP95Ms", percentile(latencies, 0.95)
+        );
+    }
+
+    private double rate(long numerator, long denominator) {
+        return denominator == 0 ? 0.0 : numerator * 100.0 / denominator;
+    }
+
+    private long percentile(List<Long> sortedValues, double percentile) {
+        if (sortedValues.isEmpty()) return 0L;
+        int index = (int) Math.ceil(percentile * sortedValues.size()) - 1;
+        return sortedValues.get(Math.max(0, index));
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
     private RagEvalCase findCase(UUID kbId, UUID caseId) {
         return caseRepository.findByIdAndKbId(caseId, kbId)
                 .orElseThrow(() -> new ResourceNotFoundException("RAG eval case not found: " + caseId));
@@ -253,6 +496,11 @@ public class RagEvalService {
     }
 
     private RagEvalRunResponse toRunResponse(RagEvalRun run, List<RagEvalRunResult> results) {
+        return toRunResponse(run, results, null);
+    }
+
+    private RagEvalRunResponse toRunResponse(RagEvalRun run, List<RagEvalRunResult> results,
+                                             RagQualityGateService.ComparisonReport comparison) {
         return RagEvalRunResponse.builder()
                 .id(run.getId())
                 .kbId(run.getKbId())
@@ -261,6 +509,13 @@ public class RagEvalService {
                 .totalCount(run.getTotalCount())
                 .status(run.getStatus())
                 .failureMessage(run.getFailureMessage())
+                .gateStatus(run.getGateStatus())
+                .metrics(run.getMetrics())
+                .profileSnapshot(run.getProfileSnapshot())
+                .removedBaselineCaseKeys(comparison == null ? List.of() : comparison.removedBaselineCases().stream()
+                        .map(RagQualityGateService.CaseEvidence::caseKey).toList())
+                .baselineRunId(run.getBaselineRunId())
+                .policySnapshot(run.getPolicySnapshot())
                 .createdAt(run.getCreatedAt())
                 .results(results.stream().map(this::toResultResponse).toList())
                 .build();
@@ -283,6 +538,23 @@ public class RagEvalService {
                 .embeddingModel(result.getEmbeddingModel())
                 .embeddingDimension(result.getEmbeddingDimension())
                 .topK(result.getTopK())
+                .caseFingerprint(result.getCaseFingerprint())
+                .comparisonStatus(result.getComparisonStatus())
+                .latencyMs(result.getLatencyMs())
+                .build();
+    }
+
+    private RagQualityPolicyResponse toPolicyResponse(RagQualityPolicy policy) {
+        return RagQualityPolicyResponse.builder()
+                .id(policy.getId())
+                .kbId(policy.getKbId())
+                .minimumPassRate(policy.getMinimumPassRate())
+                .maximumPassRateDrop(policy.getMaximumPassRateDrop())
+                .maximumNewFailures(policy.getMaximumNewFailures())
+                .blockWhenUnbaselined(policy.getBlockWhenUnbaselined())
+                .baselineRunId(policy.getBaselineRunId())
+                .createdAt(policy.getCreatedAt())
+                .updatedAt(policy.getUpdatedAt())
                 .build();
     }
 

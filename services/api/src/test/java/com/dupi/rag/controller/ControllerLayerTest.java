@@ -201,6 +201,18 @@ class ControllerLayerTest {
                 .caseKey("case")
                 .query("q")
                 .build();
+        RagQualityPolicyRequest qualityPolicyRequest = new RagQualityPolicyRequest();
+        qualityPolicyRequest.setMinimumPassRate(80);
+        qualityPolicyRequest.setMaximumPassRateDrop(5);
+        qualityPolicyRequest.setMaximumNewFailures(0);
+        qualityPolicyRequest.setBlockWhenUnbaselined(false);
+        RagQualityPolicyResponse qualityPolicy = RagQualityPolicyResponse.builder()
+                .kbId(kbId)
+                .minimumPassRate(80)
+                .maximumPassRateDrop(5)
+                .maximumNewFailures(0)
+                .blockWhenUnbaselined(false)
+                .build();
         KnowledgeBaseExportResponse exportResponse = KnowledgeBaseExportResponse.builder()
                 .knowledgeBase(KnowledgeBaseExportResponse.KnowledgeBaseSnapshot.builder()
                         .originalId(kbId)
@@ -238,6 +250,10 @@ class ControllerLayerTest {
         when(ragEvalService.updateCase(eq(kbId), eq(ragEvalCase.getId()), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.listRuns(kbId)).thenReturn(List.of(ragEvalRun));
         when(ragEvalService.run(eq(kbId), eq(true))).thenReturn(ragEvalRun);
+        when(ragEvalService.getPolicy(kbId)).thenReturn(qualityPolicy);
+        when(ragEvalService.updatePolicy(kbId, qualityPolicyRequest)).thenReturn(qualityPolicy);
+        when(ragEvalService.promoteBaseline(kbId, ragEvalRun.getId())).thenReturn(qualityPolicy);
+        when(ragEvalService.getRunComparison(kbId, ragEvalRun.getId())).thenReturn(ragEvalRun);
         when(knowledgeBaseExportService.exportKnowledgeBase(kbId)).thenReturn(exportResponse);
         when(knowledgeBaseExportService.restore(importRequest)).thenReturn(kbResponse);
 
@@ -272,6 +288,10 @@ class ControllerLayerTest {
         RagEvalRunRequest ragEvalRunRequest = new RagEvalRunRequest();
         ragEvalRunRequest.setUseRerank(true);
         assertThat(controller.runRagEval(kbId, ragEvalRunRequest)).isSameAs(ragEvalRun);
+        assertThat(controller.getRagQualityPolicy(kbId)).isSameAs(qualityPolicy);
+        assertThat(controller.updateRagQualityPolicy(kbId, qualityPolicyRequest)).isSameAs(qualityPolicy);
+        assertThat(controller.promoteRagEvalBaseline(kbId, ragEvalRun.getId())).isSameAs(qualityPolicy);
+        assertThat(controller.getRagEvalRunComparison(kbId, ragEvalRun.getId())).isSameAs(ragEvalRun);
 
         verify(kbService).delete(kbId);
         verify(chatService).cancel("s1");
