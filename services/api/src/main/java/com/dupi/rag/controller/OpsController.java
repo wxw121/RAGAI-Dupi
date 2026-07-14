@@ -25,6 +25,7 @@ import com.dupi.rag.service.RoleService;
 import com.dupi.rag.service.VectorCleanupTaskService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.boot.autoconfigure.web.servlet.MultipartProperties;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -138,6 +139,7 @@ public class OpsController {
                         "ACCOUNT_DISABLE",
                         "ACCOUNT_ENABLE",
                         "ACCOUNT_TOKEN_ROTATE",
+                        "ACCOUNT_DELETE_E2E",
                         "ROLE_CREATE",
                         "ROLE_UPDATE",
                         "ROLE_DISABLE",
@@ -166,6 +168,12 @@ public class OpsController {
         AccountResponse response = accountService.update(username, request);
         auditLogService.recordSuccess("ACCOUNT_UPDATE", "ACCOUNT", null, "Updated account " + response.getUsername());
         return response;
+    }
+
+    @DeleteMapping("/accounts/{username}")
+    public void deleteE2eAccount(@PathVariable String username) {
+        String deleted = accountService.deleteE2e(username);
+        auditLogService.recordSuccess("ACCOUNT_DELETE_E2E", "ACCOUNT", null, "Deleted E2E account " + deleted);
     }
 
     @PostMapping("/accounts/{username}/reset-password")

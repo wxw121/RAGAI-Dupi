@@ -383,6 +383,7 @@ class ControllerLayerTest {
         when(accountService.disable("analyst")).thenReturn(analyst);
         when(accountService.enable("analyst")).thenReturn(analyst);
         when(accountService.rotateTokenVersion("analyst")).thenReturn(analyst);
+        when(accountService.deleteE2e("e2e_account_42")).thenReturn("e2e_account_42");
         when(accountService.generatePasswordHash("secret")).thenReturn("pbkdf2$hash");
         when(accountService.resetPassword(eq("analyst"), eq("secret"))).thenReturn(analyst);
         RoleResponse role = RoleResponse.builder()
@@ -419,12 +420,14 @@ class ControllerLayerTest {
         assertThat(controller.disableAccount("analyst")).isSameAs(analyst);
         assertThat(controller.enableAccount("analyst")).isSameAs(analyst);
         assertThat(controller.rotateAccountToken("analyst")).isSameAs(analyst);
+        controller.deleteE2eAccount("e2e_account_42");
         PasswordResetRequest passwordResetRequest = new PasswordResetRequest();
         passwordResetRequest.setPassword("secret");
         assertThat(controller.resetAccountPassword("analyst", passwordResetRequest)).isSameAs(analyst);
         assertThat(controller.generatePasswordHash(Map.of("password", "secret"))).containsEntry("passwordHash", "pbkdf2$hash");
         OpsMetadataResponse metadata = controller.metadata();
         assertThat(metadata.getPermissions()).contains("KB_READ", "ACCOUNT_PASSWORD_RESET", "OPS_ALERT_NOTIFY");
+        assertThat(metadata.getAuditActions()).contains("ACCOUNT_DELETE_E2E");
         assertThat(metadata.getGuardrails().getUploadRateLimit().isEnabled()).isTrue();
         assertThat(metadata.getGuardrails().getUploadRateLimit().getRequests()).isEqualTo(11);
         assertThat(metadata.getGuardrails().getUploadRateLimit().getWindowSeconds()).isEqualTo(45);
@@ -475,10 +478,12 @@ class ControllerLayerTest {
         verify(accountService).disable("analyst");
         verify(accountService).enable("analyst");
         verify(accountService).rotateTokenVersion("analyst");
+        verify(accountService).deleteE2e("e2e_account_42");
         verify(accountService).resetPassword("analyst", "secret");
         verify(auditLogService).recordSuccess(eq("ACCOUNT_CREATE"), eq("ACCOUNT"), isNull(), anyString());
         verify(auditLogService).recordSuccess(eq("ACCOUNT_UPDATE"), eq("ACCOUNT"), isNull(), anyString());
         verify(auditLogService).recordSuccess(eq("ACCOUNT_PASSWORD_RESET"), eq("ACCOUNT"), isNull(), anyString());
+        verify(auditLogService).recordSuccess(eq("ACCOUNT_DELETE_E2E"), eq("ACCOUNT"), isNull(), contains("e2e_account_42"));
         verify(auditLogService).recordSuccess(eq("ROLE_CREATE"), eq("ROLE"), eq(role.getId()), anyString());
     }
 
