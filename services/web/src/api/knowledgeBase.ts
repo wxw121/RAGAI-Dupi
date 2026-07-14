@@ -44,6 +44,10 @@ export function deleteKnowledgeBase(kbId: string): Promise<void> {
   return apiDelete(`${BASE}/${kbId}`)
 }
 
+export function deleteE2eAccount(username: string): Promise<void> {
+  return apiDelete(`${OPS_BASE}/accounts/${username}`)
+}
+
 export function exportKnowledgeBase(kbId: string): Promise<KnowledgeBaseExport> {
   return apiGet<KnowledgeBaseExport>(`${BASE}/${kbId}/export`)
 }

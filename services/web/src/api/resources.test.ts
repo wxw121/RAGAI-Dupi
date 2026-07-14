@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createKnowledgeBase,
   deleteKnowledgeBase,
+  deleteE2eAccount,
   getKnowledgeBase,
   listKnowledgeBases,
   listIngestJobs,
@@ -125,6 +126,7 @@ describe('resource API wrappers', () => {
     await expect(notifyAuditAlerts()).resolves.toEqual({ delivered: true })
     await expect(deleteRagEvalCase('kb1', 'case1')).resolves.toBeUndefined()
     await expect(deleteKnowledgeBase('kb1')).resolves.toBeUndefined()
+    await expect(deleteE2eAccount('e2e_account_42')).resolves.toBeUndefined()
 
     expect(apiClient.apiGet).toHaveBeenNthCalledWith(1, '/api/v1/knowledge-bases')
     expect(apiClient.apiGet).toHaveBeenNthCalledWith(2, '/api/v1/knowledge-bases/kb1')
@@ -163,6 +165,7 @@ describe('resource API wrappers', () => {
     expect(apiClient.apiPost).toHaveBeenNthCalledWith(14, '/api/v1/ops/audit-alerts/notify')
     expect(apiClient.apiDelete).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb1/rag-eval/cases/case1')
     expect(apiClient.apiDelete).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb1')
+    expect(apiClient.apiDelete).toHaveBeenCalledWith('/api/v1/ops/accounts/e2e_account_42')
   })
 
   it('builds document API paths', async () => {
