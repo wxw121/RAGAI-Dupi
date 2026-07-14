@@ -12,6 +12,7 @@ import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.entity.RagEvalCase;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.entity.RagEvalRunResult;
+import com.dupi.rag.domain.entity.RagQualityPolicy;
 import com.dupi.rag.domain.entity.Role;
 import com.dupi.rag.domain.entity.UserAccount;
 import com.dupi.rag.domain.entity.VectorCleanupTask;
@@ -19,6 +20,8 @@ import com.dupi.rag.domain.enums.AuditLogStatus;
 import com.dupi.rag.domain.enums.ChatMessageRole;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
+import com.dupi.rag.domain.enums.RagEvalComparisonStatus;
+import com.dupi.rag.domain.enums.RagQualityGateStatus;
 import com.dupi.rag.domain.enums.VectorCleanupStatus;
 import com.dupi.rag.domain.enums.VectorCleanupTargetType;
 import com.dupi.rag.domain.enums.IngestOutboxStatus;
@@ -321,6 +324,51 @@ class EntityLifecycleTest {
         assertThat(result.getEmbeddingDimension()).isEqualTo(1024);
         assertThat(result.getTopK()).isEqualTo(8);
         assertThat(result.getCreatedAt()).isNotNull();
+    }
+
+    @Test
+    void ragQualityEvidenceExposesPolicyRunAndComparisonFields() throws Exception {
+        UUID kbId = UUID.randomUUID();
+        UUID baselineRunId = UUID.randomUUID();
+        RagQualityPolicy policy = RagQualityPolicy.builder()
+                .kbId(kbId)
+                .minimumPassRate(80)
+                .maximumPassRateDrop(5)
+                .maximumNewFailures(0)
+                .blockWhenUnbaselined(true)
+                .baselineRunId(baselineRunId)
+                .build();
+        invoke(policy, "onCreate");
+
+        assertThat(policy.getId()).isNotNull();
+        assertThat(policy.getKbId()).isEqualTo(kbId);
+        assertThat(policy.getBaselineRunId()).isEqualTo(baselineRunId);
+        assertThat(policy.getCreatedAt()).isNotNull();
+        assertThat(policy.getUpdatedAt()).isNotNull();
+
+        RagEvalRun run = RagEvalRun.builder()
+                .kbId(kbId)
+                .gateStatus(RagQualityGateStatus.PASS)
+                .metrics(Map.of("passRate", 100, "fallbackCount", 0))
+                .profileSnapshot(Map.of("version", 1))
+                .build();
+        invoke(run, "onCreate");
+
+        assertThat(run.getGateStatus()).isEqualTo(RagQualityGateStatus.PASS);
+        assertThat(run.getMetrics()).containsEntry("passRate", 100);
+        assertThat(run.getProfileSnapshot()).containsEntry("version", 1);
+
+        RagEvalRunResult result = RagEvalRunResult.builder()
+                .runId(run.getId())
+                .caseKey("case-1")
+                .query("query")
+                .caseFingerprint("sha256:fingerprint")
+                .comparisonStatus(RagEvalComparisonStatus.UNCHANGED)
+                .build();
+        invoke(result, "onCreate");
+
+        assertThat(result.getCaseFingerprint()).isEqualTo("sha256:fingerprint");
+        assertThat(result.getComparisonStatus()).isEqualTo(RagEvalComparisonStatus.UNCHANGED);
     }
 
     private static void invoke(Object target, String methodName) throws Exception {
