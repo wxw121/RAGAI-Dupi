@@ -57,7 +57,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rag-regression-eval.
 
 退出码：`0` 全部通过；`1` 任一步失败（报告仍写入 `e2e-last-run.json`）。
 
-## 真实浏览器 E2E 门禁（V1.2）
+## 真实浏览器 E2E 门禁（V1.2.1）
 
 该门禁位于 `services/web/e2e/browser-gate.spec.ts`，通过根脚本运行：
 
@@ -70,20 +70,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-browser-gate.ps1
 
 门禁会启动干净 Chromium 上下文并执行以下真实 UI 路径：
 
-1. 输入管理员用户名/密码登录，不使用本地开放模式。
-2. 选择 `HYBRID` 创建知识库，进入文档、问答和 `RAG 评估` 页签。
+1. 输入配置管理员用户名/密码登录，不使用本地开放模式；该会话只创建 `e2e` 租户中的临时管理员 `e2e_gate_<runId>`。
+2. 清空 Cookie 和本地 CSRF 状态后，以临时管理员重新登录；选择 `HYBRID` 创建 `e2e-browser-<runId>` 知识库，进入文档、问答和 `RAG 评估` 页签。
 3. 新建持久化 RAG 评估用例并确认列表回显。
-4. 打开审计页；在账号页创建临时账号，确认没有 `CSRF token required`，随后禁用该账号；最后打开角色页。
+4. 打开审计页；在账号页创建 `e2e_account_<runId>`，确认没有 `CSRF token required`，随后禁用该账号；最后打开角色页。
 5. 每个阶段检查页面异常、控制台 error、关键 API 4xx/5xx、请求失败和错误 Toast。
 
-缺少 `E2E_ADMIN_USERNAME` 或 `E2E_ADMIN_PASSWORD` 时会直接退出并提示缺少凭据；这属于前置条件失败，不代表产品流程通过。门禁会保留已禁用的随机临时账号作为审计证据，定期测试环境可按 `e2e_account_*` 清理。
+缺少 `E2E_ADMIN_USERNAME` 或 `E2E_ADMIN_PASSWORD` 时会直接退出并提示缺少凭据；这属于前置条件失败，不代表产品流程通过。所有产品断言和浏览器错误门禁通过后，测试会使用同一浏览器 Cookie 与 CSRF token 按顺序删除临时知识库、`e2e_account_<runId>` 和 `e2e_gate_<runId>`，再以配置管理员确认三项均不可见。任一步产品流程失败时不执行删除，Playwright 会附加 `e2e-evidence`（租户资源标识与当前页面 URL）供排查。
 
-### 最近一次浏览器门禁（2026-07-13）
+仅自动化清理可调用 `DELETE /api/v1/ops/accounts/{username}`：调用者必须具备 `OPS_ADMIN`，用户名必须以小写 `e2e_` 开头且账号租户必须是 `e2e`。账号管理页面没有通用删除按钮，普通账号和 `default` 租户账号无法通过该接口删除。
+
+### 最近一次浏览器门禁（2026-07-14）
 
 - URL：`http://localhost:8080`
 - 浏览器：Playwright Chromium / Desktop Chrome 配置
-- 结果：`1 passed (3.6s)`，核心测试流程耗时 `2.7s`
-- 检查结果：登录、混合检索建库、知识库三个页签、RAG 用例保存、审计、账号创建/禁用、角色页均通过；未捕获控制台、页面、请求、Toast 或 CSRF 错误。
+- 结果：`1 passed (4.5s)`，核心测试流程耗时 `3.7s`
+- 检查结果：配置管理员创建临时 E2E 管理员后，隔离会话中的混合检索建库、知识库三个页签、RAG 用例保存、审计、账号创建/禁用和角色页均通过；未捕获控制台、页面、请求、Toast 或 CSRF 错误，临时知识库和两个临时账号已自动清理。
 
 ## 最近一次运行结果（2026-06-19）
 

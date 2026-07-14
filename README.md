@@ -3,6 +3,7 @@
 > 账号 / RBAC 与 ops 管理权限更新记录见 [docs/rbac-ops-admin-2026-07-06.md](docs/rbac-ops-admin-2026-07-06.md)；摄入 outbox、删除 tombstone、实例级授权与审计运维增强见 [docs/outbox-tombstone-rbac-ops-2026-07-07.md](docs/outbox-tombstone-rbac-ops-2026-07-07.md)。
 > V1.1（API `0.1.1-SNAPSHOT` / Web `0.1.1`）新增真实浏览器 E2E 门禁、摄入诊断、知识库详情 `RAG 评估`、上传治理提示与聚合运维告警；设计与实施记录见 [docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md](docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md) 与 [docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md](docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md)。
 > V1.2（API `0.1.2-SNAPSHOT` / Web `0.1.2`）扩展真实浏览器门禁，新增文档索引详情、结构化 Chat 错误、持久化 RAG 评估用例/历史、混合检索与 Rerank 控制、审计告警 Webhook，以及知识库元数据/分块快照导出恢复；实施计划见 [docs/superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md](docs/superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md)。
+> V1.2.1 收尾将真实浏览器门禁业务数据隔离到 `e2e` 租户；成功运行会删除临时知识库和账号，失败运行仅保留 `e2e` 证据。设计见 [docs/superpowers/specs/2026-07-14-v1.2.1-e2e-isolation-cleanup-design.md](docs/superpowers/specs/2026-07-14-v1.2.1-e2e-isolation-cleanup-design.md)。
 
 企业级 RAG 知识库引擎 — 类似 Dify/扣子底层知识库模块。
 
@@ -127,7 +128,7 @@ powershell -NoProfile -File scripts/e2e-web-maintenance-flow.ps1
 powershell -NoProfile -File scripts/rag-regression-eval.ps1
 ```
 
-`e2e-browser-gate.ps1` 需要 `E2E_ADMIN_USERNAME` 与 `E2E_ADMIN_PASSWORD`，缺少凭据时会明确失败；`rag-regression-eval.ps1` 会写入 `scripts/rag-regression-eval-last-run.json`，其中 `caseResults` 包含每条用例的 query、pass/fail、命中数、期望/命中文件、命中 token、检索模式、fallback 原因和 embedding 信息。
+`e2e-browser-gate.ps1` 需要 `E2E_ADMIN_USERNAME` 与 `E2E_ADMIN_PASSWORD`，缺少凭据时会明确失败。门禁仅以配置管理员创建 `e2e` 租户中的临时管理员，后续知识库、RAG 用例和验证账号均在该租户完成；成功后自动删除临时知识库及 `e2e_*` 账号，失败时在 Playwright 结果中保留资源标识和页面 URL 作为证据。`rag-regression-eval.ps1` 会写入 `scripts/rag-regression-eval-last-run.json`，其中 `caseResults` 包含每条用例的 query、pass/fail、命中数、期望/命中文件、命中 token、检索模式、fallback 原因和 embedding 信息。
 
 ### 5. API 示例
 
@@ -182,6 +183,10 @@ curl -X POST http://localhost:8080/api/v1/ops/audit-alerts/notify
 curl http://localhost:8080/api/v1/ops/metadata
 curl http://localhost:8080/api/v1/ops/accounts
 curl http://localhost:8080/api/v1/ops/roles
+
+# 仅测试清理：需 OPS_ADMIN，且仅允许删除 e2e 租户中的 e2e_* 账号。
+# 账号管理页面不提供通用删除入口。
+curl -X DELETE http://localhost:8080/api/v1/ops/accounts/e2e_account_42
 
 # /ops/metadata 返回 guardrails：上传限流、摄入队列、审计阈值和 multipart 最大文件大小
 # /ops/audit-alerts 聚合审计失败峰值、摄入失败/死信任务和向量清理失败任务
