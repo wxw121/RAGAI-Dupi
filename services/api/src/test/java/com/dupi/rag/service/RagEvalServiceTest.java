@@ -3,6 +3,7 @@ package com.dupi.rag.service;
 import com.dupi.rag.domain.entity.RagEvalCase;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.entity.RagQualityPolicy;
+import com.dupi.rag.domain.entity.RetrievalProfile;
 import com.dupi.rag.domain.enums.RagQualityGateStatus;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
 import com.dupi.rag.dto.RagEvalCaseRequest;
@@ -32,6 +33,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.doThrow;
@@ -49,6 +51,7 @@ class RagEvalServiceTest {
     @Mock RagEvalCaseCoordinator caseCoordinator;
     @Mock RagQualityPolicyRepository policyRepository;
     @Mock AuditLogService auditLogService;
+    @Mock RetrievalProfileService retrievalProfileService;
 
     @Test
     void listCasesSeedsBuiltInCasesWhenKnowledgeBaseHasNoPersistedCases() {
@@ -291,6 +294,33 @@ class RagEvalServiceTest {
         assertThat(savedFailures).containsExactly(null, "database write failed");
     }
 
+    @Test
+    void runWithCandidateProfilePersistsExactProfileSnapshot() {
+        UUID kbId = UUID.randomUUID();
+        UUID profileId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        RagEvalCase evalCase = caseEntity(kbId, UUID.randomUUID());
+        RetrievalProfile profile = RetrievalProfile.builder()
+                .id(profileId).kbId(kbId).name("candidate").version(3)
+                .vectorCandidateCount(40).sparseCandidateCount(25).rrfConstant(50)
+                .rerankEnabled(false).rerankCandidateLimit(15).finalTopK(4).build();
+        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(retrievalProfileService.find(kbId, profileId)).thenReturn(profile);
+        when(retrievalService.retrieveForProfile(eq(kbId), any(), eq(profileId)))
+                .thenReturn(RetrieveResponse.builder().retrievalMode("hybrid").hits(List.of()).build());
+        when(runRepository.save(any(RagEvalRun.class))).thenAnswer(invocation -> {
+            RagEvalRun saved = invocation.getArgument(0);
+            saved.setId(runId);
+            return saved;
+        });
+
+        var response = service().run(kbId, true, profileId);
+
+        assertThat(response.getProfileSnapshot()).isEqualTo(profile.snapshot());
+        assertThat(response.isUseRerank()).isFalse();
+        verify(retrievalService).retrieveForProfile(eq(kbId), any(), eq(profileId));
+    }
+
     private RagEvalService service() {
         return new RagEvalService(
                 knowledgeBaseService,
@@ -301,7 +331,8 @@ class RagEvalServiceTest {
                 caseCoordinator,
                 policyRepository,
                 new RagQualityGateService(),
-                auditLogService
+                auditLogService,
+                retrievalProfileService
         );
     }
 

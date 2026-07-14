@@ -48,29 +48,48 @@ def rrf_fusion(vector_hits: list[dict], bm25_hits: list[dict], k: int = 60) -> l
     for rank, hit in enumerate(vector_hits):
         cid = hit["chunk_id"]
         scores[cid] = scores.get(cid, 0) + 1 / (k + rank + 1)
-        docs[cid] = hit
+        docs[cid] = {**hit, "vector_rank": rank + 1}
 
     for rank, hit in enumerate(bm25_hits):
         cid = hit["chunk_id"]
         scores[cid] = scores.get(cid, 0) + 1 / (k + rank + 1)
-        docs[cid] = hit
+        existing = docs.get(cid, {})
+        docs[cid] = {**hit, **existing, "sparse_rank": rank + 1}
 
     fused = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     results = []
-    for cid, score in fused:
+    for rank, (cid, score) in enumerate(fused):
         item = dict(docs[cid])
         item["score"] = score
+        item["fusion_score"] = score
+        item["fusion_rank"] = rank + 1
         results.append(item)
     return results
 
 
-def bm25_search(corpus: list[dict], query: str, top_k: int) -> list[dict]:
+def bm25_search(
+    corpus: list[dict],
+    query: str,
+    top_k: int,
+    index_params: dict | None = None,
+    search_params: dict | None = None,
+) -> list[dict]:
     if not corpus:
         return []
     tokenized = [tokenize(c["content"]) for c in corpus]
-    bm25 = BM25Okapi(tokenized)
+    index_params = index_params or {}
+    search_params = search_params or {}
+    bm25 = BM25Okapi(
+        tokenized,
+        k1=float(index_params.get("bm25_k1", 1.5)),
+        b=float(index_params.get("bm25_b", 0.75)),
+        epsilon=float(index_params.get("bm25_epsilon", 0.25)),
+    )
     scores = bm25.get_scores(tokenize(query))
-    ranked = sorted(zip(corpus, scores), key=lambda x: x[1], reverse=True)[:top_k]
+    ranked = sorted(zip(corpus, scores), key=lambda x: x[1], reverse=True)
+    drop_ratio = min(0.99, max(0.0, float(search_params.get("drop_ratio_search", 0.0))))
+    keep_count = max(1, int(len(ranked) * (1.0 - drop_ratio))) if ranked else 0
+    ranked = ranked[:keep_count][:top_k]
     return [{**doc, "score": float(score)} for doc, score in ranked if score > 0]
 
 
@@ -86,6 +105,8 @@ def rerank_hits(query: str, hits: list[dict], top_k: int) -> list[dict]:
     for hit, score in ranked[:top_k]:
         item = dict(hit)
         item["score"] = float(score)
+        item["rerank_score"] = float(score)
+        item["rerank_rank"] = len(results) + 1
         results.append(item)
     return results
 
@@ -115,6 +136,13 @@ def hybrid_retrieve(
     embedding_dimension: int,
     use_rerank: bool = False,
     corpus_fetcher=None,
+    vector_candidate_count: int | None = None,
+    sparse_candidate_count: int | None = None,
+    rrf_constant: int = 60,
+    rerank_candidate_limit: int | None = None,
+    final_top_k: int | None = None,
+    sparse_index_params: dict | None = None,
+    sparse_search_params: dict | None = None,
 ) -> list[dict]:
     """执行混合检索主流程：向量召回、BM25 召回、RRF 融合、可选重排。
 
@@ -124,13 +152,17 @@ def hybrid_retrieve(
     """
     embedder = Embedder(model=embedding_model)
     indexer = MilvusIndexer(dimension=embedding_dimension)
-    vector_hits = indexer.search(kb_id, embedder.embed(query), top_k * 2)
+    output_limit = final_top_k or top_k
+    vector_limit = vector_candidate_count or top_k * 2
+    sparse_limit = sparse_candidate_count or top_k * 2
+    rerank_limit = rerank_candidate_limit or max(vector_limit, sparse_limit)
+    vector_hits = indexer.search(kb_id, embedder.embed(query), vector_limit)
 
     corpus = corpus_fetcher(kb_id) if corpus_fetcher else fetch_kb_corpus(kb_id)
 
-    bm25_hits = bm25_search(corpus, query, top_k * 2)
-    fused = rrf_fusion(vector_hits, bm25_hits)[: top_k * 2]
+    bm25_hits = bm25_search(corpus, query, sparse_limit, sparse_index_params, sparse_search_params)
+    fused = rrf_fusion(vector_hits, bm25_hits, k=rrf_constant)
 
     if use_rerank:
-        return rerank_hits(query, fused, top_k)
-    return fused[:top_k]
+        return rerank_hits(query, fused[:rerank_limit], output_limit)
+    return fused[:output_limit]

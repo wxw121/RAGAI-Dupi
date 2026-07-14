@@ -420,6 +420,8 @@ class ConfigAndExceptionTest {
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs");
         assertAllowed(filter, tokenService, "operator", "PATCH", "/api/v1/knowledge-bases/kb/rag-eval/policy");
         assertAllowed(filter, tokenService, "baseline-admin", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs/run/baseline");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/retrieval-profiles");
+        assertAllowed(filter, tokenService, "baseline-admin", "POST", "/api/v1/knowledge-bases/kb/retrieval-profiles/profile/activate");
         assertAllowed(filter, tokenService, "operator", "DELETE", "/api/v1/knowledge-bases/kb");
         assertAllowed(filter, tokenService, "operator", "DELETE", "/api/v1/knowledge-bases/kb/chat-sessions/session");
 
@@ -463,6 +465,16 @@ class ConfigAndExceptionTest {
         MockHttpServletResponse operatorPromoteResponse = new MockHttpServletResponse();
         filter.doFilter(operatorPromote, operatorPromoteResponse, mock(FilterChain.class));
 
+        MockHttpServletRequest readerCreateProfile = bearerRequest(
+                tokenService, "reader", "POST", "/api/v1/knowledge-bases/kb/retrieval-profiles");
+        MockHttpServletResponse readerCreateProfileResponse = new MockHttpServletResponse();
+        filter.doFilter(readerCreateProfile, readerCreateProfileResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest operatorActivateProfile = bearerRequest(
+                tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/retrieval-profiles/profile/activate");
+        MockHttpServletResponse operatorActivateProfileResponse = new MockHttpServletResponse();
+        filter.doFilter(operatorActivateProfile, operatorActivateProfileResponse, mock(FilterChain.class));
+
         assertThat(createKbResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
         assertThat(createKbResponse.getContentAsString()).contains("permission required: KB_WRITE");
         assertThat(reindexResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
@@ -478,6 +490,8 @@ class ConfigAndExceptionTest {
         assertThat(promoteBaselineResponse.getContentAsString()).contains("permission required: OPS_ADMIN");
         assertThat(maintenancePromoteWithoutReadResponse.getContentAsString()).contains("permission required: OPS_ADMIN");
         assertThat(operatorPromoteResponse.getContentAsString()).contains("permission required: OPS_ADMIN");
+        assertThat(readerCreateProfileResponse.getContentAsString()).contains("permission required: KB_WRITE");
+        assertThat(operatorActivateProfileResponse.getContentAsString()).contains("permission required: OPS_ADMIN");
         assertThat(SecurityContext.hasPermission(null)).isFalse();
         assertThat(SecurityContext.hasPermission(" ")).isFalse();
     }

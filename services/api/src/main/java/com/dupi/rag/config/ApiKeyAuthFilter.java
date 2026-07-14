@@ -219,6 +219,15 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
         if ("POST".equalsIgnoreCase(method) && "/api/v1/knowledge-bases/import".equals(uri)) {
             return List.of("KB_WRITE");
         }
+        if (uri.contains("/retrieval-profiles")) {
+            if ("POST".equalsIgnoreCase(method)
+                    && (uri.endsWith("/activate") || uri.endsWith("/rollback"))) {
+                return List.of("OPS_ADMIN", "KB_READ");
+            }
+            if ("POST".equalsIgnoreCase(method)) {
+                return List.of("KB_WRITE");
+            }
+        }
         if (uri.contains("/rag-eval/")) {
             if ("POST".equalsIgnoreCase(method) && uri.endsWith("/baseline")) {
                 return List.of("OPS_ADMIN", "KB_READ");

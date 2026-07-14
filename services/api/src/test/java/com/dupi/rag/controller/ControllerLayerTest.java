@@ -165,8 +165,10 @@ class ControllerLayerTest {
         ChatSessionService chatSessionService = mock(ChatSessionService.class);
         RagEvalService ragEvalService = mock(RagEvalService.class);
         KnowledgeBaseExportService knowledgeBaseExportService = mock(KnowledgeBaseExportService.class);
+        RetrievalProfileService retrievalProfileService = mock(RetrievalProfileService.class);
         KnowledgeBaseController controller = new KnowledgeBaseController(kbService, retrievalService, chatService,
-                ingestJobService, chatSessionService, ragEvalService, knowledgeBaseExportService);
+                ingestJobService, chatSessionService, ragEvalService, knowledgeBaseExportService,
+                retrievalProfileService);
         UUID kbId = UUID.randomUUID();
         UUID sessionId = UUID.randomUUID();
         UUID secondSessionId = UUID.randomUUID();
@@ -213,6 +215,16 @@ class ControllerLayerTest {
                 .maximumNewFailures(0)
                 .blockWhenUnbaselined(false)
                 .build();
+        RetrievalProfileRequest profileRequest = new RetrievalProfileRequest();
+        profileRequest.setName("balanced");
+        profileRequest.setVectorCandidateCount(30);
+        profileRequest.setSparseCandidateCount(30);
+        profileRequest.setRrfConstant(60);
+        profileRequest.setRerankEnabled(true);
+        profileRequest.setRerankCandidateLimit(20);
+        profileRequest.setFinalTopK(5);
+        RetrievalProfileResponse profileResponse = RetrievalProfileResponse.builder()
+                .id(UUID.randomUUID()).kbId(kbId).name("balanced").version(1).build();
         KnowledgeBaseExportResponse exportResponse = KnowledgeBaseExportResponse.builder()
                 .knowledgeBase(KnowledgeBaseExportResponse.KnowledgeBaseSnapshot.builder()
                         .originalId(kbId)
@@ -249,11 +261,15 @@ class ControllerLayerTest {
         when(ragEvalService.createCase(eq(kbId), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.updateCase(eq(kbId), eq(ragEvalCase.getId()), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.listRuns(kbId)).thenReturn(List.of(ragEvalRun));
-        when(ragEvalService.run(eq(kbId), eq(true))).thenReturn(ragEvalRun);
+        when(ragEvalService.run(eq(kbId), eq(true), isNull())).thenReturn(ragEvalRun);
         when(ragEvalService.getPolicy(kbId)).thenReturn(qualityPolicy);
         when(ragEvalService.updatePolicy(kbId, qualityPolicyRequest)).thenReturn(qualityPolicy);
         when(ragEvalService.promoteBaseline(kbId, ragEvalRun.getId())).thenReturn(qualityPolicy);
         when(ragEvalService.getRunComparison(kbId, ragEvalRun.getId())).thenReturn(ragEvalRun);
+        when(retrievalProfileService.list(kbId)).thenReturn(List.of(profileResponse));
+        when(retrievalProfileService.create(kbId, profileRequest)).thenReturn(profileResponse);
+        when(retrievalProfileService.activate(kbId, profileResponse.getId())).thenReturn(profileResponse);
+        when(retrievalProfileService.rollback(kbId, profileResponse.getId())).thenReturn(profileResponse);
         when(knowledgeBaseExportService.exportKnowledgeBase(kbId)).thenReturn(exportResponse);
         when(knowledgeBaseExportService.restore(importRequest)).thenReturn(kbResponse);
 
@@ -292,6 +308,10 @@ class ControllerLayerTest {
         assertThat(controller.updateRagQualityPolicy(kbId, qualityPolicyRequest)).isSameAs(qualityPolicy);
         assertThat(controller.promoteRagEvalBaseline(kbId, ragEvalRun.getId())).isSameAs(qualityPolicy);
         assertThat(controller.getRagEvalRunComparison(kbId, ragEvalRun.getId())).isSameAs(ragEvalRun);
+        assertThat(controller.listRetrievalProfiles(kbId)).containsExactly(profileResponse);
+        assertThat(controller.createRetrievalProfile(kbId, profileRequest)).isSameAs(profileResponse);
+        assertThat(controller.activateRetrievalProfile(kbId, profileResponse.getId())).isSameAs(profileResponse);
+        assertThat(controller.rollbackRetrievalProfile(kbId, profileResponse.getId())).isSameAs(profileResponse);
 
         verify(kbService).delete(kbId);
         verify(chatService).cancel("s1");

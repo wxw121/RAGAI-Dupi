@@ -4,6 +4,7 @@ import com.dupi.rag.domain.entity.RagEvalCase;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.entity.RagEvalRunResult;
 import com.dupi.rag.domain.entity.RagQualityPolicy;
+import com.dupi.rag.domain.entity.RetrievalProfile;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
 import com.dupi.rag.domain.enums.RagEvalComparisonStatus;
 import com.dupi.rag.domain.enums.RagQualityGateStatus;
@@ -48,6 +49,7 @@ public class RagEvalService {
     private final RagQualityPolicyRepository policyRepository;
     private final RagQualityGateService qualityGateService;
     private final AuditLogService auditLogService;
+    private final RetrievalProfileService retrievalProfileService;
 
     @Transactional
     public List<RagEvalCaseResponse> listCases(UUID kbId) {
@@ -87,7 +89,13 @@ public class RagEvalService {
     }
 
     public RagEvalRunResponse run(UUID kbId, boolean useRerank) {
+        return run(kbId, useRerank, null);
+    }
+
+    public RagEvalRunResponse run(UUID kbId, boolean useRerank, UUID profileId) {
         List<RagEvalCase> cases = caseCoordinator.loadOrSeed(kbId);
+        RetrievalProfile profile = profileId == null ? null : retrievalProfileService.find(kbId, profileId);
+        boolean effectiveRerank = profile == null ? useRerank : Boolean.TRUE.equals(profile.getRerankEnabled());
         RagQualityPolicy policy = getOrCreatePolicy(kbId);
         RagEvalRun baselineRun = policy.getBaselineRunId() == null
                 ? null
@@ -99,11 +107,11 @@ public class RagEvalService {
                 : resultRepository.findByRunIdOrderByCaseKeyAsc(baselineRun.getId());
         RagEvalRun run = RagEvalRun.builder()
                 .kbId(kbId)
-                .useRerank(useRerank)
+                .useRerank(effectiveRerank)
                 .totalCount(cases.size())
                 .passedCount(0)
                 .status(RagEvalRunStatus.RUNNING)
-                .profileSnapshot(Map.of("useRerank", useRerank))
+                .profileSnapshot(profile == null ? Map.of("useRerank", effectiveRerank) : profile.snapshot())
                 .baselineRunId(baselineRun == null ? null : baselineRun.getId())
                 .policySnapshot(policySnapshot(policy))
                 .createdAt(Instant.now())
@@ -113,7 +121,7 @@ public class RagEvalService {
         List<RagEvalRunResult> results = new ArrayList<>();
         try {
             for (RagEvalCase evalCase : cases) {
-                results.add(evaluate(kbId, run.getId(), evalCase, useRerank));
+                results.add(evaluate(kbId, run.getId(), evalCase, effectiveRerank, profile));
             }
             RagQualityGateService.ComparisonReport comparison = baselineRun == null
                     ? null
@@ -131,7 +139,7 @@ public class RagEvalService {
             run.setStatus(RagEvalRunStatus.COMPLETED);
             run.setFailureMessage(null);
             run.setMetrics(metrics(cases, results));
-            run.setProfileSnapshot(retrievalSnapshot(useRerank, results));
+            if (profile == null) run.setProfileSnapshot(retrievalSnapshot(effectiveRerank, results));
             run.setGateStatus(qualityGateService.decide(toPolicy(policy),
                     baselineRun == null ? null : summary(baselineRun), summary(run), comparison));
             run = runRepository.save(run);
@@ -149,7 +157,8 @@ public class RagEvalService {
         }
     }
 
-    private RagEvalRunResult evaluate(UUID kbId, UUID runId, RagEvalCase evalCase, boolean useRerank) {
+    private RagEvalRunResult evaluate(UUID kbId, UUID runId, RagEvalCase evalCase, boolean useRerank,
+                                      RetrievalProfile profile) {
         long startedAt = System.nanoTime();
         List<String> failureReasons = new ArrayList<>();
         RetrieveResponse response = null;
@@ -162,7 +171,9 @@ public class RagEvalService {
             request.setQuery(evalCase.getQuery());
             request.setTopK(safeTopK(evalCase));
             request.setUseRerank(useRerank);
-            response = retrievalService.retrieve(kbId, request);
+            response = profile == null
+                    ? retrievalService.retrieve(kbId, request)
+                    : retrievalService.retrieveForProfile(kbId, request, profile.getId());
             hits = response.getHits() == null ? List.of() : response.getHits();
             if (hits.size() < safeMinHits(evalCase)) {
                 failureReasons.add("expected at least " + safeMinHits(evalCase) + " hits, got " + hits.size());

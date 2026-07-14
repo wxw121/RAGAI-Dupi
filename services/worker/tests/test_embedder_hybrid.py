@@ -200,7 +200,10 @@ def test_hybrid_retrieve_fuses_vector_and_bm25_then_reranks(monkeypatch):
 
     result = hybrid.hybrid_retrieve("kb", "hello", 1, "m", 3, use_rerank=True, corpus_fetcher=lambda _: corpus)
 
-    assert result == [{"chunk_id": "b1", "doc_id": "d", "content": "hello bm25", "score": 9.0}]
+    assert result[0] == {
+        "chunk_id": "b1", "doc_id": "d", "content": "hello bm25", "score": 9.0,
+        "sparse_rank": 1, "fusion_score": 1 / 61, "fusion_rank": 2,
+    }
 
 
 def test_hybrid_retrieve_without_rerank_fetches_default_corpus(monkeypatch):
@@ -225,3 +228,51 @@ def test_hybrid_retrieve_without_rerank_fetches_default_corpus(monkeypatch):
     result = hybrid.hybrid_retrieve("kb", "hello", 2, "m", 3, use_rerank=False)
 
     assert [hit["chunk_id"] for hit in result] == ["v1", "b1"]
+
+
+def test_hybrid_retrieve_applies_profile_limits_and_stage_ranks(monkeypatch):
+    calls = {}
+
+    class FakeEmbedder:
+        def __init__(self, model):
+            pass
+
+        def embed(self, query):
+            return [0.1]
+
+    class FakeIndexer:
+        def __init__(self, dimension):
+            pass
+
+        def search(self, kb_id, vector, top_k):
+            calls["vector_limit"] = top_k
+            return [{"chunk_id": "same", "doc_id": "d", "content": "hello", "score": 0.8}]
+
+    monkeypatch.setattr(hybrid, "Embedder", FakeEmbedder)
+    monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
+    original_bm25 = hybrid.bm25_search
+
+    def tracked_bm25(corpus, query, top_k, index_params=None, search_params=None):
+        calls["sparse_limit"] = top_k
+        calls["index_params"] = index_params
+        calls["search_params"] = search_params
+        return original_bm25(corpus, query, top_k, index_params, search_params)
+
+    monkeypatch.setattr(hybrid, "bm25_search", tracked_bm25)
+
+    result = hybrid.hybrid_retrieve(
+        "kb", "hello", 5, "m", 3, use_rerank=False,
+        corpus_fetcher=lambda _: [{"chunk_id": "same", "doc_id": "d", "content": "hello"}],
+        vector_candidate_count=30, sparse_candidate_count=20, rrf_constant=42,
+        rerank_candidate_limit=10, final_top_k=3,
+        sparse_index_params={"bm25_k1": 1.8}, sparse_search_params={"drop_ratio_search": 0.1},
+    )
+
+    assert calls == {
+        "vector_limit": 30, "sparse_limit": 20,
+        "index_params": {"bm25_k1": 1.8}, "search_params": {"drop_ratio_search": 0.1},
+    }
+    assert result[0]["vector_rank"] == 1
+    assert result[0]["sparse_rank"] == 1
+    assert result[0]["fusion_rank"] == 1
+    assert result[0]["fusion_score"] == 2 / 43

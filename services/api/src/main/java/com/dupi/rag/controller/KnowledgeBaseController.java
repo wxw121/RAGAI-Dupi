@@ -8,6 +8,7 @@ import com.dupi.rag.service.KnowledgeBaseExportService;
 import com.dupi.rag.service.KnowledgeBaseService;
 import com.dupi.rag.service.RagEvalService;
 import com.dupi.rag.service.RetrievalService;
+import com.dupi.rag.service.RetrievalProfileService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
@@ -30,6 +31,7 @@ public class KnowledgeBaseController {
     private final ChatSessionService chatSessionService;
     private final RagEvalService ragEvalService;
     private final KnowledgeBaseExportService knowledgeBaseExportService;
+    private final RetrievalProfileService retrievalProfileService;
 
     @PostMapping
     public KnowledgeBaseResponse create(@Valid @RequestBody CreateKnowledgeBaseRequest request) {
@@ -177,7 +179,9 @@ public class KnowledgeBaseController {
             @PathVariable UUID kbId,
             @RequestBody(required = false) RagEvalRunRequest request
     ) {
-        return ragEvalService.run(kbId, request != null && Boolean.TRUE.equals(request.getUseRerank()));
+        return ragEvalService.run(kbId,
+                request != null && Boolean.TRUE.equals(request.getUseRerank()),
+                request == null ? null : request.getProfileId());
     }
 
     @GetMapping("/{kbId}/rag-eval/policy")
@@ -201,5 +205,34 @@ public class KnowledgeBaseController {
     @GetMapping("/{kbId}/rag-eval/runs/{runId}/comparison")
     public RagEvalRunResponse getRagEvalRunComparison(@PathVariable UUID kbId, @PathVariable UUID runId) {
         return ragEvalService.getRunComparison(kbId, runId);
+    }
+
+    @GetMapping("/{kbId}/retrieval-profiles")
+    public java.util.List<RetrievalProfileResponse> listRetrievalProfiles(@PathVariable UUID kbId) {
+        return retrievalProfileService.list(kbId);
+    }
+
+    @PostMapping("/{kbId}/retrieval-profiles")
+    public RetrievalProfileResponse createRetrievalProfile(
+            @PathVariable UUID kbId,
+            @Valid @RequestBody RetrievalProfileRequest request
+    ) {
+        return retrievalProfileService.create(kbId, request);
+    }
+
+    @PostMapping("/{kbId}/retrieval-profiles/{profileId}/activate")
+    public RetrievalProfileResponse activateRetrievalProfile(
+            @PathVariable UUID kbId,
+            @PathVariable UUID profileId
+    ) {
+        return retrievalProfileService.activate(kbId, profileId);
+    }
+
+    @PostMapping("/{kbId}/retrieval-profiles/{profileId}/rollback")
+    public RetrievalProfileResponse rollbackRetrievalProfile(
+            @PathVariable UUID kbId,
+            @PathVariable UUID profileId
+    ) {
+        return retrievalProfileService.rollback(kbId, profileId);
     }
 }

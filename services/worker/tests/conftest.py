@@ -18,8 +18,9 @@ sys.modules.setdefault("tiktoken", fake_tiktoken)
 
 
 class _FakeBM25:
-    def __init__(self, tokenized):
+    def __init__(self, tokenized, **kwargs):
         self.tokenized = tokenized
+        self.options = kwargs
 
     def get_scores(self, query_tokens):
         query = set(query_tokens)
