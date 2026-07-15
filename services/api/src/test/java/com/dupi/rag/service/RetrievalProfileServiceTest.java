@@ -29,6 +29,7 @@ class RetrievalProfileServiceTest {
     @Mock RagEvalRunRepository runRepository;
     @Mock KnowledgeBaseService knowledgeBaseService;
     @Mock AuditLogService auditLogService;
+    @Mock KnowledgeBaseMaintenanceService maintenanceService;
 
     @Test
     void createListAndResolveActiveProfile() {
@@ -213,7 +214,8 @@ class RetrievalProfileServiceTest {
     }
 
     private RetrievalProfileService service() {
-        return new RetrievalProfileService(profileRepository, runRepository, knowledgeBaseService, auditLogService);
+        return new RetrievalProfileService(profileRepository, runRepository, knowledgeBaseService, auditLogService,
+                maintenanceService);
     }
 
     private RetrievalProfile profile(UUID kbId) {

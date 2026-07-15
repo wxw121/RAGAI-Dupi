@@ -38,6 +38,7 @@ class SparseMigrationServiceTest {
     @Mock AuditLogService auditLogService;
     @Mock RetrievalProfileService retrievalProfileService;
     @Mock WebClient.Builder webClientBuilder;
+    @Mock KnowledgeBaseMaintenanceService maintenanceService;
 
     @Test
     void backfillSubmitsCanonicalChunksAndTransitionsToDualWrite() {
@@ -224,12 +225,13 @@ class SparseMigrationServiceTest {
 
     private SparseMigrationService service() {
         return new SparseMigrationService(repository, profileRepository, runRepository, chunkRepository,
-                knowledgeBaseService, auditLogService, retrievalProfileService, webClientBuilder);
+                knowledgeBaseService, auditLogService, retrievalProfileService, webClientBuilder, maintenanceService);
     }
 
     private SparseMigrationService service(WebClient.Builder client) {
         SparseMigrationService service = new SparseMigrationService(repository, profileRepository, runRepository,
-                chunkRepository, knowledgeBaseService, auditLogService, retrievalProfileService, client);
+                chunkRepository, knowledgeBaseService, auditLogService, retrievalProfileService, client,
+                maintenanceService);
         ReflectionTestUtils.setField(service, "workerBaseUrl", "http://worker");
         return service;
     }

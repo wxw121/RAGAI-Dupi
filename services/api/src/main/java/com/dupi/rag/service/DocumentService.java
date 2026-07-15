@@ -42,15 +42,18 @@ public class DocumentService {
     private final VectorCleanupTaskService vectorCleanupTaskService;
     private final AuditLogService auditLogService;
     private final RetrievalProfileRepository retrievalProfileRepository;
+    private final KnowledgeBaseMaintenanceService maintenanceService;
 
     @Transactional
     public DocumentResponse upload(UUID kbId, MultipartFile file) {
+        maintenanceService.assertMutationAllowed(kbId);
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
         return upload(kb, kbId, file);
     }
 
     @Transactional
     public BatchDocumentUploadResponse uploadBatch(UUID kbId, List<MultipartFile> files) {
+        maintenanceService.assertMutationAllowed(kbId);
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
         if (files == null || files.isEmpty()) {
             throw new IllegalArgumentException("Files are empty");
@@ -152,6 +155,7 @@ public class DocumentService {
 
     @Transactional
     public void delete(UUID kbId, UUID docId) {
+        maintenanceService.assertMutationAllowed(kbId);
         Document doc = findOrThrow(kbId, docId);
         documentTombstoneService.recordDeleted(doc);
         vectorCleanupTaskService.enqueueDocument(docId);

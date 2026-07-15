@@ -33,12 +33,14 @@ public class SparseMigrationService {
     private final AuditLogService auditLogService;
     private final RetrievalProfileService retrievalProfileService;
     private final WebClient.Builder webClientBuilder;
+    private final KnowledgeBaseMaintenanceService maintenanceService;
 
     @Value("${dupi.worker.base-url:http://localhost:8000}")
     private String workerBaseUrl;
 
     @Transactional
     public SparseMigrationResponse start(UUID kbId, UUID profileId) {
+        maintenanceService.assertMutationAllowed(kbId);
         knowledgeBaseService.findForUpdateOrThrow(kbId);
         profile(kbId, profileId);
         SparseMigration migration = SparseMigration.builder().kbId(kbId).profileId(profileId)
@@ -56,6 +58,7 @@ public class SparseMigrationService {
     }
 
     public SparseMigrationResponse backfill(UUID kbId, UUID migrationId) {
+        maintenanceService.assertMutationAllowed(kbId);
         SparseMigration migration = repository.findUnlockedByIdAndKbId(migrationId, kbId)
                 .orElseThrow(() -> new ResourceNotFoundException("Sparse migration not found: " + migrationId));
         requireState(migration, SparseMigrationState.PREPARING, SparseMigrationState.BACKFILLING,
@@ -116,6 +119,7 @@ public class SparseMigrationService {
 
     @Transactional
     public SparseMigrationResponse beginShadowValidation(UUID kbId, UUID migrationId) {
+        maintenanceService.assertMutationAllowed(kbId);
         SparseMigration migration = migration(kbId, migrationId);
         requireState(migration, SparseMigrationState.DUAL_WRITING);
         migration.setState(SparseMigrationState.SHADOW_VALIDATING);
@@ -125,6 +129,7 @@ public class SparseMigrationService {
     @Transactional
     public SparseMigrationResponse recordShadowValidation(
             UUID kbId, UUID migrationId, SparseMigrationValidationRequest request) {
+        maintenanceService.assertMutationAllowed(kbId);
         SparseMigration migration = migration(kbId, migrationId);
         requireState(migration, SparseMigrationState.SHADOW_VALIDATING);
         RetrievalProfile profile = profile(kbId, migration.getProfileId());
@@ -144,6 +149,7 @@ public class SparseMigrationService {
 
     @Transactional
     public SparseMigrationResponse cutover(UUID kbId, UUID migrationId) {
+        maintenanceService.assertMutationAllowed(kbId);
         SparseMigration migration = migration(kbId, migrationId);
         requireState(migration, SparseMigrationState.SHADOW_VALIDATING);
         RetrievalProfile profile = profile(kbId, migration.getProfileId());
@@ -177,6 +183,7 @@ public class SparseMigrationService {
 
     @Transactional
     public SparseMigrationResponse complete(UUID kbId, UUID migrationId) {
+        maintenanceService.assertMutationAllowed(kbId);
         SparseMigration migration = migration(kbId, migrationId);
         requireState(migration, SparseMigrationState.CUTOVER);
         migration.setState(SparseMigrationState.COMPLETED);
@@ -185,6 +192,7 @@ public class SparseMigrationService {
 
     @Transactional
     public SparseMigrationResponse setLegacyFallback(UUID kbId, UUID migrationId, boolean enabled) {
+        maintenanceService.assertMutationAllowed(kbId);
         SparseMigration migration = migration(kbId, migrationId);
         requireState(migration, SparseMigrationState.DUAL_WRITING, SparseMigrationState.SHADOW_VALIDATING);
         migration.setLegacyBm25Enabled(enabled);

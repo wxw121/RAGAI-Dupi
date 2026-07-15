@@ -53,6 +53,7 @@ class RagEvalServiceTest {
     @Mock RagQualityPolicyRepository policyRepository;
     @Mock AuditLogService auditLogService;
     @Mock RetrievalProfileService retrievalProfileService;
+    @Mock KnowledgeBaseMaintenanceService maintenanceService;
 
     @Test
     void runAgainstBaselineLoadsEvidenceAndPersistsComparisonStatus() {
@@ -497,7 +498,8 @@ class RagEvalServiceTest {
                 policyRepository,
                 new RagQualityGateService(),
                 auditLogService,
-                retrievalProfileService
+                retrievalProfileService,
+                maintenanceService
         );
     }
 

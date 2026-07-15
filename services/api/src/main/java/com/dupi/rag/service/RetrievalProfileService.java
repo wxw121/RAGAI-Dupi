@@ -23,6 +23,7 @@ public class RetrievalProfileService {
     private final RagEvalRunRepository runRepository;
     private final KnowledgeBaseService knowledgeBaseService;
     private final AuditLogService auditLogService;
+    private final KnowledgeBaseMaintenanceService maintenanceService;
 
     @Transactional(readOnly = true)
     public List<RetrievalProfileResponse> list(UUID kbId) {
@@ -34,6 +35,7 @@ public class RetrievalProfileService {
 
     @Transactional
     public RetrievalProfileResponse create(UUID kbId, RetrievalProfileRequest request) {
+        maintenanceService.assertMutationAllowed(kbId);
         rejectSensitiveParameters(request.getSparseIndexParams());
         rejectSensitiveParameters(request.getSparseSearchParams());
         knowledgeBaseService.findForUpdateOrThrow(kbId);
@@ -58,11 +60,13 @@ public class RetrievalProfileService {
 
     @Transactional
     public RetrievalProfileResponse activate(UUID kbId, UUID profileId) {
+        maintenanceService.assertMutationAllowed(kbId);
         return changeActiveProfile(kbId, profileId, false);
     }
 
     @Transactional
     public RetrievalProfileResponse rollback(UUID kbId, UUID profileId) {
+        maintenanceService.assertMutationAllowed(kbId);
         return changeActiveProfile(kbId, profileId, true);
     }
 

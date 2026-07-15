@@ -51,6 +51,7 @@ public class RagEvalService {
     private final RagQualityGateService qualityGateService;
     private final AuditLogService auditLogService;
     private final RetrievalProfileService retrievalProfileService;
+    private final KnowledgeBaseMaintenanceService maintenanceService;
 
     @Transactional
     public List<RagEvalCaseResponse> listCases(UUID kbId) {
@@ -61,6 +62,7 @@ public class RagEvalService {
 
     @Transactional
     public RagEvalCaseResponse createCase(UUID kbId, RagEvalCaseRequest request) {
+        maintenanceService.assertMutationAllowed(kbId);
         caseCoordinator.assertCanCreate(kbId);
         RagEvalCase evalCase = RagEvalCase.builder().kbId(kbId).build();
         apply(evalCase, request);
@@ -69,6 +71,7 @@ public class RagEvalService {
 
     @Transactional
     public RagEvalCaseResponse updateCase(UUID kbId, UUID caseId, RagEvalCaseRequest request) {
+        maintenanceService.assertMutationAllowed(kbId);
         knowledgeBaseService.findOrThrow(kbId);
         RagEvalCase evalCase = findCase(kbId, caseId);
         apply(evalCase, request);
@@ -77,6 +80,7 @@ public class RagEvalService {
 
     @Transactional
     public void deleteCase(UUID kbId, UUID caseId) {
+        maintenanceService.assertMutationAllowed(kbId);
         knowledgeBaseService.findOrThrow(kbId);
         caseRepository.delete(findCase(kbId, caseId));
     }
@@ -98,6 +102,7 @@ public class RagEvalService {
     }
 
     public RagEvalRunResponse run(UUID kbId, boolean useRerank, UUID profileId, RetrievalMode retrievalMode) {
+        maintenanceService.assertMutationAllowed(kbId);
         if (profileId != null && retrievalMode == RetrievalMode.VECTOR) {
             throw new IllegalArgumentException("VECTOR evaluation cannot use a retrieval profile");
         }
@@ -239,6 +244,7 @@ public class RagEvalService {
 
     @Transactional
     public RagQualityPolicyResponse updatePolicy(UUID kbId, RagQualityPolicyRequest request) {
+        maintenanceService.assertMutationAllowed(kbId);
         knowledgeBaseService.findOrThrow(kbId);
         RagQualityPolicy policy = getOrCreatePolicyForUpdate(kbId);
         policy.setMinimumPassRate(request.getMinimumPassRate());
@@ -252,6 +258,7 @@ public class RagEvalService {
 
     @Transactional
     public RagQualityPolicyResponse promoteBaseline(UUID kbId, UUID runId) {
+        maintenanceService.assertMutationAllowed(kbId);
         knowledgeBaseService.findOrThrow(kbId);
         RagEvalRun run = runRepository.findById(runId)
                 .filter(candidate -> kbId.equals(candidate.getKbId()))

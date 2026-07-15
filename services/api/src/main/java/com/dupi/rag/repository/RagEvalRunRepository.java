@@ -12,4 +12,5 @@ public interface RagEvalRunRepository extends JpaRepository<RagEvalRun, UUID> {
     List<RagEvalRun> findTop10ByKbIdOrderByCreatedAtDesc(UUID kbId);
     List<RagEvalRun> findByKbIdAndStatusAndGateStatus(
             UUID kbId, RagEvalRunStatus status, RagQualityGateStatus gateStatus);
+    boolean existsByKbIdAndStatus(UUID kbId, RagEvalRunStatus status);
 }

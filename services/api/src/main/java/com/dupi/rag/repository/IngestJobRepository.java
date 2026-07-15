@@ -17,4 +17,5 @@ public interface IngestJobRepository extends JpaRepository<IngestJob, UUID> {
     List<IngestJob> findTop20ByStatusAndStageOrderByCreatedAtAsc(IngestJobStatus status, IngestStage stage);
 
     long countByStatusIn(List<IngestJobStatus> statuses);
+    boolean existsByKbIdAndStatusIn(UUID kbId, List<IngestJobStatus> statuses);
 }

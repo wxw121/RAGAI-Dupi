@@ -19,4 +19,5 @@ public interface SparseMigrationRepository extends JpaRepository<SparseMigration
     List<SparseMigration> findByKbIdOrderByCreatedAtDesc(UUID kbId);
     Optional<SparseMigration> findTopByKbIdAndStateInOrderByCreatedAtDesc(
             UUID kbId, List<SparseMigrationState> states);
+    boolean existsByKbIdAndStateIn(UUID kbId, List<SparseMigrationState> states);
 }

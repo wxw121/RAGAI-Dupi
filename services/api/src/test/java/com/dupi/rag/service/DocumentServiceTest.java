@@ -45,6 +45,7 @@ class DocumentServiceTest {
     @Mock VectorCleanupTaskService vectorCleanupTaskService;
     @Mock AuditLogService auditLogService;
     @Mock RetrievalProfileRepository retrievalProfileRepository;
+    @Mock KnowledgeBaseMaintenanceService maintenanceService;
 
     DocumentService service() {
         return new DocumentService(
@@ -59,7 +60,8 @@ class DocumentServiceTest {
                 documentTombstoneService,
                 vectorCleanupTaskService,
                 auditLogService,
-                retrievalProfileRepository
+                retrievalProfileRepository,
+                maintenanceService
         );
     }
 
