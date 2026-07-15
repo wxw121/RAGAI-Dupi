@@ -7,6 +7,7 @@ import com.dupi.rag.domain.enums.RecoveryItemStatus;
 import com.dupi.rag.dto.recovery.RecoveryManifest;
 import com.dupi.rag.dto.recovery.RecoveryManifestHeader;
 import com.dupi.rag.dto.recovery.RecoveryManifestItem;
+import com.dupi.rag.dto.recovery.VectorSnapshotPage;
 import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.*;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -18,6 +19,9 @@ import org.springframework.transaction.annotation.Transactional;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.*;
 
@@ -37,6 +41,7 @@ public class RecoveryArchiveService {
     private final KnowledgeBaseMaintenanceService maintenance;
     private final RecoveryProperties properties;
     private final RecoveryManifestService manifests;
+    private final MilvusRecoveryService recoveryVectors;
     private final ObjectMapper mapper;
 
     @Transactional
@@ -65,6 +70,7 @@ public class RecoveryArchiveService {
             archives.save(archive);
             KnowledgeBase kb = knowledgeBases.findSystemOrThrow(archive.getSourceKnowledgeBaseId());
             List<Document> documentRows = sorted(documents.findByKbIdOrderByCreatedAtDesc(kb.getId()));
+            List<RetrievalProfile> profileRows = sorted(profiles.findByKbIdOrderByVersionDesc(kb.getId()));
 
             List<RecoveryManifestItem> evidence = new ArrayList<>();
             evidence.add(writeBytes(archive, "record:knowledge-base", "RECORD",
@@ -78,7 +84,7 @@ public class RecoveryArchiveService {
             evidence.add(writeBytes(archive, "record:quality-policy", "RECORD",
                     "records/quality-policy.json", json(qualityPolicies.findByKbId(kb.getId()).orElse(null))));
             evidence.add(writeBytes(archive, "record:retrieval-profiles", "RECORD",
-                    "records/retrieval-profiles.ndjson", ndjson(sorted(profiles.findByKbIdOrderByVersionDesc(kb.getId())))));
+                    "records/retrieval-profiles.ndjson", ndjson(profileRows)));
 
             for (Document document : documentRows) {
                 try (InputStream input = documentStorage.download(document.getObjectKey())) {
@@ -86,6 +92,23 @@ public class RecoveryArchiveService {
                     evidence.add(write(archive, "object:" + document.getId(), "OBJECT",
                             document.getId().toString(), relativeKey, input));
                 }
+            }
+
+            Map<String, Object> collectionSettings = new TreeMap<>();
+            collectionSettings.put("retrievalMode", kb.getRetrievalMode().name());
+            collectionSettings.put("denseCollection", recoveryVectors.denseCollection());
+            collectionSettings.put("denseSchema", recoveryVectors.describe(recoveryVectors.denseCollection()));
+            evidence.add(captureVectors(archive, kb.getId(), null));
+
+            RetrievalProfile activeProfile = profileRows.stream()
+                    .filter(profile -> profile.getId().equals(kb.getActiveRetrievalProfileId()))
+                    .findFirst().orElse(null);
+            if (activeProfile != null) {
+                String sparseCollection = recoveryVectors.sparseCollection(kb.getId(), activeProfile.getVersion());
+                collectionSettings.put("sparseCollection", sparseCollection);
+                collectionSettings.put("sparseProfileVersion", activeProfile.getVersion());
+                collectionSettings.put("sparseSchema", recoveryVectors.describe(sparseCollection));
+                evidence.add(captureVectors(archive, kb.getId(), activeProfile.getVersion()));
             }
 
             KnowledgeBase current = knowledgeBases.findSystemOrThrow(kb.getId());
@@ -99,7 +122,7 @@ public class RecoveryArchiveService {
                     RecoveryManifestService.SCHEMA_VERSION,
                     archive.getId(), archive.getTenantId(), kb.getId(), archive.getSourceRevision(),
                     kb.getEmbeddingModel(), kb.getEmbeddingDimension(),
-                    Map.of("retrievalMode", kb.getRetrievalMode().name())), evidence);
+                    collectionSettings), evidence);
             writeBytes(archive, "manifest", "MANIFEST", "manifest.json", manifests.serialize(manifest));
 
             archive.setItemCount(manifest.itemCount());
@@ -123,6 +146,30 @@ public class RecoveryArchiveService {
     private RecoveryManifestItem writeBytes(RecoveryArchive archive, String itemKey, String itemType,
                                             String relativeKey, byte[] bytes) {
         return write(archive, itemKey, itemType, null, relativeKey, new ByteArrayInputStream(bytes));
+    }
+
+    private RecoveryManifestItem captureVectors(RecoveryArchive archive, UUID knowledgeBaseId,
+                                                Integer sparseProfileVersion) throws Exception {
+        boolean sparse = sparseProfileVersion != null;
+        String kind = sparse ? "sparse" : "dense";
+        Path temporary = Files.createTempFile("dupi-recovery-" + kind + "-", ".ndjson");
+        try {
+            String cursor = null;
+            do {
+                VectorSnapshotPage page = sparse
+                        ? recoveryVectors.readSparse(knowledgeBaseId, sparseProfileVersion, cursor, properties.getPageSize())
+                        : recoveryVectors.readDense(knowledgeBaseId, cursor, properties.getPageSize());
+                byte[] bytes = recoveryVectors.serializeRows(page.rows());
+                Files.write(temporary, bytes, StandardOpenOption.APPEND);
+                cursor = page.nextCursor();
+            } while (cursor != null);
+            try (InputStream input = Files.newInputStream(temporary)) {
+                return write(archive, "vector:" + kind, "VECTOR", null,
+                        "vectors/" + kind + ".ndjson", input);
+            }
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
     }
 
     private RecoveryManifestItem write(RecoveryArchive archive, String itemKey, String itemType,

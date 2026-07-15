@@ -4,6 +4,7 @@ import com.dupi.rag.config.RecoveryProperties;
 import com.dupi.rag.domain.entity.*;
 import com.dupi.rag.domain.enums.RecoveryArchiveStatus;
 import com.dupi.rag.domain.enums.RecoveryItemStatus;
+import com.dupi.rag.dto.recovery.VectorSnapshotPage;
 import com.dupi.rag.repository.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -36,6 +37,7 @@ class RecoveryArchiveServiceTest {
     @Mock MinioStorageService documentStorage;
     @Mock RecoveryStorageService recoveryStorage;
     @Mock KnowledgeBaseMaintenanceService maintenance;
+    @Mock MilvusRecoveryService recoveryVectors;
 
     private RecoveryArchiveService service;
     private RecoveryProperties properties;
@@ -48,7 +50,13 @@ class RecoveryArchiveServiceTest {
         service = new RecoveryArchiveService(
                 archives, items, knowledgeBases, documents, chunks, evalCases, qualityPolicies, profiles,
                 documentStorage, recoveryStorage, maintenance, properties,
-                new RecoveryManifestService(mapper), mapper);
+                new RecoveryManifestService(mapper), recoveryVectors, mapper);
+        lenient().when(recoveryVectors.readDense(any(), any(), anyInt()))
+                .thenReturn(new VectorSnapshotPage(List.of(), null, "empty"));
+        lenient().when(recoveryVectors.denseCollection()).thenReturn("chunks");
+        lenient().when(recoveryVectors.describe("chunks"))
+                .thenReturn(new MilvusRecoverySchema("COSINE", 1024, java.util.Map.of()));
+        lenient().when(recoveryVectors.serializeRows(anyList())).thenReturn(new byte[0]);
     }
 
     @Test
@@ -97,6 +105,7 @@ class RecoveryArchiveServiceTest {
         assertThat(archive.getManifestChecksum()).isNotBlank();
         verify(maintenance).acquire(kbId, archiveId);
         verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("objects/" + document.getId() + "/guide.md"), any());
+        verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("vectors/dense.ndjson"), any());
         verify(maintenance).release(archiveId, RecoveryArchiveStatus.COMPLETED);
     }
 
