@@ -508,3 +508,17 @@ export interface ApiError {
   requestId?: string
   timestamp?: string
 }
+
+export type RecoveryArchiveStatus = 'PREPARING' | 'CAPTURING' | 'VERIFYING' | 'COMPLETED' | 'FAILED'
+export type RecoveryRestoreStatus = 'VALIDATING' | 'RESTORING_OBJECTS' | 'RESTORING_RECORDS' |
+  'RESTORING_VECTORS' | 'VERIFYING' | 'COMPLETED' | 'FAILED'
+export interface RecoveryArchive {
+  id: string; sourceKnowledgeBaseId: string; status: RecoveryArchiveStatus; schemaVersion: number
+  itemCount: number; totalBytes: number; manifestChecksum: string | null; errorCode: string | null
+  errorMessage: string | null; createdBy: string; createdAt: string; updatedAt: string
+}
+export interface RecoveryRestore {
+  id: string; archiveId: string; targetKnowledgeBaseId: string | null; status: RecoveryRestoreStatus
+  completedItems: number; totalItems: number; errorCode: string | null; errorMessage: string | null
+  createdBy: string; createdAt: string; updatedAt: string
+}

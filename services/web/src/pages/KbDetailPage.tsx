@@ -24,6 +24,7 @@ import { DocTable } from '@/components/DocTable'
 import { DocumentIndexDetailPanel } from '@/components/DocumentIndexDetailPanel'
 import { RagEvalPanel } from '@/components/RagEvalPanel'
 import { RetrievalProfilePanel } from '@/components/RetrievalProfilePanel'
+import { RecoveryPanel } from '@/components/RecoveryPanel'
 import { SparseMigrationPanel } from '@/components/SparseMigrationPanel'
 import { UploadZone } from '@/components/UploadZone'
 import { useToast } from '@/components/Toast'
@@ -39,9 +40,10 @@ import {
   MessageSquare,
   RefreshCw,
   RotateCcw,
+  ShieldCheck,
 } from 'lucide-react'
 
-type Tab = 'documents' | 'chat' | 'eval'
+type Tab = 'documents' | 'chat' | 'eval' | 'recovery'
 
 export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const { kbId } = useParams<{ kbId: string }>()
@@ -54,7 +56,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const [jobStages, setJobStages] = useState<Record<string, string | null>>({})
   const [tab, setTab] = useState<Tab>(() => {
     const initialTab = searchParams.get('tab')
-    return initialTab === 'chat' || initialTab === 'eval' ? initialTab : 'documents'
+    return initialTab === 'chat' || initialTab === 'eval' || initialTab === 'recovery' ? initialTab : 'documents'
   })
   const [loading, setLoading] = useState(true)
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -147,7 +149,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
 
   useEffect(() => {
     const urlTab = searchParams.get('tab')
-    if (urlTab === 'chat' || urlTab === 'eval') {
+    if (urlTab === 'chat' || urlTab === 'eval' || urlTab === 'recovery') {
       setTab(urlTab)
     }
   }, [searchParams])
@@ -169,7 +171,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
 
   const switchTab = (next: Tab) => {
     setTab(next)
-    if (next === 'chat' || next === 'eval') {
+    if (next === 'chat' || next === 'eval' || next === 'recovery') {
       setSearchParams({ tab: next }, { replace: true })
     } else {
       setSearchParams({}, { replace: true })
@@ -365,11 +367,25 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
               <BarChart3 className="h-4 w-4" />
               RAG 评估
             </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                'flex-1 rounded-lg px-3 md:flex-none',
+                tab === 'recovery' && 'bg-background shadow-sm',
+              )}
+              onClick={() => switchTab('recovery')}
+            >
+              <ShieldCheck className="h-4 w-4" />
+              Recovery
+            </Button>
           </div>
         </div>
       </div>
 
-      {tab === 'documents' ? (
+      {tab === 'recovery' ? (
+        <RecoveryPanel kbId={kbId!} />
+      ) : tab === 'documents' ? (
         <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 md:px-8">
           <div className="rounded-3xl border border-border bg-background p-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
