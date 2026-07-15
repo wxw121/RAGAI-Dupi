@@ -13,7 +13,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rehearse-v1.4-recove
   -FixtureFiles examples/sample-knowledge.md,examples/sample-knowledge.md
 ```
 
-The policy suite requires at least two fixture documents, rejects incomplete/corrupt manifest evidence, limits cleanup to `v14-recovery-*`, and checks artifact redaction. The 2026-07-16 credentialed Compose browser gate passed 1/1 and the final real artifact contains 2 documents, 9 items / 10,943 bytes, checksum/count/retrieval matches, canonical-object corruption rejection, and completed cleanup. The short command above is insufficient for release because it omits the corruption hook; use the complete Compose command in `docs/v1.4-recovery-runbook.md`. `playwright test --list` is discovery evidence only.
+The policy suite requires at least two fixture documents, rejects incomplete/corrupt manifest evidence, limits cleanup to `v14-recovery-*`, and checks artifact redaction. The 2026-07-16 credentialed Compose browser gate passed 1/1 and the final real artifact contains 2 documents, 9 items / 10,946 bytes, checksum/count/retrieval matches, canonical-object corruption rejection, and completed cleanup. The short command above is insufficient for release because it omits the corruption hook; use the complete Compose command in `docs/v1.4-recovery-runbook.md`. `playwright test --list` is discovery evidence only.
 
 `scripts/e2e-llm-stub.py` 提供确定性的 8 维 OpenAI-compatible embeddings，仅用于隔离 E2E，不代表生产模型质量。真实浏览器门禁用真实登录/Cookie/CSRF 创建临时知识库和 Retrieval Profile，检查 console、page error、失败网络请求，并在成功后清理资源。
 

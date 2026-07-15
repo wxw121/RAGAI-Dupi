@@ -9,7 +9,7 @@
 - [x] Restore idempotently into one hidden target with retry and abandon.
 - [x] Add `KB_RECOVERY`, audit events, bounded execution, scoped API, and Recovery UI.
 - [x] Add Pester policy gates and deterministic Recovery browser flow.
-- [x] Retain a real `artifacts/v1.4-recovery/rehearsal.json` with two fixtures, 9 items / 10,943 bytes, object/vector checksums, restored record counts, retrieval equivalence, corruption blocking, and scoped cleanup.
+- [x] Retain a real `artifacts/v1.4-recovery/rehearsal.json` with two fixtures, 9 items / 10,946 bytes, object/vector checksums, restored record counts, retrieval equivalence, corruption blocking, and scoped cleanup.
 - [x] Run the credentialed Playwright gate against the full Compose stack (`1 passed`).
 - [x] Inject canonical-object corruption and retain a rehearsal artifact with `corruptionBlocked=true` before closing V1.4.0.
 - [ ] Start V1.4.1 upload quotas, cancellation, and notification after V1.4.0 closes.
