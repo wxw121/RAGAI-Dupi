@@ -90,11 +90,12 @@ jobs:
           New-Item -ItemType Directory -Force $root | Out-Null
           Invoke-WebRequest "https://www.powershellgallery.com/api/v2/package/Pester/4.10.1" -OutFile $package
           Expand-Archive -Path $package -DestinationPath $module
-          "PESTER_MODULE=$module\Pester.psd1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Test release scripts
         shell: powershell
         run: |
-          Import-Module $env:PESTER_MODULE -Force
+          $module = Join-Path $env:RUNNER_TEMP "pester-4.10.1\module\Pester.psd1"
+          Import-Module $module -Force
+          Write-Host "Using Pester $((Get-Module Pester).Version) from $module"
           $result = Invoke-Pester scripts/tests -PassThru
           if ($result.FailedCount -gt 0) { exit 1 }
       - name: Validate Docker Compose
