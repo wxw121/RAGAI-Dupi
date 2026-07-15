@@ -33,6 +33,11 @@ dupi:
     access-key: ${MINIO_ACCESS_KEY:minioadmin}
     secret-key: ${MINIO_SECRET_KEY:minioadmin}
     bucket: ${MINIO_BUCKET:dupi-documents}
+  recovery:
+    bucket: ${DUPI_RECOVERY_BUCKET:dupi-recovery}
+    quiescence-timeout-seconds: ${DUPI_RECOVERY_QUIESCENCE_TIMEOUT_SECONDS:300}
+    page-size: ${DUPI_RECOVERY_PAGE_SIZE:500}
+    max-concurrent-jobs: ${DUPI_RECOVERY_MAX_CONCURRENT_JOBS:2}
   milvus:
     host: ${MILVUS_HOST:localhost}
     port: ${MILVUS_PORT:19530}
