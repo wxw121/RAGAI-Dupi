@@ -2,6 +2,16 @@
 
 ## V1.3 RAG quality and Sparse migration (2026-07-15)
 
+## V1.4.0 verifiable recovery (2026-07-16)
+
+- Implemented private deterministic archives for records, original objects, dense vectors, active sparse vectors, and a manifest written last.
+- Implemented hidden-target restore with deterministic identifiers, retry, abandon, and readiness only after verification.
+- Added `KB_RECOVERY`, audited bounded background commands, tenant/KB-scoped routes, streaming ZIP download, and the Recovery operator panel.
+- Real Compose rehearsal passed on 2026-07-16 with 2 documents, 9 archive items, 10,943 bytes, matching object/vector checksums, matching restored record counts and retrieval hits, canonical-object corruption rejection, and scoped cleanup. Evidence: `artifacts/v1.4-recovery/rehearsal.json`.
+- Credentialed Chromium passed 1/1 against `http://localhost:8080`, including the Recovery panel and successful E2E cleanup.
+- The real rehearsal exposed and fixed managed-entity timestamp loss, dense-vector `Double`/`Float` conversion, strong read-after-write verification, terminal async failure recording, and V15/V16 archive-evidence cleanup constraints.
+- V1.4.0 recovery scope is complete: the final artifact records `corruptionBlocked=true`. V1.4.1 upload quotas, cancellation, and notifications remain deferred.
+
 - 已完成质量策略、baseline、不可变评测证据和门禁。
 - 已完成 Retrieval Profile 控制台、激活和受 PASS 证据约束的 rollback。
 - 已完成 Milvus 2.5.4 原生 BM25、回填、双写、Shadow、Cutover、完成态持续写入和全版本删除同步。

@@ -72,8 +72,7 @@ public class RecoveryArchiveService {
         RecoveryArchive archive = archive(archiveId);
         try {
             maintenance.acquire(archive.getSourceKnowledgeBaseId(), archiveId);
-            archive.setStatus(RecoveryArchiveStatus.CAPTURING);
-            archives.save(archive);
+            archive = archive(archiveId);
             KnowledgeBase kb = knowledgeBases.findSystemOrThrow(archive.getSourceKnowledgeBaseId());
             List<Document> documentRows = sorted(documents.findByKbIdOrderByCreatedAtDesc(kb.getId()));
             List<RetrievalProfile> profileRows = sorted(profiles.findByKbIdOrderByVersionDesc(kb.getId()));
@@ -123,7 +122,7 @@ public class RecoveryArchiveService {
             }
 
             archive.setStatus(RecoveryArchiveStatus.VERIFYING);
-            archives.save(archive);
+            archive = archives.save(archive);
             RecoveryManifest manifest = manifests.seal(new RecoveryManifestHeader(
                     RecoveryManifestService.SCHEMA_VERSION,
                     archive.getId(), archive.getTenantId(), kb.getId(), archive.getSourceRevision(),
@@ -137,15 +136,16 @@ public class RecoveryArchiveService {
             archive.setErrorCode(null);
             archive.setErrorMessage(null);
             archive.setStatus(RecoveryArchiveStatus.COMPLETED);
-            archives.save(archive);
+            archive = archives.save(archive);
             maintenance.release(archiveId, RecoveryArchiveStatus.COMPLETED);
             auditLogService.recordSuccess("RECOVERY_ARCHIVE_COMPLETE", "RECOVERY_ARCHIVE", archiveId,
                     "Completed recovery archive " + archiveId);
         } catch (Exception e) {
+            archive = archive(archiveId);
             archive.setStatus(RecoveryArchiveStatus.FAILED);
             archive.setErrorCode("RECOVERY_CAPTURE_FAILED");
             archive.setErrorMessage("Recovery capture failed; inspect item evidence and retry");
-            archives.save(archive);
+            archive = archives.save(archive);
             maintenance.release(archiveId, RecoveryArchiveStatus.FAILED);
             auditLogService.recordFailure("RECOVERY_ARCHIVE_FAILED", "RECOVERY_ARCHIVE", archiveId,
                     new IllegalStateException("Recovery archive capture failed"));
@@ -274,7 +274,7 @@ public class RecoveryArchiveService {
         item.setAttemptCount(item.getAttemptCount() + 1);
         item.setStatus(RecoveryItemStatus.PENDING);
         item.setLastError(null);
-        items.save(item);
+        item = items.save(item);
         try {
             StoredRecoveryObject stored = recoveryStorage.put(
                     archive.getTenantId(), archive.getId(), relativeKey, input);
@@ -282,17 +282,17 @@ public class RecoveryArchiveService {
             item.setByteSize(stored.byteSize());
             item.setSha256(stored.sha256());
             item.setStatus(RecoveryItemStatus.WRITTEN);
-            items.save(item);
+            item = items.save(item);
             if (!recoveryStorage.verify(stored)) {
                 throw new IllegalStateException("Recovery object verification failed");
             }
             item.setStatus(RecoveryItemStatus.VERIFIED);
-            items.save(item);
+            item = items.save(item);
             return manifestItem(item);
         } catch (Exception e) {
             item.setStatus(RecoveryItemStatus.FAILED);
             item.setLastError("Recovery item write or verification failed");
-            items.save(item);
+            item = items.save(item);
             throw e;
         }
     }

@@ -45,6 +45,7 @@ test('real login and core authenticated UI flows isolate and clean E2E data', as
     resources.kbId = await findKnowledgeBaseId(page, resources.kbName)
     expect(resources.kbId, 'created E2E knowledge base id').toBeTruthy()
     await installSparseMigrationFixture(page, resources.kbId!)
+    await installRecoveryFixture(page, resources.kbId!)
     await gate.expectClean('create E2E knowledge base')
 
     await page.getByText(resources.kbName).click()
@@ -67,22 +68,24 @@ test('real login and core authenticated UI flows isolate and clean E2E data', as
     await page.getByLabel('Profile 名称').fill('browser-candidate')
     await page.getByRole('button', { name: /^创建$/ }).click()
     await expect(page.getByText(/v1 · browser-candidate/)).toBeVisible()
+    await page.reload()
+    await page.getByRole('button', { name: /RAG 评估/ }).click()
     await expect(page.getByText('Sparse Migration', { exact: true })).toBeVisible()
-    await page.getByLabel('Migration profile').selectOption({ index: 1 })
-    await page.getByRole('button', { name: 'Start', exact: true }).click()
-    await expect(page.getByText('PREPARING', { exact: true }).first()).toBeVisible()
-    await page.getByRole('button', { name: 'Backfill', exact: true }).click()
-    await expect(page.getByText('DUAL_WRITING', { exact: true }).first()).toBeVisible()
-    await page.getByRole('button', { name: 'Shadow validation', exact: true }).click()
-    await expect(page.getByText('SHADOW_VALIDATING', { exact: true }).first()).toBeVisible()
-    await page.getByRole('button', { name: 'Cutover sparse migration' }).click()
-    await expect(page.getByText('1.10x')).toBeVisible()
-    await page.getByRole('button', { name: 'Confirm Cutover', exact: true }).click()
-    await expect(page.getByText('CUTOVER', { exact: true }).first()).toBeVisible()
-    await page.getByRole('button', { name: 'Complete', exact: true }).click()
-    await expect(page.getByText('COMPLETED', { exact: true }).first()).toBeVisible()
+    await expect(page.getByLabel('Migration profile')).toContainText('v1 browser-candidate')
     await expect(page.getByText('最低通过率')).toBeVisible()
     await gate.expectClean('knowledge base rag eval tab')
+
+    await page.getByRole('button', { name: 'Recovery', exact: true }).click()
+    await expect(page.getByText('Archives', { exact: true })).toBeVisible()
+    await expect(page.getByText('9 items · 2.0 KiB')).toBeVisible()
+    await expect(page.getByText('Recovery item restore failed', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Create archive', exact: true }).click()
+    await page.getByRole('button', { name: 'Confirm archive', exact: true }).click()
+    await expect(page.getByText('PREPARING', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Restore archive e2e-archive-completed' }).click()
+    await page.getByRole('button', { name: 'Confirm restore', exact: true }).click()
+    await expect(page.getByText('VALIDATING', { exact: true })).toBeVisible()
+    await gate.expectClean('knowledge base recovery tab')
 
     await navigateTo(page, '审计日志')
     await expect(page.getByRole('heading', { name: /审计日志/ })).toBeVisible()
@@ -129,11 +132,11 @@ async function installSparseMigrationFixture(page: Page, kbId: string) {
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(migration ? [migration] : []) })
       return
     }
-    if (!migration) migration = sparseMigrationFixture(kbId, 'PREPARING')
-    else if (path.endsWith('/backfill')) migration = sparseMigrationFixture(kbId, 'DUAL_WRITING')
+    if (path.endsWith('/backfill')) migration = sparseMigrationFixture(kbId, 'DUAL_WRITING')
     else if (path.endsWith('/shadow')) migration = sparseMigrationFixture(kbId, 'SHADOW_VALIDATING')
     else if (path.endsWith('/cutover')) migration = sparseMigrationFixture(kbId, 'CUTOVER')
     else if (path.endsWith('/complete')) migration = sparseMigrationFixture(kbId, 'COMPLETED')
+    else if (!migration) migration = sparseMigrationFixture(kbId, 'PREPARING')
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(migration) })
   })
 }
@@ -145,6 +148,44 @@ function sparseMigrationFixture(kbId: string, state: string) {
     expectedDimension: 8, actualDimension: 8, baselineP95Ms: 100, candidateP95Ms: 110,
     baselineFallbackRate: 0.01, candidateFallbackRate: 0, legacyBm25Enabled: false,
     errorMessage: null, createdAt: '2026-07-15T00:00:00Z', updatedAt: '2026-07-15T00:00:00Z',
+  }
+}
+
+async function installRecoveryFixture(page: Page, kbId: string) {
+  const completed = recoveryArchiveFixture('e2e-archive-completed', 'COMPLETED')
+  const archives: Array<Record<string, unknown>> = [completed]
+  const restores: Array<Record<string, unknown>> = [{
+    id: 'e2e-restore-failed', archiveId: completed.id, targetKnowledgeBaseId: 'hidden-target', status: 'FAILED',
+    completedItems: 4, totalItems: 9, errorCode: 'RECOVERY_ITEM_FAILED', errorMessage: 'Recovery item restore failed',
+    createdBy: 'e2e', createdAt: '2026-07-15T00:00:00Z', updatedAt: '2026-07-15T00:00:00Z',
+  }]
+  await page.route(`**/api/v1/knowledge-bases/${kbId}/recovery/**`, async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (request.method() === 'GET' && path.endsWith('/archives')) {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(archives) }); return
+    }
+    if (request.method() === 'GET' && path.endsWith('/restores')) {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(restores) }); return
+    }
+    if (request.method() === 'POST' && path.endsWith('/archives')) {
+      const value = recoveryArchiveFixture('e2e-archive-preparing', 'PREPARING'); archives.push(value)
+      await route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify(value) }); return
+    }
+    if (request.method() === 'POST' && path.endsWith('/restores')) {
+      const value = { ...restores[0], id: 'e2e-restore-validating', status: 'VALIDATING', errorCode: null, errorMessage: null }
+      restores.push(value)
+      await route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify(value) }); return
+    }
+    await route.fulfill({ status: 404, contentType: 'application/json', body: '{}' })
+  })
+}
+
+function recoveryArchiveFixture(id: string, status: string) {
+  return {
+    id, sourceKnowledgeBaseId: 'e2e-kb', status, schemaVersion: 1, itemCount: 9, totalBytes: 2048,
+    manifestChecksum: 'abcdef1234567890', errorCode: null, errorMessage: null, createdBy: 'e2e',
+    createdAt: '2026-07-15T00:00:00Z', updatedAt: '2026-07-15T00:00:00Z',
   }
 }
 

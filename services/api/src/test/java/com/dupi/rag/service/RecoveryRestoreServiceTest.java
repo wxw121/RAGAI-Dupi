@@ -138,6 +138,9 @@ class RecoveryRestoreServiceTest {
         assertThat(service.prepareRetry(job.getId()).getStatus()).isEqualTo(RecoveryRestoreStatus.VALIDATING);
         service.markFailed(job.getId(), "tenant-a", "RECOVERY_CAPACITY_EXCEEDED");
         assertThat(job.getStatus()).isEqualTo(RecoveryRestoreStatus.FAILED);
+        service.markExecutionFailed(job.getId(), "tenant-a");
+        assertThat(job.getErrorCode()).isEqualTo("RECOVERY_RESTORE_FAILED");
+        assertThat(job.getErrorMessage()).contains("inspect item evidence");
         service.abandon(job.getId());
 
         verify(writer).abandon(job);

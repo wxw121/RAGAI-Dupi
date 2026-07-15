@@ -4,12 +4,16 @@ import com.dupi.rag.config.RecoveryAsyncConfig;
 import com.dupi.rag.config.RecoveryProperties;
 import com.dupi.rag.dto.recovery.VectorSnapshotRow;
 import io.milvus.client.MilvusServiceClient;
+import io.milvus.common.clientenum.ConsistencyLevelEnum;
 import io.milvus.grpc.*;
 import io.milvus.param.R;
+import io.milvus.param.dml.InsertParam;
 import io.milvus.param.dml.QueryParam;
+import io.milvus.param.dml.UpsertParam;
 import io.minio.GetObjectResponse;
 import io.minio.MinioClient;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.reactive.function.client.ClientResponse;
@@ -70,10 +74,19 @@ class RecoveryInfrastructureAdaptersTest {
         port.ensure("chunks", new MilvusRecoverySchema("COSINE", 2, Map.of()), false);
         port.upsert("chunks", List.of(new VectorSnapshotRow(
                 UUID.randomUUID().toString(), UUID.randomUUID().toString(), UUID.randomUUID().toString(),
-                "content", List.of(0.1f, 0.2f), Map.of())), false);
+                "content", List.of(0.1d, 0.2d), Map.of())), false);
         assertThat(port.count("chunks", UUID.randomUUID())).isZero();
 
-        verify(client).upsert(any());
+        ArgumentCaptor<UpsertParam> upsert = ArgumentCaptor.forClass(UpsertParam.class);
+        verify(client).upsert(upsert.capture());
+        List<?> embeddings = upsert.getValue().getFields().stream()
+                .filter(field -> "embedding".equals(field.getName()))
+                .map(InsertParam.Field::getValues).findFirst().orElseThrow();
+        assertThat((List<?>) embeddings.get(0)).allMatch(Float.class::isInstance);
+        ArgumentCaptor<QueryParam> queries = ArgumentCaptor.forClass(QueryParam.class);
+        verify(client, times(2)).query(queries.capture());
+        assertThat(queries.getAllValues())
+                .allMatch(query -> query.getConsistencyLevel() == ConsistencyLevelEnum.STRONG);
     }
 
     @Test

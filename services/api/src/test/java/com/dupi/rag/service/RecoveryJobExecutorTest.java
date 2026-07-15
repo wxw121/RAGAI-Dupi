@@ -42,4 +42,17 @@ class RecoveryJobExecutorTest {
         verify(archives).markFailed(archiveId, "RECOVERY_CAPACITY_EXCEEDED");
         verify(restores).markFailed(jobId, "tenant-a", "RECOVERY_CAPACITY_EXCEEDED");
     }
+
+    @Test
+    void failedRestoreExecutionBecomesTerminalFailure() {
+        RecoveryArchiveService archives = mock(RecoveryArchiveService.class);
+        RecoveryRestoreService restores = mock(RecoveryRestoreService.class);
+        UUID jobId = UUID.randomUUID();
+        doThrow(new IllegalStateException("restore failed")).when(restores).execute(jobId);
+        RecoveryJobExecutor executor = new RecoveryJobExecutor(Runnable::run, archives, restores);
+
+        executor.submitRestore(jobId, "tenant-a");
+
+        verify(restores).markExecutionFailed(jobId, "tenant-a");
+    }
 }

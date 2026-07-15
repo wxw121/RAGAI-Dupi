@@ -2,6 +2,7 @@ package com.dupi.rag.service;
 
 import com.dupi.rag.config.TenantContext;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
@@ -11,6 +12,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 
 @Service
+@Slf4j
 public class RecoveryJobExecutor {
     private final Executor executor;
     private final RecoveryArchiveService archives;
@@ -45,6 +47,9 @@ public class RecoveryJobExecutor {
                 TenantContext.setTenantId(tenantId);
                 try {
                     restores.execute(jobId);
+                } catch (Exception e) {
+                    log.error("Recovery restore {} failed", jobId, e);
+                    restores.markExecutionFailed(jobId, tenantId);
                 } finally {
                     TenantContext.clear();
                 }

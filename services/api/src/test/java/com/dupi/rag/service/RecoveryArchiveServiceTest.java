@@ -124,6 +124,7 @@ class RecoveryArchiveServiceTest {
         assertThat(archive.getStatus()).isEqualTo(RecoveryArchiveStatus.COMPLETED);
         assertThat(archive.getManifestChecksum()).isNotBlank();
         verify(maintenance).acquire(kbId, archiveId);
+        verify(archives, atLeast(2)).findById(archiveId);
         verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("objects/" + document.getId() + "/guide.md"), any());
         verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("vectors/dense.ndjson"), any());
         verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("vectors/sparse.ndjson"), any());

@@ -15,7 +15,10 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.DigestInputStream;
+import java.security.MessageDigest;
 import java.util.*;
 
 @Component
@@ -112,7 +115,21 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
                 try (InputStream input = storage.open(archive.getBucket(), item.getObjectKey())) {
                     documentStorage.upload(objectKey, input, item.getByteSize(), source.getMimeType());
                 }
+                verifyRestoredObject(objectKey, item);
             });
+        }
+    }
+
+    private void verifyRestoredObject(String objectKey, RecoveryArchiveItem item) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        long bytes;
+        try (InputStream input = documentStorage.download(objectKey);
+             DigestInputStream verified = new DigestInputStream(input, digest)) {
+            bytes = verified.transferTo(OutputStream.nullOutputStream());
+        }
+        String sha256 = HexFormat.of().formatHex(digest.digest());
+        if (bytes != item.getByteSize() || !sha256.equalsIgnoreCase(item.getSha256())) {
+            throw new IllegalStateException("Restored object checksum does not match archive");
         }
     }
 
@@ -291,16 +308,16 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
         if (progress.getStatus() == RecoveryItemStatus.VERIFIED) return;
         progress.setAttemptCount(progress.getAttemptCount() + 1);
         progress.setTargetId(targetId);
-        restoreItems.save(progress);
+        progress = restoreItems.save(progress);
         try {
             action.run();
             progress.setStatus(RecoveryItemStatus.VERIFIED);
             progress.setLastError(null);
-            restoreItems.save(progress);
+            progress = restoreItems.save(progress);
         } catch (Exception e) {
             progress.setStatus(RecoveryItemStatus.FAILED);
             progress.setLastError("Recovery item restore failed");
-            restoreItems.save(progress);
+            progress = restoreItems.save(progress);
             throw new IllegalStateException("Recovery item restore failed", e);
         }
     }

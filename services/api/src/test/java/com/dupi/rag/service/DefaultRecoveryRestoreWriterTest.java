@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.*;
 
@@ -112,6 +113,17 @@ class DefaultRecoveryRestoreWriterTest {
         assertThat(fixture.target.getLifecycleStatus()).isEqualTo(KnowledgeBaseLifecycleStatus.RESTORING);
     }
 
+    @Test
+    void restoreRejectsTargetObjectChecksumMismatchBeforeReadiness() {
+        Fixture fixture = fixture();
+        when(fixture.documentStorage.download(anyString()))
+                .thenReturn(new ByteArrayInputStream("wrong".getBytes(StandardCharsets.UTF_8)));
+
+        assertThatThrownBy(() -> fixture.writer.restore(fixture.job))
+                .hasMessageContaining("item restore failed");
+        assertThat(fixture.target.getLifecycleStatus()).isEqualTo(KnowledgeBaseLifecycleStatus.RESTORING);
+    }
+
     private Fixture fixture() {
         RecoveryArchiveRepository archives = mock(RecoveryArchiveRepository.class);
         RecoveryArchiveItemRepository archiveItems = mock(RecoveryArchiveItemRepository.class);
@@ -189,6 +201,8 @@ class DefaultRecoveryRestoreWriterTest {
                 .thenAnswer(invocation -> payloads.get(invocation.getArgument(1)));
         when(storage.open(eq("dupi-recovery"), anyString()))
                 .thenAnswer(invocation -> new ByteArrayInputStream(payloads.get(invocation.getArgument(1))));
+        when(documentStorage.download(anyString()))
+                .thenReturn(new ByteArrayInputStream("guide".getBytes(StandardCharsets.UTF_8)));
         when(restoreItems.findByRestoreJobIdAndArchiveItemId(any(), any())).thenReturn(Optional.empty());
         when(restoreItems.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(documents.findByKbIdOrderByCreatedAtDesc(targetKbId)).thenReturn(List.of(sourceDocument));
@@ -216,9 +230,14 @@ class DefaultRecoveryRestoreWriterTest {
                      String itemKey, String objectKey, byte[] bytes, String sourceId) {
         RecoveryArchiveItem item = RecoveryArchiveItem.builder().id(UUID.randomUUID()).archiveId(archiveId)
                 .itemKey(itemKey).itemType("TEST").sourceId(sourceId).objectKey(objectKey)
-                .byteSize((long) bytes.length).sha256("sha").status(RecoveryItemStatus.VERIFIED).build();
+                .byteSize((long) bytes.length).sha256(sha256(bytes)).status(RecoveryItemStatus.VERIFIED).build();
         items.add(item);
         payloads.put(objectKey, bytes);
+    }
+
+    private String sha256(byte[] bytes) {
+        try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
+        catch (Exception e) { throw new RuntimeException(e); }
     }
 
     private byte[] json(ObjectMapper mapper, Object value) {

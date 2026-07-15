@@ -158,6 +158,16 @@ public class RecoveryRestoreService {
                 new IllegalStateException(errorCode));
     }
 
+    @Transactional
+    public void markExecutionFailed(UUID jobId, String tenantId) {
+        RecoveryRestoreJob job = jobs.findByIdAndTenantId(jobId, tenantId)
+                .orElseThrow(() -> new ResourceNotFoundException("Recovery restore job not found: " + jobId));
+        job.setStatus(RecoveryRestoreStatus.FAILED);
+        job.setErrorCode("RECOVERY_RESTORE_FAILED");
+        job.setErrorMessage("Recovery restore failed; inspect item evidence and retry");
+        jobs.save(job);
+    }
+
     private RecoveryManifest validate(RecoveryArchive archive) {
         if (archive.getStatus() != RecoveryArchiveStatus.COMPLETED) {
             throw new IllegalArgumentException("Recovery archive is not completed");

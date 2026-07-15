@@ -2,6 +2,7 @@ package com.dupi.rag.service;
 
 import com.dupi.rag.dto.recovery.VectorSnapshotRow;
 import io.milvus.client.MilvusServiceClient;
+import io.milvus.common.clientenum.ConsistencyLevelEnum;
 import io.milvus.grpc.*;
 import io.milvus.param.R;
 import io.milvus.param.collection.DescribeCollectionParam;
@@ -28,6 +29,7 @@ public class SdkMilvusRecoveryPort implements MilvusRecoveryPort {
                 .withCollectionName(collection)
                 .withExpr("kb_id == \"" + knowledgeBaseId + "\"")
                 .withOutFields(List.of("chunk_id", "kb_id", "doc_id", "content", vectorField))
+                .withConsistencyLevel(ConsistencyLevelEnum.STRONG)
                 .withOffset(offset).withLimit((long) limit).build());
         requireSuccess(response, "query recovery vectors");
         return new QueryResultsWrapper(response.getData()).getRowRecords().stream()
@@ -71,7 +73,8 @@ public class SdkMilvusRecoveryPort implements MilvusRecoveryPort {
         fields.add(new InsertParam.Field("doc_id", rows.stream().map(VectorSnapshotRow::documentId).toList()));
         fields.add(new InsertParam.Field("content", rows.stream().map(VectorSnapshotRow::content).toList()));
         if (!sparse) {
-            fields.add(new InsertParam.Field("embedding", rows.stream().map(VectorSnapshotRow::embedding).toList()));
+            fields.add(new InsertParam.Field("embedding", rows.stream()
+                    .map(row -> denseEmbedding(row.embedding())).toList()));
         }
         R<MutationResult> response = client.upsert(UpsertParam.newBuilder()
                 .withCollectionName(collection).withFields(fields).build());
@@ -83,7 +86,8 @@ public class SdkMilvusRecoveryPort implements MilvusRecoveryPort {
         R<QueryResults> response = client.query(QueryParam.newBuilder()
                 .withCollectionName(collection)
                 .withExpr("kb_id == \"" + knowledgeBaseId + "\"")
-                .withOutFields(List.of("count(*)")).build());
+                .withOutFields(List.of("count(*)"))
+                .withConsistencyLevel(ConsistencyLevelEnum.STRONG).build());
         requireSuccess(response, "count recovery vectors");
         List<QueryResultsWrapper.RowRecord> rows = new QueryResultsWrapper(response.getData()).getRowRecords();
         if (rows.isEmpty()) return 0;
@@ -98,6 +102,18 @@ public class SdkMilvusRecoveryPort implements MilvusRecoveryPort {
         return new VectorSnapshotRow(String.valueOf(values.get("chunk_id")),
                 String.valueOf(values.get("kb_id")), String.valueOf(values.get("doc_id")),
                 String.valueOf(values.get("content")), embedding, scalar);
+    }
+
+    private List<Float> denseEmbedding(Object value) {
+        if (!(value instanceof List<?> values)) {
+            throw new IllegalArgumentException("Dense recovery embedding must be a numeric list");
+        }
+        return values.stream().map(element -> {
+            if (!(element instanceof Number number)) {
+                throw new IllegalArgumentException("Dense recovery embedding must be a numeric list");
+            }
+            return number.floatValue();
+        }).toList();
     }
 
     private void requireSuccess(R<?> response, String operation) {
