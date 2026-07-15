@@ -85,16 +85,20 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
           $root = Join-Path $env:RUNNER_TEMP "pester-4.10.1"
           $package = Join-Path $root "pester.zip"
           $module = Join-Path $root "module"
           New-Item -ItemType Directory -Force $root | Out-Null
           Invoke-WebRequest "https://www.powershellgallery.com/api/v2/package/Pester/4.10.1" -OutFile $package
+          Unblock-File $package
           Expand-Archive -Path $package -DestinationPath $module
+          Get-ChildItem -Path $module -Recurse | Unblock-File
           $manifest = Join-Path $module "Pester.psd1"
           if (-not (Test-Path $manifest)) { throw "Pester manifest not found: $manifest" }
           Import-Module $manifest -Force
           Write-Host "Using Pester $((Get-Module Pester).Version) from $manifest"
+          $ErrorActionPreference = "Continue"
           $result = Invoke-Pester scripts/tests -PassThru
           if ($result.FailedCount -gt 0) { exit 1 }
       - name: Validate Docker Compose
