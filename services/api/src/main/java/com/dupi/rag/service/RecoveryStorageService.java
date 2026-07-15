@@ -11,6 +11,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.UUID;
+import java.io.ByteArrayOutputStream;
 
 @Service
 @RequiredArgsConstructor
@@ -49,6 +50,36 @@ public class RecoveryStorageService {
             }
         } catch (Exception e) {
             throw new IllegalStateException("Failed to delete recovery archive", e);
+        }
+    }
+
+    public InputStream open(String bucket, String objectKey) {
+        try {
+            return objectStore.get(bucket, objectKey);
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to open recovery object", e);
+        }
+    }
+
+    public byte[] readSmall(String bucket, String objectKey, int maximumBytes) {
+        if (maximumBytes <= 0) throw new IllegalArgumentException("Recovery read limit must be positive");
+        try (InputStream input = objectStore.get(bucket, objectKey);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int read;
+            int total = 0;
+            while ((read = input.read(buffer)) >= 0) {
+                total += read;
+                if (total > maximumBytes) {
+                    throw new IllegalArgumentException("Recovery object exceeds read limit");
+                }
+                output.write(buffer, 0, read);
+            }
+            return output.toByteArray();
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to read recovery object", e);
         }
     }
 
