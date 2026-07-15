@@ -52,4 +52,34 @@ class RecoveryManifestServiceTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Duplicate");
     }
+
+    @Test
+    void serializedManifestParsesAndDetectsTampering() {
+        RecoveryManifestHeader header = new RecoveryManifestHeader(
+                1, UUID.randomUUID(), "default", UUID.randomUUID(), Instant.now(), "model", 8, Map.of());
+        RecoveryManifest sealed = service.seal(header,
+                List.of(new RecoveryManifestItem("a", "RECORD", "a", 1, "sha")));
+
+        assertThat(service.parseAndValidate(service.serialize(sealed))).isEqualTo(sealed);
+        RecoveryManifest tampered = new RecoveryManifest(sealed.header(), sealed.itemCount(), 99,
+                sealed.items(), sealed.manifestChecksum());
+        assertThatThrownBy(() -> service.parseAndValidate(service.serialize(tampered)))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("mismatch");
+    }
+
+    @Test
+    void rejectsInvalidJsonAndIncompleteHeaderOrItem() {
+        RecoveryManifestHeader incomplete = new RecoveryManifestHeader(
+                1, UUID.randomUUID(), " ", UUID.randomUUID(), Instant.now(), "model", 8, Map.of());
+        RecoveryManifestHeader valid = new RecoveryManifestHeader(
+                1, UUID.randomUUID(), "default", UUID.randomUUID(), Instant.now(), "model", 8, Map.of());
+        RecoveryManifestItem incompleteItem = new RecoveryManifestItem("", "RECORD", "a", 1, "sha");
+
+        assertThatThrownBy(() -> service.parseAndValidate("not-json".getBytes()))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("invalid JSON");
+        assertThatThrownBy(() -> service.seal(incomplete, List.of()))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("header");
+        assertThatThrownBy(() -> service.seal(valid, List.of(incompleteItem)))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("item");
+    }
 }

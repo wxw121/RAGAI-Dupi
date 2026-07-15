@@ -1,6 +1,7 @@
 package com.dupi.rag.service;
 
 import com.dupi.rag.config.RecoveryProperties;
+import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.*;
 import com.dupi.rag.domain.enums.RecoveryArchiveStatus;
 import com.dupi.rag.domain.enums.RecoveryItemStatus;
@@ -24,6 +25,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.*;
+import java.io.OutputStream;
 
 @Service
 @RequiredArgsConstructor
@@ -43,6 +45,7 @@ public class RecoveryArchiveService {
     private final RecoveryManifestService manifests;
     private final MilvusRecoveryService recoveryVectors;
     private final ObjectMapper mapper;
+    private final AuditLogService auditLogService;
 
     @Transactional
     public RecoveryArchive create(UUID knowledgeBaseId, String actor) {
@@ -59,7 +62,10 @@ public class RecoveryArchiveService {
                 .sourceRevision(kb.getUpdatedAt())
                 .createdBy(actor == null || actor.isBlank() ? "system" : actor)
                 .build();
-        return archives.save(archive);
+        RecoveryArchive saved = archives.save(archive);
+        auditLogService.recordSuccess("RECOVERY_ARCHIVE_CREATE", "RECOVERY_ARCHIVE", saved.getId(),
+                "Created recovery archive " + saved.getId() + " for knowledge base " + knowledgeBaseId);
+        return saved;
     }
 
     public void capture(UUID archiveId) {
@@ -133,14 +139,87 @@ public class RecoveryArchiveService {
             archive.setStatus(RecoveryArchiveStatus.COMPLETED);
             archives.save(archive);
             maintenance.release(archiveId, RecoveryArchiveStatus.COMPLETED);
+            auditLogService.recordSuccess("RECOVERY_ARCHIVE_COMPLETE", "RECOVERY_ARCHIVE", archiveId,
+                    "Completed recovery archive " + archiveId);
         } catch (Exception e) {
             archive.setStatus(RecoveryArchiveStatus.FAILED);
             archive.setErrorCode("RECOVERY_CAPTURE_FAILED");
             archive.setErrorMessage("Recovery capture failed; inspect item evidence and retry");
             archives.save(archive);
             maintenance.release(archiveId, RecoveryArchiveStatus.FAILED);
+            auditLogService.recordFailure("RECOVERY_ARCHIVE_FAILED", "RECOVERY_ARCHIVE", archiveId,
+                    new IllegalStateException("Recovery archive capture failed"));
             throw new IllegalStateException("Recovery capture failed", e);
         }
+    }
+
+    public List<RecoveryArchive> list(UUID knowledgeBaseId) {
+        knowledgeBases.findOrThrow(knowledgeBaseId);
+        return archives.findByTenantIdAndSourceKnowledgeBaseIdOrderByCreatedAtDesc(
+                TenantContext.getTenantId(), knowledgeBaseId);
+    }
+
+    public RecoveryArchive get(UUID knowledgeBaseId, UUID archiveId) {
+        knowledgeBases.findOrThrow(knowledgeBaseId);
+        RecoveryArchive archive = archives.findByIdAndTenantId(archiveId, TenantContext.getTenantId())
+                .orElseThrow(() -> new ResourceNotFoundException("Recovery archive not found: " + archiveId));
+        if (!knowledgeBaseId.equals(archive.getSourceKnowledgeBaseId())) {
+            throw new ResourceNotFoundException("Recovery archive not found: " + archiveId);
+        }
+        return archive;
+    }
+
+    @Transactional
+    public RecoveryArchive prepareRetry(UUID knowledgeBaseId, UUID archiveId) {
+        RecoveryArchive archive = get(knowledgeBaseId, archiveId);
+        if (archive.getStatus() != RecoveryArchiveStatus.FAILED) {
+            throw new IllegalArgumentException("Only failed recovery archives can be retried");
+        }
+        archive.setStatus(RecoveryArchiveStatus.PREPARING);
+        archive.setErrorCode(null);
+        archive.setErrorMessage(null);
+        RecoveryArchive saved = archives.save(archive);
+        auditLogService.recordSuccess("RECOVERY_ARCHIVE_RETRY", "RECOVERY_ARCHIVE", archiveId,
+                "Queued recovery archive retry " + archiveId);
+        return saved;
+    }
+
+    @Transactional
+    public void delete(UUID knowledgeBaseId, UUID archiveId) {
+        RecoveryArchive archive = get(knowledgeBaseId, archiveId);
+        if (archive.getStatus() != RecoveryArchiveStatus.COMPLETED
+                && archive.getStatus() != RecoveryArchiveStatus.FAILED) {
+            throw new IllegalArgumentException("Active recovery archives cannot be deleted");
+        }
+        recoveryStorage.deleteArchive(archive.getTenantId(), archive.getId());
+        archives.delete(archive);
+        auditLogService.recordSuccess("RECOVERY_ARCHIVE_DELETE", "RECOVERY_ARCHIVE", archiveId,
+                "Deleted recovery archive " + archiveId);
+    }
+
+    public void download(UUID knowledgeBaseId, UUID archiveId, OutputStream output) {
+        RecoveryArchive archive = get(knowledgeBaseId, archiveId);
+        if (archive.getStatus() != RecoveryArchiveStatus.COMPLETED) {
+            throw new IllegalArgumentException("Only completed recovery archives can be downloaded");
+        }
+        recoveryStorage.streamZip(archive.getTenantId(), archive.getId(), output);
+        auditLogService.recordSuccess("RECOVERY_ARCHIVE_DOWNLOAD", "RECOVERY_ARCHIVE", archiveId,
+                "Downloaded recovery archive " + archiveId);
+    }
+
+    @Transactional
+    public void markFailed(UUID archiveId, String errorCode) {
+        RecoveryArchive archive = archive(archiveId);
+        archive.setStatus(RecoveryArchiveStatus.FAILED);
+        archive.setErrorCode(errorCode);
+        archive.setErrorMessage("Recovery job could not be scheduled; retry later");
+        archives.save(archive);
+        auditLogService.recordFailure("RECOVERY_ARCHIVE_SCHEDULE_FAILED", "RECOVERY_ARCHIVE", archiveId,
+                new IllegalStateException(errorCode));
+    }
+
+    public RecoveryArchive getSystem(UUID archiveId) {
+        return archive(archiveId);
     }
 
     private RecoveryManifestItem writeBytes(RecoveryArchive archive, String itemKey, String itemType,

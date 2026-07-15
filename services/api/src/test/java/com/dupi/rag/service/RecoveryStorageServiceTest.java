@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.zip.ZipInputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -75,7 +76,73 @@ class RecoveryStorageServiceTest {
         assertThat(objectStore.objects).isEmpty();
     }
 
-    private RecoveryStorageService service(InMemoryRecoveryObjectStore objectStore) {
+    @Test
+    void readsSmallObjectsAndStreamsArchiveZip() throws Exception {
+        InMemoryRecoveryObjectStore objectStore = new InMemoryRecoveryObjectStore();
+        RecoveryStorageService storage = service(objectStore);
+        UUID archiveId = UUID.randomUUID();
+        StoredRecoveryObject first = storage.put("default", archiveId, "records/a.json",
+                new ByteArrayInputStream("one".getBytes(StandardCharsets.UTF_8)));
+        storage.put("default", archiveId, "manifest.json",
+                new ByteArrayInputStream("two".getBytes(StandardCharsets.UTF_8)));
+
+        assertThat(storage.readSmall(first.bucket(), first.objectKey(), 10)).isEqualTo("one".getBytes());
+        assertThat(storage.open(first.bucket(), first.objectKey()).readAllBytes()).isEqualTo("one".getBytes());
+        ByteArrayOutputStream zipBytes = new ByteArrayOutputStream();
+        storage.streamZip("default", archiveId, zipBytes);
+        try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(zipBytes.toByteArray()))) {
+            assertThat(zip.getNextEntry().getName()).isEqualTo("manifest.json");
+            assertThat(zip.readAllBytes()).isEqualTo("two".getBytes());
+            assertThat(zip.getNextEntry().getName()).isEqualTo("records/a.json");
+        }
+    }
+
+    @Test
+    void smallReadRejectsOversizedObject() {
+        InMemoryRecoveryObjectStore objectStore = new InMemoryRecoveryObjectStore();
+        RecoveryStorageService storage = service(objectStore);
+        StoredRecoveryObject stored = storage.put("default", UUID.randomUUID(), "large",
+                new ByteArrayInputStream(new byte[20]));
+
+        assertThatThrownBy(() -> storage.readSmall(stored.bucket(), stored.objectKey(), 10))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exceeds");
+    }
+
+    @Test
+    void validatesTenantAndReadLimitAndWrapsStoreFailures() throws Exception {
+        RecoveryObjectStore failingStore = new RecoveryObjectStore() {
+            @Override public void put(String bucket, String key, InputStream input) throws Exception {
+                throw new Exception("write failed");
+            }
+            @Override public InputStream get(String bucket, String key) throws Exception {
+                throw new Exception("read failed");
+            }
+            @Override public List<String> list(String bucket, String prefix) throws Exception {
+                throw new Exception("list failed");
+            }
+            @Override public void delete(String bucket, String key) { }
+        };
+        RecoveryStorageService storage = service(failingStore);
+
+        assertThatThrownBy(() -> storage.put("tenant", UUID.randomUUID(), "a", new ByteArrayInputStream(new byte[0])))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("write");
+        assertThat(storage.verify(new StoredRecoveryObject("b", "k", 0, "sha"))).isFalse();
+        assertThatThrownBy(() -> storage.open("b", "k"))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("open");
+        assertThatThrownBy(() -> storage.readSmall("b", "k", 1))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("read");
+        assertThatThrownBy(() -> storage.readSmall("b", "k", 0))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("positive");
+        assertThatThrownBy(() -> storage.deleteArchive("tenant", UUID.randomUUID()))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("delete");
+        assertThatThrownBy(() -> storage.streamZip("tenant", UUID.randomUUID(), new ByteArrayOutputStream()))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("ZIP");
+        assertThatThrownBy(() -> storage.put("bad/tenant", UUID.randomUUID(), "a", new ByteArrayInputStream(new byte[0])))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("tenant");
+    }
+
+    private RecoveryStorageService service(RecoveryObjectStore objectStore) {
         RecoveryProperties properties = new RecoveryProperties();
         properties.setBucket("dupi-recovery");
         return new RecoveryStorageService(properties, objectStore);

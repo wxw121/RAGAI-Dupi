@@ -92,6 +92,44 @@ class KnowledgeBaseMaintenanceServiceTest {
         verify(archives).save(archive);
     }
 
+    @Test
+    void acquireRejectsMissingMismatchedAndContendedArchives() {
+        UUID kbId = UUID.randomUUID();
+        UUID archiveId = UUID.randomUUID();
+        when(knowledgeBases.findSystemByIdForUpdate(kbId)).thenReturn(Optional.empty());
+        assertThatThrownBy(() -> service.acquire(kbId, archiveId))
+                .hasMessageContaining("Knowledge base not found");
+
+        when(knowledgeBases.findSystemByIdForUpdate(kbId)).thenReturn(Optional.of(
+                KnowledgeBase.builder().id(kbId).tenantId("default").name("kb").build()));
+        when(archives.findById(archiveId)).thenReturn(Optional.empty());
+        assertThatThrownBy(() -> service.acquire(kbId, archiveId))
+                .hasMessageContaining("Recovery archive not found");
+
+        RecoveryArchive archive = archive(UUID.randomUUID(), RecoveryArchiveStatus.PREPARING);
+        when(archives.findById(archiveId)).thenReturn(Optional.of(archive));
+        assertThatThrownBy(() -> service.acquire(kbId, archiveId))
+                .isInstanceOf(KnowledgeBaseMaintenanceException.class)
+                .hasMessageContaining("cannot acquire");
+
+        archive = archive(kbId, RecoveryArchiveStatus.PREPARING);
+        when(archives.findById(archiveId)).thenReturn(Optional.of(archive));
+        when(archives.existsActiveBySourceKnowledgeBaseIdExcluding(kbId, archiveId)).thenReturn(true);
+        assertThatThrownBy(() -> service.acquire(kbId, archiveId))
+                .isInstanceOf(KnowledgeBaseMaintenanceException.class)
+                .hasMessageContaining("Another recovery archive");
+    }
+
+    @Test
+    void mutationGuardAllowsQuiescentKnowledgeBaseAndReleaseRejectsNonTerminalState() {
+        UUID kbId = UUID.randomUUID();
+        service.assertMutationAllowed(kbId);
+
+        assertThatThrownBy(() -> service.release(UUID.randomUUID(), RecoveryArchiveStatus.VERIFYING))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("terminal state");
+    }
+
     private RecoveryArchive archive(UUID kbId, RecoveryArchiveStatus status) {
         return RecoveryArchive.builder()
                 .id(UUID.randomUUID())

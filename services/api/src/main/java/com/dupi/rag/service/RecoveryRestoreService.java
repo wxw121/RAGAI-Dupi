@@ -23,6 +23,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.List;
 
 @Service
 @RequiredArgsConstructor
@@ -35,6 +36,7 @@ public class RecoveryRestoreService {
     private final RecoveryStorageService storage;
     private final RecoveryManifestService manifests;
     private final RecoveryRestoreWriter writer;
+    private final AuditLogService auditLogService;
 
     @Transactional
     public RecoveryRestoreJob create(UUID archiveId, String actor) {
@@ -60,7 +62,10 @@ public class RecoveryRestoreService {
                 .id(jobId).archiveId(archiveId).tenantId(tenantId).targetKnowledgeBaseId(targetId)
                 .status(RecoveryRestoreStatus.VALIDATING).totalItems(manifest.itemCount())
                 .createdBy(actor == null || actor.isBlank() ? "system" : actor).build();
-        return jobs.save(job);
+        RecoveryRestoreJob saved = jobs.save(job);
+        auditLogService.recordSuccess("RECOVERY_RESTORE_CREATE", "RECOVERY_RESTORE", saved.getId(),
+                "Created recovery restore " + saved.getId() + " targeting " + targetId);
+        return saved;
     }
 
     @Transactional
@@ -90,12 +95,17 @@ public class RecoveryRestoreService {
             writer.restore(job);
             job.setStatus(RecoveryRestoreStatus.COMPLETED);
             job.setCompletedItems(job.getTotalItems());
-            return jobs.save(job);
+            RecoveryRestoreJob saved = jobs.save(job);
+            auditLogService.recordSuccess("RECOVERY_RESTORE_COMPLETE", "RECOVERY_RESTORE", job.getId(),
+                    "Completed recovery restore " + job.getId());
+            return saved;
         } catch (Exception e) {
             job.setStatus(RecoveryRestoreStatus.FAILED);
             job.setErrorCode("RECOVERY_RESTORE_FAILED");
             job.setErrorMessage("Recovery restore failed; inspect item evidence and retry");
             jobs.save(job);
+            auditLogService.recordFailure("RECOVERY_RESTORE_FAILED", "RECOVERY_RESTORE", job.getId(),
+                    new IllegalStateException("Recovery restore failed"));
             throw new IllegalStateException("Recovery restore failed", e);
         }
     }
@@ -108,11 +118,44 @@ public class RecoveryRestoreService {
         }
         writer.abandon(job);
         jobs.delete(job);
+        auditLogService.recordSuccess("RECOVERY_RESTORE_ABANDON", "RECOVERY_RESTORE", jobId,
+                "Abandoned recovery restore " + jobId);
     }
 
     public RecoveryRestoreJob find(UUID jobId) {
         return jobs.findByIdAndTenantId(jobId, TenantContext.getTenantId())
                 .orElseThrow(() -> new ResourceNotFoundException("Recovery restore job not found: " + jobId));
+    }
+
+    public List<RecoveryRestoreJob> list() {
+        return jobs.findByTenantIdOrderByCreatedAtDesc(TenantContext.getTenantId());
+    }
+
+    @Transactional
+    public RecoveryRestoreJob prepareRetry(UUID jobId) {
+        RecoveryRestoreJob job = find(jobId);
+        if (job.getStatus() != RecoveryRestoreStatus.FAILED) {
+            throw new IllegalArgumentException("Only failed recovery restore jobs can be retried");
+        }
+        job.setStatus(RecoveryRestoreStatus.VALIDATING);
+        job.setErrorCode(null);
+        job.setErrorMessage(null);
+        RecoveryRestoreJob saved = jobs.save(job);
+        auditLogService.recordSuccess("RECOVERY_RESTORE_RETRY", "RECOVERY_RESTORE", jobId,
+                "Queued recovery restore retry " + jobId);
+        return saved;
+    }
+
+    @Transactional
+    public void markFailed(UUID jobId, String tenantId, String errorCode) {
+        RecoveryRestoreJob job = jobs.findByIdAndTenantId(jobId, tenantId)
+                .orElseThrow(() -> new ResourceNotFoundException("Recovery restore job not found: " + jobId));
+        job.setStatus(RecoveryRestoreStatus.FAILED);
+        job.setErrorCode(errorCode);
+        job.setErrorMessage("Recovery job could not be scheduled; retry later");
+        jobs.save(job);
+        auditLogService.recordFailure("RECOVERY_RESTORE_SCHEDULE_FAILED", "RECOVERY_RESTORE", jobId,
+                new IllegalStateException(errorCode));
     }
 
     private RecoveryManifest validate(RecoveryArchive archive) {

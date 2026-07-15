@@ -41,6 +41,7 @@ class RecoveryRestoreServiceTest {
     @Mock KnowledgeBaseRepository knowledgeBases;
     @Mock RecoveryStorageService storage;
     @Mock RecoveryRestoreWriter writer;
+    @Mock AuditLogService auditLogService;
 
     private RecoveryManifestService manifests;
     private RecoveryRestoreService service;
@@ -50,7 +51,7 @@ class RecoveryRestoreServiceTest {
         TenantContext.setTenantId("tenant-a");
         manifests = new RecoveryManifestService(new ObjectMapper().findAndRegisterModules());
         service = new RecoveryRestoreService(
-                archives, archiveItems, jobs, knowledgeBases, storage, manifests, writer);
+                archives, archiveItems, jobs, knowledgeBases, storage, manifests, writer, auditLogService);
     }
 
     @AfterEach
@@ -121,6 +122,43 @@ class RecoveryRestoreServiceTest {
 
         assertThat(job.getStatus()).isEqualTo(RecoveryRestoreStatus.COMPLETED);
         verify(writer).restore(job);
+    }
+
+    @Test
+    void listFindPrepareRetryMarkFailedAndAbandonStayTenantScoped() {
+        RecoveryRestoreJob job = RecoveryRestoreJob.builder().id(UUID.randomUUID()).archiveId(UUID.randomUUID())
+                .tenantId("tenant-a").targetKnowledgeBaseId(UUID.randomUUID())
+                .status(RecoveryRestoreStatus.FAILED).createdBy("admin").build();
+        when(jobs.findByIdAndTenantId(job.getId(), "tenant-a")).thenReturn(Optional.of(job));
+        when(jobs.findByTenantIdOrderByCreatedAtDesc("tenant-a")).thenReturn(List.of(job));
+        when(jobs.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        assertThat(service.list()).containsExactly(job);
+        assertThat(service.find(job.getId())).isSameAs(job);
+        assertThat(service.prepareRetry(job.getId()).getStatus()).isEqualTo(RecoveryRestoreStatus.VALIDATING);
+        service.markFailed(job.getId(), "tenant-a", "RECOVERY_CAPACITY_EXCEEDED");
+        assertThat(job.getStatus()).isEqualTo(RecoveryRestoreStatus.FAILED);
+        service.abandon(job.getId());
+
+        verify(writer).abandon(job);
+        verify(jobs).delete(job);
+    }
+
+    @Test
+    void executeFailureIsRedactedAndRetryRulesAreEnforced() {
+        RecoveryRestoreJob job = RecoveryRestoreJob.builder().id(UUID.randomUUID()).archiveId(UUID.randomUUID())
+                .tenantId("tenant-a").targetKnowledgeBaseId(UUID.randomUUID())
+                .status(RecoveryRestoreStatus.VALIDATING).createdBy("admin").build();
+        when(jobs.findByIdAndTenantId(job.getId(), "tenant-a")).thenReturn(Optional.of(job));
+        when(jobs.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        doThrow(new IllegalStateException("secret=hidden")).when(writer).restore(job);
+
+        assertThatThrownBy(() -> service.execute(job.getId())).isInstanceOf(IllegalStateException.class);
+        assertThat(job.getStatus()).isEqualTo(RecoveryRestoreStatus.FAILED);
+        assertThat(job.getErrorMessage()).doesNotContain("hidden");
+        job.setStatus(RecoveryRestoreStatus.COMPLETED);
+        assertThatThrownBy(() -> service.retry(job.getId())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.abandon(job.getId())).isInstanceOf(IllegalArgumentException.class);
     }
 
     private RecoveryArchive archive() {

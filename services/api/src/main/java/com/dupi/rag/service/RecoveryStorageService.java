@@ -12,6 +12,9 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.UUID;
 import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 @Service
 @RequiredArgsConstructor
@@ -80,6 +83,22 @@ public class RecoveryStorageService {
             throw e;
         } catch (Exception e) {
             throw new IllegalStateException("Failed to read recovery object", e);
+        }
+    }
+
+    public void streamZip(String tenantId, UUID archiveId, OutputStream output) {
+        String prefix = archivePrefix(tenantId, archiveId);
+        try (ZipOutputStream zip = new ZipOutputStream(output, java.nio.charset.StandardCharsets.UTF_8)) {
+            for (String key : objectStore.list(properties.getBucket(), prefix).stream().sorted().toList()) {
+                zip.putNextEntry(new ZipEntry(key.substring(prefix.length())));
+                try (InputStream input = objectStore.get(properties.getBucket(), key)) {
+                    input.transferTo(zip);
+                }
+                zip.closeEntry();
+            }
+            zip.finish();
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to stream recovery archive ZIP", e);
         }
     }
 

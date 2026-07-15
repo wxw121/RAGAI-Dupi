@@ -10,4 +10,5 @@ import java.util.UUID;
 public interface RecoveryRestoreJobRepository extends JpaRepository<RecoveryRestoreJob, UUID> {
     Optional<RecoveryRestoreJob> findByIdAndTenantId(UUID id, String tenantId);
     List<RecoveryRestoreJob> findByTenantIdAndArchiveIdOrderByCreatedAtDesc(String tenantId, UUID archiveId);
+    List<RecoveryRestoreJob> findByTenantIdOrderByCreatedAtDesc(String tenantId);
 }

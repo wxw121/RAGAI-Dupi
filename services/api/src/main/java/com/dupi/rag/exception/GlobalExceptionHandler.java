@@ -46,6 +46,15 @@ public class GlobalExceptionHandler {
                 ex.getSuggestion()));
     }
 
+    @ExceptionHandler(KnowledgeBaseMaintenanceException.class)
+    public ResponseEntity<ApiErrorResponse> handleMaintenance(KnowledgeBaseMaintenanceException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(error(
+                "knowledge_base_maintenance",
+                ex.getMessage(),
+                "recovery",
+                "Wait for the active recovery archive to finish, then retry the mutation."));
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiErrorResponse> handleGeneric(Exception ex) {
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error(
