@@ -1,5 +1,14 @@
 # 进展记录
 
+## V1.3 RAG quality and Sparse migration (2026-07-15)
+
+- 已完成质量策略、baseline、不可变评测证据和门禁。
+- 已完成 Retrieval Profile 控制台、激活和受 PASS 证据约束的 rollback。
+- 已完成 Milvus 2.5.4 原生 BM25、回填、双写、Shadow、Cutover、完成态持续写入和全版本删除同步。
+- 真实 Milvus 已验证 v1/v2/v3 完整迁移、v2 -> v1 rollback、Sparse 删除同步；浏览器 E2E 1/1 通过，Web 全量 62/62 通过。
+- 最终真实语料热态结果为 VECTOR P95 55 ms、HYBRID P95 99 ms、HYBRID+RERANK P95 434 ms，三组 PASS 1/1、fallback 0，重排组 `rerankRank=1`。
+- API 全量 288 项通过并满足 95% JaCoCo 行覆盖率门禁；Worker 全量 41 项、Web 全量 62 项通过，Web 生产构建成功。
+
 ## 当前状态
 
 V1.2.1 已完成：**Web 控制台**（`:8080`）+ API + Worker + Milvus；在 V1.2 质量闭环基础上，将真实浏览器写操作门禁隔离到 `e2e` 租户，并在成功路径自动清理临时知识库和账号。
@@ -163,3 +172,11 @@ V1.2.1 已完成：**Web 控制台**（`:8080`）+ API + Worker + Milvus；在 V
 - [M2] — 向量检索 API、RAG Chat SSE 流式、citations
 - [M3] — 健康检查、错误处理、摄入重试
 - [V2 骨架] — BM25 混合检索、Rerank、语义分块、Excel 解析、生成中断端点
+# 2026-07-15 V1.3 发布硬化
+
+- 已新增 30 条、六分类检索清单，支持幂等同步、冷/热三模式基准和 fallback/排名证据门禁。
+- 已新增 Rerank 启动预热、脱敏健康状态和 `hf_model_cache` 持久卷；默认模型保持 `BAAI/bge-reranker-base`。
+- 已新增 Milvus 2.4.1 到 2.5.4 备份/恢复演练脚本及生产确认、备份先行、校验清单策略测试。
+- 已新增 pip-audit、Syft、Trivy、许可证 deny list 和 3 GB Worker 镜像门禁脚本。
+- 已新增 Sparse Migration Web 运维面板、Cutover 证据对话框和浏览器 Gate 流程。
+- 已通过新增的 Worker、API DTO、Web 组件、Pester 策略测试和 Web 构建；生产同规格演练、真实环境 30 Case 基准、完整扫描和真实浏览器 Gate 待发布环境执行。

@@ -1,5 +1,11 @@
 # 端到端主流程自动化测试
 
+## V1.3 release gate
+
+`scripts/e2e-llm-stub.py` 提供确定性的 8 维 OpenAI-compatible embeddings，仅用于隔离 E2E，不代表生产模型质量。真实浏览器门禁用真实登录/Cookie/CSRF 创建临时知识库和 Retrieval Profile，检查 console、page error、失败网络请求，并在成功后清理资源。
+
+2026-07-15 的 Milvus 2.5.4 实测覆盖 Sparse v1/v2/v3 回填、ingest 双写、Shadow、Cutover、v2 回滚到 v1，以及文档删除前 v1/v2 count `1/1`、删除后 `0/0`。发布前必须运行 API `mvnw verify`、Worker `python -m pytest`、Web `npm test`/`npm run build`、真实语料 benchmark 和浏览器门禁。
+
 ## 目的
 
 从 **Web 控制台按钮操作** 出发，用脚本自动调用同一套 HTTP 接口，验证「健康检查 → 知识库 → 上传 → 摄入 → 检索 → 问答」主链路；V1.2 的真实浏览器门禁进一步覆盖混合检索建库、持久化 RAG 用例和真实账号写操作，并拦截 Cookie/CSRF、控制台、网络和页面错误。
@@ -143,3 +149,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-browser-gate.ps1
 - **原因**：`Document.builder().id(UUID)` 预置主键时，JPA `save()` 走 merge 路径，`@PrePersist` 不执行；第二次 `save()` 将 `created_at` 更新为 null
 - **修复**：[`DocumentService.upload()`](../services/api/src/main/java/com/dupi/rag/service/DocumentService.java) 在 builder 中显式设置 `createdAt`/`updatedAt`，并预先计算 `objectKey`
 - **部署**：`docker compose up -d --build api`
+# V1.3 Sparse Migration 浏览器门禁
+
+`services/web/e2e/browser-gate.spec.ts` 在真实登录、真实隔离 KB 和真实 Retrieval Profile 流程内验证 Sparse Migration 页面。迁移 API 使用确定性路由夹具依次返回 PREPARING、DUAL_WRITING、SHADOW_VALIDATING、CUTOVER 和 COMPLETED，页面组件、确认对话框、按钮门禁和浏览器错误收集仍运行真实代码。
+
+执行仍需要 `E2E_ADMIN_USERNAME`、`E2E_ADMIN_PASSWORD` 和运行中的应用；仅运行 `npx playwright test --list` 只能证明测试可发现，不能作为浏览器 Gate 通过证据。
