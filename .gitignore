@@ -36,6 +36,9 @@ Thumbs.db
 *.log
 scripts/e2e-last-run.json
 scripts/e2e-chat-session-history-last-run.json
+artifacts/
+**/playwright-report/
+**/test-results/
 handoff.md
 .superpowers/
 .worktrees/

@@ -44,6 +44,7 @@ test('real login and core authenticated UI flows isolate and clean E2E data', as
     await expect(page.getByText(resources.kbName)).toBeVisible()
     resources.kbId = await findKnowledgeBaseId(page, resources.kbName)
     expect(resources.kbId, 'created E2E knowledge base id').toBeTruthy()
+    await installSparseMigrationFixture(page, resources.kbId!)
     await gate.expectClean('create E2E knowledge base')
 
     await page.getByText(resources.kbName).click()
@@ -62,6 +63,25 @@ test('real login and core authenticated UI flows isolate and clean E2E data', as
     await page.getByLabel('检索问题').fill('browser smoke query')
     await page.getByRole('button', { name: /保存用例/ }).click()
     await expect(page.getByText('browser-smoke', { exact: true })).toBeVisible()
+    await expect(page.getByText('Retrieval Profile', { exact: true })).toBeVisible()
+    await page.getByLabel('Profile 名称').fill('browser-candidate')
+    await page.getByRole('button', { name: /^创建$/ }).click()
+    await expect(page.getByText(/v1 · browser-candidate/)).toBeVisible()
+    await expect(page.getByText('Sparse Migration', { exact: true })).toBeVisible()
+    await page.getByLabel('Migration profile').selectOption({ index: 1 })
+    await page.getByRole('button', { name: 'Start', exact: true }).click()
+    await expect(page.getByText('PREPARING', { exact: true }).first()).toBeVisible()
+    await page.getByRole('button', { name: 'Backfill', exact: true }).click()
+    await expect(page.getByText('DUAL_WRITING', { exact: true }).first()).toBeVisible()
+    await page.getByRole('button', { name: 'Shadow validation', exact: true }).click()
+    await expect(page.getByText('SHADOW_VALIDATING', { exact: true }).first()).toBeVisible()
+    await page.getByRole('button', { name: 'Cutover sparse migration' }).click()
+    await expect(page.getByText('1.10x')).toBeVisible()
+    await page.getByRole('button', { name: 'Confirm Cutover', exact: true }).click()
+    await expect(page.getByText('CUTOVER', { exact: true }).first()).toBeVisible()
+    await page.getByRole('button', { name: 'Complete', exact: true }).click()
+    await expect(page.getByText('COMPLETED', { exact: true }).first()).toBeVisible()
+    await expect(page.getByText('最低通过率')).toBeVisible()
     await gate.expectClean('knowledge base rag eval tab')
 
     await navigateTo(page, '审计日志')
@@ -99,6 +119,34 @@ test('real login and core authenticated UI flows isolate and clean E2E data', as
     }
   }
 })
+
+async function installSparseMigrationFixture(page: Page, kbId: string) {
+  let migration: Record<string, unknown> | null = null
+  await page.route(`**/api/v1/knowledge-bases/${kbId}/sparse-migrations**`, async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (request.method() === 'GET') {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(migration ? [migration] : []) })
+      return
+    }
+    if (!migration) migration = sparseMigrationFixture(kbId, 'PREPARING')
+    else if (path.endsWith('/backfill')) migration = sparseMigrationFixture(kbId, 'DUAL_WRITING')
+    else if (path.endsWith('/shadow')) migration = sparseMigrationFixture(kbId, 'SHADOW_VALIDATING')
+    else if (path.endsWith('/cutover')) migration = sparseMigrationFixture(kbId, 'CUTOVER')
+    else if (path.endsWith('/complete')) migration = sparseMigrationFixture(kbId, 'COMPLETED')
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(migration) })
+  })
+}
+
+function sparseMigrationFixture(kbId: string, state: string) {
+  return {
+    id: 'e2e-sparse-migration', kbId, profileId: 'e2e-profile', state,
+    sourceChunkCount: 100, indexedChunkCount: state === 'PREPARING' ? 0 : 100,
+    expectedDimension: 8, actualDimension: 8, baselineP95Ms: 100, candidateP95Ms: 110,
+    baselineFallbackRate: 0.01, candidateFallbackRate: 0, legacyBm25Enabled: false,
+    errorMessage: null, createdAt: '2026-07-15T00:00:00Z', updatedAt: '2026-07-15T00:00:00Z',
+  }
+}
 
 async function loginAs(page: Page, loginUsername: string, loginPassword: string) {
   await page.goto('/')
