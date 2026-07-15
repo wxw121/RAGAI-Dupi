@@ -81,21 +81,20 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
-      - name: Prepare Pester 4.10.1
+      - name: Test release scripts with Pester 4.10.1
         shell: powershell
         run: |
+          $ErrorActionPreference = "Stop"
           $root = Join-Path $env:RUNNER_TEMP "pester-4.10.1"
           $package = Join-Path $root "pester.zip"
           $module = Join-Path $root "module"
           New-Item -ItemType Directory -Force $root | Out-Null
           Invoke-WebRequest "https://www.powershellgallery.com/api/v2/package/Pester/4.10.1" -OutFile $package
           Expand-Archive -Path $package -DestinationPath $module
-      - name: Test release scripts
-        shell: powershell
-        run: |
-          $module = Join-Path $env:RUNNER_TEMP "pester-4.10.1\module\Pester.psd1"
-          Import-Module $module -Force
-          Write-Host "Using Pester $((Get-Module Pester).Version) from $module"
+          $manifest = Join-Path $module "Pester.psd1"
+          if (-not (Test-Path $manifest)) { throw "Pester manifest not found: $manifest" }
+          Import-Module $manifest -Force
+          Write-Host "Using Pester $((Get-Module Pester).Version) from $manifest"
           $result = Invoke-Pester scripts/tests -PassThru
           if ($result.FailedCount -gt 0) { exit 1 }
       - name: Validate Docker Compose
