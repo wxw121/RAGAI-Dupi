@@ -101,8 +101,14 @@ jobs:
           $ErrorActionPreference = "Continue"
           $result = Invoke-Pester scripts/tests -PassThru
           if ($result.FailedCount -gt 0) { exit 1 }
+
+  compose:
+    name: Docker Compose
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
       - name: Validate Docker Compose
-        shell: powershell
         env:
           POSTGRES_PASSWORD: test
           MINIO_ACCESS_KEY: test
