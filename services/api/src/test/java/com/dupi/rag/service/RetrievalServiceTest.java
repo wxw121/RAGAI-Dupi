@@ -6,11 +6,13 @@ import com.dupi.rag.config.RagProperties;
 import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.entity.RetrievalProfile;
 import com.dupi.rag.domain.enums.RetrievalMode;
 import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
+import com.dupi.rag.repository.SparseMigrationRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -44,6 +46,8 @@ class RetrievalServiceTest {
     @Mock MilvusVectorService milvusVectorService;
     @Mock ChunkRepository chunkRepository;
     @Mock DocumentRepository documentRepository;
+    @Mock RetrievalProfileService retrievalProfileService;
+    @Mock SparseMigrationRepository sparseMigrationRepository;
 
     RetrievalService service(RagProperties properties) {
         return service(properties, WebClient.builder());
@@ -57,7 +61,9 @@ class RetrievalServiceTest {
                 chunkRepository,
                 documentRepository,
                 properties,
-                builder
+                builder,
+                retrievalProfileService,
+                sparseMigrationRepository
         );
     }
 
@@ -448,7 +454,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(1000);
         ExchangeFunction exchange = request -> {
             String json = """
-                    {"hits":[{"chunk_id":"%s","doc_id":"%s","file_name":"doc.md","content":"hybrid hit","score":0.7,"metadata":{"heading":"H"}}]}
+                    {"rerank_applied":true,"hits":[{"chunk_id":"%s","doc_id":"%s","file_name":"doc.md","content":"hybrid hit","score":0.7,"metadata":{"heading":"H"}}]}
                     """.formatted(chunkId, docId);
             return Mono.just(ClientResponse.create(HttpStatus.OK)
                     .header("Content-Type", "application/json")
@@ -500,6 +506,79 @@ class RetrievalServiceTest {
         assertThatThrownBy(() -> retrievalService.retrieve(kbId, request))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Hybrid retrieval failed");
+    }
+
+    @Test
+    void hybridRetrieveAppliesActiveProfileAndExposesRedactedStageRanks() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID chunkId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).topK(3).embeddingModel("embed")
+                .embeddingDimension(3).retrievalMode(RetrievalMode.HYBRID)
+                .activeRetrievalProfileId(UUID.randomUUID()).build();
+        RetrievalProfile profile = RetrievalProfile.builder()
+                .id(kb.getActiveRetrievalProfileId()).kbId(kbId).name("balanced").version(4)
+                .vectorCandidateCount(30).sparseCandidateCount(20).rrfConstant(60)
+                .rerankEnabled(true).rerankCandidateLimit(10).finalTopK(5).build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(5);
+        rag.setMaxContextChars(1000);
+        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK)
+                .header("Content-Type", "application/json")
+                .body("""
+                        {"profile_version":4,"rerank_applied":false,"fallback_reason":"reranker_unavailable","hits":[{"chunk_id":"%s","doc_id":"%s","file_name":"doc.md",
+                        "content":"hit","score":0.7,"metadata":{"embedding":[0.3],"provider_url":"secret",
+                        "nested":[[{"base_url":"secret","authorization":"bearer","safe":"kept","nullable":null}]]},
+                        "vector_rank":2,"sparse_rank":1,"fusion_rank":1,
+                        "rerank_rank":1,"rerank_score":0.91,"embedding":[0.1,0.2]}]}
+                        """.formatted(chunkId, docId)).build());
+        RetrievalService retrievalService = service(rag, WebClient.builder().exchangeFunction(exchange));
+        ReflectionTestUtils.setField(retrievalService, "workerBaseUrl", "http://worker");
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(retrievalProfileService.find(kbId, profile.getId())).thenReturn(profile);
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("hello");
+
+        var response = retrievalService.retrieveForProfile(kbId, request, profile.getId());
+
+        assertThat(response.getDiagnostics()).containsEntry("profileVersion", 4)
+                .containsEntry("rerankApplied", false).containsEntry("fallbackReason", "reranker_unavailable")
+                .containsEntry("vectorRank", 2).containsEntry("sparseRank", 1)
+                .containsEntry("fusionRank", 1).doesNotContainKey("embedding");
+        assertThat(response.getRetrievalMode()).isEqualTo("hybrid");
+        assertThat(response.getHits()).singleElement().satisfies(hit ->
+                assertThat(hit.getMetadata()).containsKey("retrievalStages")
+                        .doesNotContainKeys("embedding", "provider_url")
+                        .hasEntrySatisfying("nested", nested -> assertThat(String.valueOf(nested))
+                                .contains("safe=kept", "nullable=null").doesNotContain("secret", "bearer")));
+    }
+
+    @Test
+    void hybridRetrieveRejectsMismatchedWorkerProfileVersion() {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).topK(3).embeddingModel("embed")
+                .embeddingDimension(3).retrievalMode(RetrievalMode.HYBRID)
+                .activeRetrievalProfileId(UUID.randomUUID()).build();
+        RetrievalProfile profile = RetrievalProfile.builder()
+                .id(kb.getActiveRetrievalProfileId()).kbId(kbId).name("balanced").version(4)
+                .vectorCandidateCount(30).sparseCandidateCount(20).rrfConstant(60)
+                .rerankEnabled(false).rerankCandidateLimit(10).finalTopK(5).build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(5);
+        rag.setMaxContextChars(1000);
+        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK)
+                .header("Content-Type", "application/json")
+                .body("{\"profile_version\":5,\"hits\":[]}").build());
+        RetrievalService retrievalService = service(rag, WebClient.builder().exchangeFunction(exchange));
+        ReflectionTestUtils.setField(retrievalService, "workerBaseUrl", "http://worker");
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(retrievalProfileService.resolveActive(kb)).thenReturn(profile);
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("hello");
+
+        assertThatThrownBy(() -> retrievalService.retrieve(kbId, request))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("profile version");
     }
 
     @Test

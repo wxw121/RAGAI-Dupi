@@ -109,6 +109,25 @@ describe('streamChat', () => {
     expect(errors).toEqual(['401 Unauthorized: bad key'])
   })
 
+  it('preserves structured details from non-streaming HTTP errors', async () => {
+    const structured = {
+      error: 'chat_pipeline_error',
+      message: 'provider down',
+      stage: 'llm',
+      suggestion: 'Check CHAT_API_KEY',
+      requestId: 'trace-http-1',
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+      JSON.stringify(structured),
+      { status: 500, statusText: 'Server Error', headers: { 'Content-Type': 'application/json' } },
+    )))
+    const onError = vi.fn()
+
+    await streamChat('kb', 'q', { onError })
+
+    expect(onError).toHaveBeenCalledWith('provider down', structured)
+  })
+
   it('falls back to status text for non-json errors and rethrows non-abort stream failures', async () => {
     vi.stubGlobal('fetch', vi.fn()
       .mockResolvedValueOnce(new Response('plain error', {
@@ -127,18 +146,30 @@ describe('streamChat', () => {
   })
 
   it('dispatches error events and rethrows non-abort fetch failures', async () => {
+    const structured = {
+      error: 'chat_pipeline_error',
+      message: 'llm down',
+      stage: 'llm',
+      suggestion: 'Check CHAT_API_KEY',
+      requestId: 'req-1',
+    }
     vi.stubGlobal('fetch', vi.fn()
-      .mockResolvedValueOnce(streamResponse(['event: error\ndata: worker failed\n\n']))
+      .mockResolvedValueOnce(streamResponse([`event: error\ndata: ${JSON.stringify(structured)}\n\n`]))
       .mockRejectedValueOnce(new Error('network down')))
     const events: string[] = []
+    const structuredErrors: string[] = []
 
     await streamChat('kb', 'q', {
-      onError: (msg) => events.push(msg),
+      onError: (msg, error) => {
+        events.push(msg)
+        if (error) structuredErrors.push(`${error.stage}:${error.requestId}:${error.suggestion}`)
+      },
       onDone: (sid) => events.push(`done:${sid}`),
     })
     await expect(streamChat('kb', 'q', {})).rejects.toThrow('network down')
 
-    expect(events).toEqual(['worker failed', 'done:'])
+    expect(events).toEqual(['llm down', 'done:'])
+    expect(structuredErrors).toEqual(['llm:req-1:Check CHAT_API_KEY'])
   })
 
   it('normalizes blank API and SSE error messages', async () => {

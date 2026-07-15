@@ -1,17 +1,28 @@
-import type { Document } from '@/types'
+import type { Document, IngestDiagnosis, IngestJob } from '@/types'
 import { formatBytes, formatDate } from '@/lib/utils'
 import { Badge, statusBadgeVariant } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
-import { Loader2, Trash2 } from 'lucide-react'
+import { Eye, Loader2, Trash2 } from 'lucide-react'
 
 interface DocTableProps {
   documents: Document[]
   jobStages: Record<string, string | null>
+  ingestJobs?: IngestJob[]
+  onInspect?: (doc: Document) => void
   onDelete?: (doc: Document) => void
   deletingId?: string | null
 }
 
-export function DocTable({ documents, jobStages, onDelete, deletingId }: DocTableProps) {
+export function DocTable({
+  documents,
+  jobStages,
+  ingestJobs = [],
+  onInspect,
+  onDelete,
+  deletingId,
+}: DocTableProps) {
+  const jobsByDocId = new Map(ingestJobs.map((job) => [job.docId, job]))
+
   if (documents.length === 0) {
     return (
       <p className="rounded-3xl border border-border bg-muted/30 py-10 text-center text-sm text-muted-foreground">
@@ -30,40 +41,62 @@ export function DocTable({ documents, jobStages, onDelete, deletingId }: DocTabl
             <th className="px-5 py-3 text-left font-medium">状态</th>
             <th className="px-5 py-3 text-left font-medium">阶段</th>
             <th className="px-5 py-3 text-left font-medium">上传时间</th>
-            {onDelete && <th className="px-5 py-3 text-right font-medium">操作</th>}
+            {(onInspect || onDelete) && <th className="px-5 py-3 text-right font-medium">操作</th>}
           </tr>
         </thead>
         <tbody>
-          {documents.map((doc) => (
-            <tr key={doc.id} className="border-b transition-colors last:border-0 hover:bg-muted/40">
-              <td className="px-5 py-3 font-medium">{doc.fileName}</td>
-              <td className="px-5 py-3 text-muted-foreground">{formatBytes(doc.fileSize)}</td>
-              <td className="px-5 py-3">
-                <Badge variant={statusBadgeVariant(doc.status)}>{doc.status}</Badge>
-              </td>
-              <td className="px-5 py-3 text-muted-foreground">
-                {jobStages[doc.id] ?? '—'}
-              </td>
-              <td className="px-5 py-3 text-muted-foreground">{formatDate(doc.createdAt)}</td>
-              {onDelete && (
-                <td className="px-5 py-3 text-right">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={deletingId === doc.id}
-                    onClick={() => onDelete(doc)}
-                    aria-label={`删除 ${doc.fileName}`}
-                  >
-                    {deletingId === doc.id ? (
-                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                    ) : (
-                      <Trash2 className="h-4 w-4 text-destructive" />
-                    )}
-                  </Button>
+          {documents.map((doc) => {
+            const job = jobsByDocId.get(doc.id)
+            const diagnosis = job?.diagnosis
+            return (
+              <tr key={doc.id} className="border-b transition-colors last:border-0 hover:bg-muted/40">
+                <td className="px-5 py-3">
+                  <p className="font-medium">{doc.fileName}</p>
+                  {diagnosis && <DiagnosisBlock diagnosis={diagnosis} />}
                 </td>
-              )}
-            </tr>
-          ))}
+                <td className="px-5 py-3 text-muted-foreground">{formatBytes(doc.fileSize)}</td>
+                <td className="px-5 py-3">
+                  <Badge variant={statusBadgeVariant(doc.status)}>{doc.status}</Badge>
+                </td>
+                <td className="px-5 py-3 text-muted-foreground">
+                  {job?.stage ?? jobStages[doc.id] ?? '-'}
+                </td>
+                <td className="px-5 py-3 text-muted-foreground">{formatDate(doc.createdAt)}</td>
+                {(onInspect || onDelete) && (
+                  <td className="px-5 py-3 text-right">
+                    <div className="inline-flex items-center justify-end gap-1">
+                      {onInspect && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => onInspect(doc)}
+                          aria-label={`Inspect ${doc.fileName}`}
+                          title="Inspect index detail"
+                        >
+                          <Eye className="h-4 w-4 text-muted-foreground" />
+                        </Button>
+                      )}
+                      {onDelete && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={deletingId === doc.id}
+                          onClick={() => onDelete(doc)}
+                          aria-label={`删除 ${doc.fileName}`}
+                        >
+                          {deletingId === doc.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                          ) : (
+                            <Trash2 className="h-4 w-4 text-destructive" />
+                          )}
+                        </Button>
+                      )}
+                    </div>
+                  </td>
+                )}
+              </tr>
+            )
+          })}
         </tbody>
       </table>
       {documents.some((d) => d.errorMessage) && (
@@ -79,4 +112,29 @@ export function DocTable({ documents, jobStages, onDelete, deletingId }: DocTabl
       )}
     </div>
   )
+}
+
+function DiagnosisBlock({ diagnosis }: { diagnosis: IngestDiagnosis }) {
+  const className = diagnosisClassName(diagnosis)
+  return (
+    <div className={className}>
+      <p className="font-medium">{diagnosis.summary}</p>
+      <p className="mt-0.5">
+        {diagnosis.nextAction}
+        {diagnosis.retryable && <span className="ml-2 font-medium">可重试</span>}
+        {diagnosis.stalled && <span className="ml-2 font-medium">已停滞</span>}
+      </p>
+    </div>
+  )
+}
+
+function diagnosisClassName(diagnosis: IngestDiagnosis): string {
+  const base = 'mt-2 max-w-xl rounded-lg border px-2.5 py-2 text-xs leading-5'
+  if (diagnosis.severity === 'error') {
+    return `${base} border-red-200 bg-red-50 text-red-700`
+  }
+  if (diagnosis.severity === 'warning') {
+    return `${base} border-amber-200 bg-amber-50 text-amber-800`
+  }
+  return `${base} border-sky-200 bg-sky-50 text-sky-800`
 }

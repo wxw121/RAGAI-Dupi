@@ -27,6 +27,7 @@ export function Dialog({ open, onClose, title, children, footer }: DialogProps) 
 interface BadgeProps {
   children: ReactNode
   variant?: 'default' | 'success' | 'warning' | 'error' | 'muted'
+  className?: string
 }
 
 const badgeVariants = {
@@ -37,12 +38,13 @@ const badgeVariants = {
   muted: 'bg-muted text-muted-foreground',
 }
 
-export function Badge({ children, variant = 'default' }: BadgeProps) {
+export function Badge({ children, variant = 'default', className }: BadgeProps) {
   return (
     <span
       className={cn(
         'inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium',
         badgeVariants[variant],
+        className,
       )}
     >
       {children}

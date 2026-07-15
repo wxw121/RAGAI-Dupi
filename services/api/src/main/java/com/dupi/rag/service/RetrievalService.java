@@ -6,12 +6,15 @@ import com.dupi.rag.config.RagProperties;
 import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.entity.RetrievalProfile;
 import com.dupi.rag.domain.enums.RetrievalMode;
 import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.dto.RetrieveResponse;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
+import com.dupi.rag.repository.SparseMigrationRepository;
+import com.dupi.rag.domain.enums.SparseMigrationState;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -56,16 +59,44 @@ public class RetrievalService {
     private final DocumentRepository documentRepository;
     private final RagProperties ragProperties;
     private final WebClient.Builder webClientBuilder;
+    private final RetrievalProfileService retrievalProfileService;
+    private final SparseMigrationRepository sparseMigrationRepository;
 
     @Value("${dupi.worker.base-url:http://worker:8000}")
     private String workerBaseUrl;
 
     public RetrieveResponse retrieve(UUID kbId, RetrieveRequest request) {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
-        int topK = clampTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK());
+        RetrievalProfile profile = retrievalProfileService.resolveActive(kb);
+        return retrieve(kb, request, profile);
+    }
 
-        if (kb.getRetrievalMode() == RetrievalMode.HYBRID || Boolean.TRUE.equals(request.getUseRerank())) {
-            return hybridRetrieve(kb, request.getQuery(), topK, Boolean.TRUE.equals(request.getUseRerank()));
+    public RetrieveResponse retrieveForProfile(UUID kbId, RetrieveRequest request, UUID profileId) {
+        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
+        return retrieve(kb, request, retrievalProfileService.find(kbId, profileId));
+    }
+
+    public RetrieveResponse retrieveForEvaluation(UUID kbId, RetrieveRequest request, RetrievalMode mode) {
+        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
+        return retrieve(kb, request, mode == RetrievalMode.HYBRID ? retrievalProfileService.resolveActive(kb) : null, mode);
+    }
+
+    private RetrieveResponse retrieve(KnowledgeBase kb, RetrieveRequest request, RetrievalProfile profile) {
+        return retrieve(kb, request, profile, kb.getRetrievalMode());
+    }
+
+    private RetrieveResponse retrieve(KnowledgeBase kb, RetrieveRequest request, RetrievalProfile profile,
+                                      RetrievalMode mode) {
+        UUID kbId = kb.getId();
+        int topK = profile == null
+                ? clampTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK())
+                : clampTopK(profile.getFinalTopK());
+
+        if (profile != null || mode == RetrievalMode.HYBRID || Boolean.TRUE.equals(request.getUseRerank())) {
+            boolean useRerank = profile == null
+                    ? Boolean.TRUE.equals(request.getUseRerank())
+                    : Boolean.TRUE.equals(profile.getRerankEnabled());
+            return hybridRetrieve(kb, request.getQuery(), topK, useRerank, profile);
         }
 
         List<Float> vector;
@@ -106,15 +137,38 @@ public class RetrievalService {
                 .build();
     }
 
-    private RetrieveResponse hybridRetrieve(KnowledgeBase kb, String query, int topK, boolean useRerank) {
-        Map<String, Object> body = Map.of(
-                "kb_id", kb.getId().toString(),
-                "query", query,
-                "top_k", topK,
-                "use_rerank", useRerank,
-                "embedding_model", kb.getEmbeddingModel(),
-                "embedding_dimension", kb.getEmbeddingDimension()
-        );
+    private RetrieveResponse hybridRetrieve(KnowledgeBase kb, String query, int topK, boolean useRerank,
+                                            RetrievalProfile profile) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("kb_id", kb.getId().toString());
+        body.put("query", query);
+        body.put("top_k", topK);
+        body.put("use_rerank", useRerank);
+        body.put("embedding_model", kb.getEmbeddingModel());
+        body.put("embedding_dimension", kb.getEmbeddingDimension());
+        if (profile != null) {
+            body.put("profile_version", profile.getVersion());
+            body.put("vector_candidate_count", profile.getVectorCandidateCount());
+            body.put("sparse_candidate_count", profile.getSparseCandidateCount());
+            body.put("rrf_constant", profile.getRrfConstant());
+            body.put("sparse_index_params", profile.getSparseIndexParams());
+            body.put("sparse_search_params", profile.getSparseSearchParams());
+            body.put("rerank_candidate_limit", profile.getRerankCandidateLimit());
+            body.put("final_top_k", profile.getFinalTopK());
+        }
+        var validatingMigration = sparseMigrationRepository
+                .findTopByKbIdAndStateInOrderByCreatedAtDesc(kb.getId(), List.of(
+                        SparseMigrationState.DUAL_WRITING, SparseMigrationState.SHADOW_VALIDATING));
+        boolean allowLegacyFallback = profile == null || validatingMigration
+                .map(migration -> Boolean.TRUE.equals(migration.getLegacyBm25Enabled())).orElse(false);
+        body.put("allow_legacy_bm25_fallback", allowLegacyFallback);
+        validatingMigration.filter(migration -> migration.getState() == SparseMigrationState.SHADOW_VALIDATING)
+                .ifPresent(migration -> {
+                    RetrievalProfile shadowProfile = retrievalProfileService.find(kb.getId(), migration.getProfileId());
+                    body.put("shadow_profile_version", shadowProfile.getVersion());
+                    body.put("shadow_sparse_index_params", shadowProfile.getSparseIndexParams());
+                    body.put("shadow_sparse_search_params", shadowProfile.getSparseSearchParams());
+                });
 
         @SuppressWarnings("unchecked")
         Map<String, Object> response = webClientBuilder.build()
@@ -128,24 +182,93 @@ public class RetrievalService {
         if (response == null || !response.containsKey("hits")) {
             throw new IllegalStateException("Hybrid retrieval failed");
         }
+        if (profile != null && (!(response.get("profile_version") instanceof Number workerVersion)
+                || workerVersion.intValue() != profile.getVersion())) {
+            throw new IllegalStateException("Worker retrieval profile version does not match the active profile");
+        }
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> rawHits = (List<Map<String, Object>>) response.get("hits");
-        List<RetrievalHit> hits = rawHits.stream().map(h -> RetrievalHit.builder()
-                .chunkId(UUID.fromString(String.valueOf(h.get("chunk_id"))))
-                .docId(UUID.fromString(String.valueOf(h.get("doc_id"))))
-                .fileName(String.valueOf(h.getOrDefault("file_name", "")))
-                .content(String.valueOf(h.get("content")))
-                .score(((Number) h.getOrDefault("score", 0)).doubleValue())
-                .metadata(h.get("metadata") instanceof Map ? (Map<String, Object>) h.get("metadata") : Map.of())
-                .build()).toList();
+        List<RetrievalHit> hits = rawHits.stream().map(h -> {
+            Map<String, Object> metadata = new LinkedHashMap<>();
+            if (h.get("metadata") instanceof Map<?, ?> rawMetadata) {
+                metadata.putAll(sanitizeMap(rawMetadata));
+            }
+            Map<String, Object> stages = stageDiagnostics(h);
+            if (!stages.isEmpty()) metadata.put("retrievalStages", stages);
+            return RetrievalHit.builder()
+                    .chunkId(UUID.fromString(String.valueOf(h.get("chunk_id"))))
+                    .docId(UUID.fromString(String.valueOf(h.get("doc_id"))))
+                    .fileName(String.valueOf(h.getOrDefault("file_name", "")))
+                    .content(String.valueOf(h.get("content")))
+                    .score(((Number) h.getOrDefault("score", 0)).doubleValue())
+                    .metadata(java.util.Collections.unmodifiableMap(new LinkedHashMap<>(metadata)))
+                    .build();
+        }).toList();
+
+        boolean rerankApplied = Boolean.TRUE.equals(response.get("rerank_applied"));
+        String retrievalMode = rerankApplied ? "hybrid_rerank" : "hybrid";
+        Map<String, Object> diagnostics = diagnostics(kb, retrievalMode,
+                topK, hits.size(), stringValue(response.get("fallback_reason")));
+        diagnostics.put("rerankApplied", rerankApplied);
+        if (profile != null) diagnostics.put("profileVersion", profile.getVersion());
+        if (!rawHits.isEmpty()) diagnostics.putAll(stageDiagnostics(rawHits.get(0)));
 
         return RetrieveResponse.builder()
                 .query(query)
-                .retrievalMode(useRerank ? "hybrid_rerank" : "hybrid")
+                .retrievalMode(retrievalMode)
                 .hits(hits)
-                .diagnostics(diagnostics(kb, useRerank ? "hybrid_rerank" : "hybrid", topK, hits.size(), null))
+                .diagnostics(diagnostics)
                 .build();
+    }
+
+    private Map<String, Object> stageDiagnostics(Map<String, Object> hit) {
+        Map<String, Object> stages = new LinkedHashMap<>();
+        copyStage(hit, stages, "vector_rank", "vectorRank");
+        copyStage(hit, stages, "sparse_rank", "sparseRank");
+        copyStage(hit, stages, "fusion_score", "fusionScore");
+        copyStage(hit, stages, "fusion_rank", "fusionRank");
+        copyStage(hit, stages, "rerank_score", "rerankScore");
+        copyStage(hit, stages, "rerank_rank", "rerankRank");
+        copyStage(hit, stages, "shadow_sparse_rank", "shadowSparseRank");
+        copyStage(hit, stages, "shadow_rank_delta", "shadowRankDelta");
+        return stages;
+    }
+
+    private void copyStage(Map<String, Object> source, Map<String, Object> target, String sourceKey, String targetKey) {
+        Object value = source.get(sourceKey);
+        if (value instanceof Number) target.put(targetKey, value);
+    }
+
+    private String stringValue(Object value) {
+        return value == null || String.valueOf(value).isBlank() ? null : String.valueOf(value);
+    }
+
+    private Map<String, Object> sanitizeMap(Map<?, ?> source) {
+        Map<String, Object> sanitized = new LinkedHashMap<>();
+        source.forEach((rawKey, rawValue) -> {
+            String key = String.valueOf(rawKey);
+            String normalized = key.toLowerCase(Locale.ROOT);
+            if (isSensitiveMetadataKey(normalized)) {
+                return;
+            }
+            sanitized.put(key, sanitizeValue(rawValue));
+        });
+        return sanitized;
+    }
+
+    private Object sanitizeValue(Object value) {
+        if (value instanceof Map<?, ?> map) return sanitizeMap(map);
+        if (value instanceof List<?> list) return list.stream().map(this::sanitizeValue).toList();
+        return value;
+    }
+
+    private boolean isSensitiveMetadataKey(String key) {
+        return key.contains("embedding") || key.contains("vector") || key.contains("secret")
+                || key.contains("credential") || key.contains("password")
+                || key.contains("api_key") || key.contains("apikey") || key.contains("access_key")
+                || key.contains("accesskey") || key.contains("authorization") || key.contains("token")
+                || key.contains("url") || key.contains("endpoint");
     }
 
     private Map<String, Object> diagnostics(

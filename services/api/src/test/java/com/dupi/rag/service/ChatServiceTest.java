@@ -9,12 +9,14 @@ import com.dupi.rag.dto.ChatSessionResponse;
 import com.dupi.rag.dto.Citation;
 import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveResponse;
+import com.dupi.rag.exception.ChatPipelineException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.MDC;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
@@ -126,7 +128,7 @@ class ChatServiceTest {
     }
 
     @Test
-    void chatStreamTurnsLlmErrorsIntoErrorEventAndPersistsPartialAssistantText() {
+    void chatStreamTurnsLlmErrorsIntoErrorEventAndPersistsPartialAssistantText() throws Exception {
         UUID kbId = UUID.randomUUID();
         UUID sessionId = UUID.randomUUID();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
@@ -147,9 +149,46 @@ class ChatServiceTest {
         var events = service(redisProps()).chatStream(kbId, request).collectList().block();
 
         assertThat(events).extracting(e -> e.event()).containsExactly("retrieval", "token", "token", "error");
-        assertThat(events.get(3).data()).isEqualTo("llm down");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> error = new ObjectMapper().readValue(events.get(3).data(), Map.class);
+        assertThat(error).containsEntry("error", "chat_pipeline_error")
+                .containsEntry("stage", "llm");
+        assertThat(error.get("message")).asString().contains("llm down");
+        assertThat(error.get("suggestion")).asString().contains("CHAT_API_KEY");
+        assertThat(error.get("requestId")).asString().isNotBlank();
         verify(chatSessionService).saveUserMessage(kbId, sessionId, "问题");
         verify(chatSessionService, times(1)).saveAssistantMessage(kbId, sessionId, "部分", List.of());
+    }
+
+    @Test
+    void chatStreamKeepsEntryTraceIdForErrorsEmittedAfterMdcIsCleared() throws Exception {
+        UUID kbId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
+        when(chatSessionService.findOrThrow(kbId, sessionId)).thenReturn(ChatSession.builder()
+                .id(sessionId)
+                .kbId(kbId)
+                .build());
+        when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder().hits(List.of()).build());
+        when(retrievalService.buildContext(List.of())).thenReturn("");
+        when(llmClient.chatStream(anyString(), anyString())).thenReturn(Flux.error(new IllegalStateException("later failure")));
+        ChatRequest request = new ChatRequest();
+        request.setQuery("question");
+        request.setSessionId(sessionId.toString());
+
+        Flux<org.springframework.http.codec.ServerSentEvent<String>> stream;
+        MDC.put("traceId", "trace-before-async");
+        try {
+            stream = service(redisProps()).chatStream(kbId, request);
+        } finally {
+            MDC.remove("traceId");
+        }
+        var events = stream.collectList().block();
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> error = new ObjectMapper().readValue(events.get(events.size() - 1).data(), Map.class);
+        assertThat(error).containsEntry("stage", "llm")
+                .containsEntry("requestId", "trace-before-async");
     }
 
     @Test
@@ -340,7 +379,7 @@ class ChatServiceTest {
     }
 
     @Test
-    void chatStreamCleansCancellationStateWhenRetrievalThrowsAfterRegistration() {
+    void chatStreamCleansCancellationStateWhenRetrievalThrowsAfterRegistration() throws Exception {
         UUID kbId = UUID.randomUUID();
         UUID sessionId = UUID.randomUUID();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
@@ -354,9 +393,14 @@ class ChatServiceTest {
         request.setSessionId(sessionId.toString());
         ChatService service = service(redisProps());
 
-        assertThatThrownBy(() -> service.chatStream(kbId, request).collectList().block())
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("retrieval down");
+        var events = service.chatStream(kbId, request).collectList().block();
+
+        assertThat(events).extracting(e -> e.event()).containsExactly("error");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> error = new ObjectMapper().readValue(events.get(0).data(), Map.class);
+        assertThat(error).containsEntry("error", "chat_pipeline_error")
+                .containsEntry("stage", "retrieval");
+        assertThat(error.get("message")).asString().contains("retrieval down");
 
         verify(chatSessionService, never()).saveUserMessage(any(), any(), anyString());
         verify(llmClient, never()).chatStream(anyString(), anyString());
@@ -417,6 +461,48 @@ class ChatServiceTest {
         request.setQuery("问题");
 
         assertThat(service(redisProps()).chat(kbId, request)).isEqualTo("答案");
+    }
+
+    @Test
+    void chatWrapsNonStreamingRetrievalFailureWithStageAndSuggestion() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
+        when(retrievalService.retrieve(eq(kbId), any())).thenThrow(new IllegalStateException("retrieval down"));
+        ChatRequest request = new ChatRequest();
+        request.setQuery("question");
+
+        assertThatThrownBy(() -> service(redisProps()).chat(kbId, request))
+                .isInstanceOf(ChatPipelineException.class)
+                .hasMessage("retrieval down")
+                .satisfies(ex -> {
+                    ChatPipelineException pipelineException = (ChatPipelineException) ex;
+                    assertThat(pipelineException.getStage()).isEqualTo("retrieval");
+                    assertThat(pipelineException.getSuggestion()).contains("indexed documents");
+                    assertThat(pipelineException.getCause()).isInstanceOf(IllegalStateException.class);
+                });
+
+        verify(llmClient, never()).chat(anyString(), anyString());
+    }
+
+    @Test
+    void chatWrapsNonStreamingLlmFailureWithStageAndSuggestion() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(2).build());
+        when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder().hits(List.of()).build());
+        when(retrievalService.buildContext(List.of())).thenReturn("");
+        when(llmClient.chat(anyString(), anyString())).thenThrow(new IllegalStateException("provider down"));
+        ChatRequest request = new ChatRequest();
+        request.setQuery("question");
+
+        assertThatThrownBy(() -> service(redisProps()).chat(kbId, request))
+                .isInstanceOf(ChatPipelineException.class)
+                .hasMessage("provider down")
+                .satisfies(ex -> {
+                    ChatPipelineException pipelineException = (ChatPipelineException) ex;
+                    assertThat(pipelineException.getStage()).isEqualTo("llm");
+                    assertThat(pipelineException.getSuggestion()).contains("CHAT_API_KEY");
+                    assertThat(pipelineException.getCause()).isInstanceOf(IllegalStateException.class);
+                });
     }
 
     @Test

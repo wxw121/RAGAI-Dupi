@@ -1,5 +1,9 @@
 package com.dupi.rag.config;
 
+import com.dupi.rag.domain.entity.Role;
+import com.dupi.rag.domain.entity.UserAccount;
+import com.dupi.rag.repository.RoleRepository;
+import com.dupi.rag.repository.UserAccountRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
@@ -7,7 +11,10 @@ import org.springframework.data.redis.core.ValueOperations;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -189,6 +196,85 @@ class ApiTokenServiceTest {
         assertThat(explicitPrincipal.get().permissions()).containsExactly("KB_READ");
         assertThat(explicitPrincipal.get().knowledgeBaseIds()).containsExactly("kb-x", "kb-y");
         assertThat(explicitPrincipal.get().tokenVersion()).isEqualTo("7");
+    }
+
+    @Test
+    void authenticateUsesPersistedAccountsAndRolePermissionsWhenRepositoriesExist() {
+        ApiSecurityProperties properties = propertiesWithSecret();
+        UserAccountRepository userAccountRepository = mock(UserAccountRepository.class);
+        RoleRepository roleRepository = mock(RoleRepository.class);
+        LoginFailureStore loginFailureStore = mock(LoginFailureStore.class);
+        Role analystRole = Role.builder()
+                .id(UUID.randomUUID())
+                .code("ANALYST")
+                .name("Analyst")
+                .permissions("kb-read, chat_write")
+                .disabled(false)
+                .build();
+        UserAccount dbUser = UserAccount.builder()
+                .id(UUID.randomUUID())
+                .username("db-user")
+                .passwordHash(ApiTokenService.pbkdf2Hash("pw", "db-salt", 1_000))
+                .tenantId("tenant-db")
+                .roleCode("ANALYST")
+                .knowledgeBaseIds("kb-a, kb-b, kb-a")
+                .tokenVersion("42")
+                .disabled(false)
+                .build();
+        when(userAccountRepository.findByUsername("db-user")).thenReturn(Optional.of(dbUser));
+        when(roleRepository.findByCode("ANALYST")).thenReturn(Optional.of(analystRole));
+        ApiTokenService service = new ApiTokenService(
+                properties,
+                FIXED_CLOCK,
+                loginFailureStore,
+                userAccountRepository,
+                roleRepository
+        );
+
+        var principal = service.authenticate(" db-user ", "pw");
+
+        assertThat(principal).isPresent();
+        assertThat(principal.get().username()).isEqualTo("db-user");
+        assertThat(principal.get().tenantId()).isEqualTo("tenant-db");
+        assertThat(principal.get().role()).isEqualTo("ANALYST");
+        assertThat(principal.get().permissions()).containsExactly("KB_READ", "CHAT_WRITE");
+        assertThat(principal.get().knowledgeBaseIds()).containsExactly("kb-a", "kb-b");
+        assertThat(principal.get().tokenVersion()).isEqualTo("42");
+
+        String token = service.issueToken("db-user", "tenant-db", "ANALYST");
+        assertThat(service.parse(token)).isPresent();
+
+        Role disabledRole = Role.builder()
+                .id(UUID.randomUUID())
+                .code("VIEWER")
+                .name("Viewer")
+                .permissions("KB_READ")
+                .disabled(true)
+                .build();
+        UserAccount blocked = UserAccount.builder()
+                .id(UUID.randomUUID())
+                .username("blocked")
+                .passwordHash(ApiTokenService.pbkdf2Hash("pw", "blocked-salt", 1_000))
+                .tenantId("tenant-db")
+                .roleCode("VIEWER")
+                .disabled(false)
+                .build();
+        when(userAccountRepository.findByUsername("blocked")).thenReturn(Optional.of(blocked));
+        when(roleRepository.findByCode("VIEWER")).thenReturn(Optional.of(disabledRole));
+        assertThat(service.authenticate("blocked", "pw")).isEmpty();
+    }
+
+    @Test
+    void alternateConstructorsWireDefaultClockAndInjectedRepositories() {
+        ApiSecurityProperties properties = propertiesWithSecret();
+
+        assertThat(new ApiTokenService(properties, mock(LoginFailureStore.class)).now()).isNotNull();
+        assertThat(new ApiTokenService(
+                properties,
+                mock(LoginFailureStore.class),
+                mock(UserAccountRepository.class),
+                mock(RoleRepository.class)
+        ).now()).isNotNull();
     }
 
     @Test

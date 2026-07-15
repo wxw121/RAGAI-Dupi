@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -394,18 +395,33 @@ class ConfigAndExceptionTest {
         ApiSecurityProperties.UserAccount operator = user("operator", "pw", "tenant-a", "USER");
         operator.setPermissions("KB_READ,KB_WRITE,KB_DELETE,DOCUMENT_UPLOAD,CHAT_WRITE,CHAT_DELETE,MAINTENANCE");
         ApiSecurityProperties.UserAccount reader = user("reader", "pw", "tenant-a", "USER");
+        ApiSecurityProperties.UserAccount maintenanceOnly = user("maintenance", "pw", "tenant-a", "USER");
+        maintenanceOnly.setPermissions("MAINTENANCE");
+        ApiSecurityProperties.UserAccount baselineAdmin = user("baseline-admin", "pw", "tenant-a", "USER");
+        baselineAdmin.setPermissions("OPS_ADMIN,KB_READ");
         properties.getUsers().add(operator);
         properties.getUsers().add(reader);
+        properties.getUsers().add(maintenanceOnly);
+        properties.getUsers().add(baselineAdmin);
         ApiTokenService tokenService = new ApiTokenService(properties, Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC));
         ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties, tokenService);
 
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/import");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/documents");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/documents/batch");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/chat");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/retrieve");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/reindex");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/ingest-jobs/job/retry");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/rag-eval/cases");
+        assertAllowed(filter, tokenService, "operator", "PATCH", "/api/v1/knowledge-bases/kb/rag-eval/cases/case");
+        assertAllowed(filter, tokenService, "operator", "DELETE", "/api/v1/knowledge-bases/kb/rag-eval/cases/case");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs");
+        assertAllowed(filter, tokenService, "operator", "PATCH", "/api/v1/knowledge-bases/kb/rag-eval/policy");
+        assertAllowed(filter, tokenService, "baseline-admin", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs/run/baseline");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/retrieval-profiles");
+        assertAllowed(filter, tokenService, "baseline-admin", "POST", "/api/v1/knowledge-bases/kb/retrieval-profiles/profile/activate");
         assertAllowed(filter, tokenService, "operator", "DELETE", "/api/v1/knowledge-bases/kb");
         assertAllowed(filter, tokenService, "operator", "DELETE", "/api/v1/knowledge-bases/kb/chat-sessions/session");
 
@@ -417,12 +433,93 @@ class ConfigAndExceptionTest {
         MockHttpServletResponse reindexResponse = new MockHttpServletResponse();
         filter.doFilter(reindex, reindexResponse, mock(FilterChain.class));
 
+        MockHttpServletRequest importKb = bearerRequest(tokenService, "reader", "POST", "/api/v1/knowledge-bases/import");
+        MockHttpServletResponse importKbResponse = new MockHttpServletResponse();
+        filter.doFilter(importKb, importKbResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest createEval = bearerRequest(tokenService, "reader", "POST", "/api/v1/knowledge-bases/kb/rag-eval/cases");
+        MockHttpServletResponse createEvalResponse = new MockHttpServletResponse();
+        filter.doFilter(createEval, createEvalResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest runEval = bearerRequest(tokenService, "reader", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs");
+        MockHttpServletResponse runEvalResponse = new MockHttpServletResponse();
+        filter.doFilter(runEval, runEvalResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest maintenanceWithoutRead = bearerRequest(
+                tokenService, "maintenance", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs");
+        MockHttpServletResponse maintenanceWithoutReadResponse = new MockHttpServletResponse();
+        filter.doFilter(maintenanceWithoutRead, maintenanceWithoutReadResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest promoteBaseline = bearerRequest(
+                tokenService, "reader", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs/run/baseline");
+        MockHttpServletResponse promoteBaselineResponse = new MockHttpServletResponse();
+        filter.doFilter(promoteBaseline, promoteBaselineResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest maintenancePromoteWithoutRead = bearerRequest(
+                tokenService, "maintenance", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs/run/baseline");
+        MockHttpServletResponse maintenancePromoteWithoutReadResponse = new MockHttpServletResponse();
+        filter.doFilter(maintenancePromoteWithoutRead, maintenancePromoteWithoutReadResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest operatorPromote = bearerRequest(
+                tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs/run/baseline");
+        MockHttpServletResponse operatorPromoteResponse = new MockHttpServletResponse();
+        filter.doFilter(operatorPromote, operatorPromoteResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest readerCreateProfile = bearerRequest(
+                tokenService, "reader", "POST", "/api/v1/knowledge-bases/kb/retrieval-profiles");
+        MockHttpServletResponse readerCreateProfileResponse = new MockHttpServletResponse();
+        filter.doFilter(readerCreateProfile, readerCreateProfileResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest operatorActivateProfile = bearerRequest(
+                tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/retrieval-profiles/profile/activate");
+        MockHttpServletResponse operatorActivateProfileResponse = new MockHttpServletResponse();
+        filter.doFilter(operatorActivateProfile, operatorActivateProfileResponse, mock(FilterChain.class));
+
         assertThat(createKbResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
         assertThat(createKbResponse.getContentAsString()).contains("permission required: KB_WRITE");
         assertThat(reindexResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
         assertThat(reindexResponse.getContentAsString()).contains("permission required: MAINTENANCE");
+        assertThat(importKbResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(importKbResponse.getContentAsString()).contains("permission required: KB_WRITE");
+        assertThat(createEvalResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(createEvalResponse.getContentAsString()).contains("permission required: KB_WRITE");
+        assertThat(runEvalResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(runEvalResponse.getContentAsString()).contains("permission required: MAINTENANCE");
+        assertThat(maintenanceWithoutReadResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(maintenanceWithoutReadResponse.getContentAsString()).contains("permission required: KB_READ");
+        assertThat(promoteBaselineResponse.getContentAsString()).contains("permission required: OPS_ADMIN");
+        assertThat(maintenancePromoteWithoutReadResponse.getContentAsString()).contains("permission required: OPS_ADMIN");
+        assertThat(operatorPromoteResponse.getContentAsString()).contains("permission required: OPS_ADMIN");
+        assertThat(readerCreateProfileResponse.getContentAsString()).contains("permission required: KB_WRITE");
+        assertThat(operatorActivateProfileResponse.getContentAsString()).contains("permission required: OPS_ADMIN");
         assertThat(SecurityContext.hasPermission(null)).isFalse();
         assertThat(SecurityContext.hasPermission(" ")).isFalse();
+    }
+
+    @Test
+    void auditWebhookNotificationRequiresDedicatedDispatchPermission() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        properties.setAuthSecret("test-secret");
+        ApiSecurityProperties.UserAccount auditOnly = user("audit-only", "pw", "tenant-a", "USER");
+        auditOnly.setPermissions("OPS_ADMIN,OPS_AUDIT_READ");
+        ApiSecurityProperties.UserAccount notifier = user("notifier", "pw", "tenant-a", "USER");
+        notifier.setPermissions("OPS_ADMIN,OPS_AUDIT_READ,OPS_ALERT_NOTIFY");
+        properties.getUsers().add(auditOnly);
+        properties.getUsers().add(notifier);
+        ApiTokenService tokenService = new ApiTokenService(
+                properties,
+                Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC)
+        );
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties, tokenService);
+
+        MockHttpServletRequest forbidden = bearerRequest(
+                tokenService, "audit-only", "POST", "/api/v1/ops/audit-alerts/notify");
+        MockHttpServletResponse forbiddenResponse = new MockHttpServletResponse();
+        filter.doFilter(forbidden, forbiddenResponse, mock(FilterChain.class));
+
+        assertThat(forbiddenResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(forbiddenResponse.getContentAsString()).contains("permission required: OPS_ALERT_NOTIFY");
+        assertAllowed(filter, tokenService, "notifier", "POST", "/api/v1/ops/audit-alerts/notify");
     }
 
     @Test
@@ -497,6 +594,45 @@ class ConfigAndExceptionTest {
         verifyNoInteractions(chain);
         assertThat(response.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST.value());
         assertThat(response.getContentAsString()).contains("Invalid tenant id");
+    }
+
+    @Test
+    void tenantContextDefaultsBlankOrNullTenantIds() {
+        try {
+            TenantContext.setTenantId(null);
+            assertThat(TenantContext.getTenantId()).isEqualTo(TenantContext.DEFAULT_TENANT_ID);
+            assertThat(TenantContext.hasTenantId()).isTrue();
+
+            TenantContext.setTenantId(" ");
+            assertThat(TenantContext.getTenantId()).isEqualTo(TenantContext.DEFAULT_TENANT_ID);
+        } finally {
+            TenantContext.clear();
+        }
+    }
+
+    @Test
+    void securityContextHandlesEmptyInputsAndScopedKnowledgeBases() {
+        try {
+            SecurityContext.clear();
+            assertThat(SecurityContext.getRole()).isNull();
+            assertThat(SecurityContext.hasRole("ADMIN")).isFalse();
+            assertThat(SecurityContext.canAccessKnowledgeBase("kb-a")).isFalse();
+
+            SecurityContext.set(
+                    "alice",
+                    null,
+                    List.of("kb-read", " ", "chat-write"),
+                    List.of(" kb-a ", " ")
+            );
+
+            assertThat(SecurityContext.getRole()).isEqualTo("USER");
+            assertThat(SecurityContext.hasPermission("kb-read")).isTrue();
+            assertThat(SecurityContext.hasPermission("document-delete")).isFalse();
+            assertThat(SecurityContext.canAccessKnowledgeBase("kb-a")).isTrue();
+            assertThat(SecurityContext.canAccessKnowledgeBase("kb-b")).isFalse();
+        } finally {
+            SecurityContext.clear();
+        }
     }
 
     @Test
@@ -690,6 +826,13 @@ class ConfigAndExceptionTest {
         ReflectionTestUtils.setField(milvusConfig, "client", milvusClient);
         milvusConfig.close();
         verify(milvusClient).close();
+
+        MilvusProperties properties = new MilvusProperties();
+        properties.setHost("localhost");
+        properties.setPort(19530);
+        try (var construction = mockConstruction(MilvusServiceClient.class)) {
+            assertThat(new MilvusConfig().milvusClient(properties)).isSameAs(construction.constructed().get(0));
+        }
     }
 
     @Test
@@ -698,7 +841,8 @@ class ConfigAndExceptionTest {
 
         var notFound = handler.handleNotFound(new ResourceNotFoundException("missing"));
         assertThat(notFound.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        assertThat(notFound.getBody()).containsEntry("error", "not_found").containsEntry("message", "missing");
+        assertThat(notFound.getBody().getError()).isEqualTo("not_found");
+        assertThat(notFound.getBody().getMessage()).isEqualTo("missing");
 
         Object target = new Object();
         BeanPropertyBindingResult binding = new BeanPropertyBindingResult(target, "target");
@@ -706,14 +850,29 @@ class ConfigAndExceptionTest {
         MethodArgumentNotValidException validationEx = new MethodArgumentNotValidException(null, binding);
         var validation = handler.handleValidation(validationEx);
         assertThat(validation.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(validation.getBody()).containsEntry("error", "validation_error").containsEntry("message", "must not be blank");
+        assertThat(validation.getBody().getError()).isEqualTo("validation_error");
+        assertThat(validation.getBody().getMessage()).isEqualTo("must not be blank");
 
         var badRequest = handler.handleBadRequest(new IllegalArgumentException("bad input"));
         assertThat(badRequest.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(badRequest.getBody()).containsEntry("error", "bad_request").containsEntry("message", "bad input");
+        assertThat(badRequest.getBody().getError()).isEqualTo("bad_request");
+        assertThat(badRequest.getBody().getMessage()).isEqualTo("bad input");
+
+        IllegalStateException providerFailure = new IllegalStateException("provider down");
+        com.dupi.rag.exception.ChatPipelineException chatException =
+                new com.dupi.rag.exception.ChatPipelineException(
+                        "llm", "answer generation failed", "Check CHAT_API_KEY.", providerFailure);
+        var chatFailure = handler.handleChatPipeline(chatException);
+        assertThat(chatException.getStage()).isEqualTo("llm");
+        assertThat(chatException.getSuggestion()).isEqualTo("Check CHAT_API_KEY.");
+        assertThat(chatException.getCause()).isSameAs(providerFailure);
+        assertThat(chatFailure.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(chatFailure.getBody().getError()).isEqualTo("chat_pipeline_error");
+        assertThat(chatFailure.getBody().getStage()).isEqualTo("llm");
+        assertThat(chatFailure.getBody().getSuggestion()).isEqualTo("Check CHAT_API_KEY.");
 
         var generic = handler.handleGeneric(new RuntimeException());
         assertThat(generic.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
-        assertThat(generic.getBody()).containsEntry("message", "Unexpected error");
+        assertThat(generic.getBody().getMessage()).isEqualTo("Unexpected error");
     }
 }

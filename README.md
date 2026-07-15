@@ -1,6 +1,29 @@
 # dupi-RAG
 
+> V1.3 增加可阻断的 RAG 质量策略/基线、版本化 Retrieval Profile，以及 Milvus 原生 Sparse BM25 的回填、双写、Shadow、Cutover 和 Rollback。生产部署要求 Milvus 2.5.4；升级前必须备份 Milvus/etcd/MinIO/PostgreSQL，并在隔离环境完成回填与回滚演练。
+
+## V1.3 Sparse 迁移运维
+
+每个 Profile 使用独立集合 `{MILVUS_COLLECTION}_sparse_{kbId}_v{version}`。迁移状态依次为 `PREPARING -> BACKFILLING -> DUAL_WRITING -> SHADOW_VALIDATING -> CUTOVER -> COMPLETED`，失败进入 `FAILED`，`BACKFILLING` 可幂等重试。legacy BM25 fallback 由迁移记录持久化控制，仅允许在双写和 Shadow 阶段启用；完成后由激活 Profile 永久驱动 Sparse 写入。
+
+Cutover 要求覆盖率 100%、embedding 维度一致、候选 Profile 有完全匹配的 PASS 评测、候选 P95 不超过基线 1.25 倍、fallback rate 不增加。Rollback 只能重新激活更旧且已有 PASS 证据的 Profile。删除文档会同步清理 dense 集合和该知识库所有版本化 Sparse 集合。
+
+真实语料基准命令：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rag-retrieval-benchmark.ps1 `
+  -KbId <kbId> -HybridProfileId <profileId> -RerankProfileId <rerankProfileId> `
+  -ApiKey $env:DUPI_API_KEY -OutputPath artifacts/v13-real-benchmark.json
+```
+
+脚本会核对实际模式、Profile 开关、逐用例阶段排名和相对 VECTOR 的 rank delta；实际未执行 reranker 时直接失败。
+
+Worker 使用 CPU-only PyTorch 和 `BAAI/bge-reranker-base`，默认在启动生命周期加载模型并执行预热推理；Compose 通过 `hf_model_cache` 持久化模型缓存。预热失败会在 `/health` 中标记 Rerank 不可用，但不阻断 VECTOR/HYBRID；冷启动延迟不得与热态 P95 混用。
+
 > 账号 / RBAC 与 ops 管理权限更新记录见 [docs/rbac-ops-admin-2026-07-06.md](docs/rbac-ops-admin-2026-07-06.md)；摄入 outbox、删除 tombstone、实例级授权与审计运维增强见 [docs/outbox-tombstone-rbac-ops-2026-07-07.md](docs/outbox-tombstone-rbac-ops-2026-07-07.md)。
+> V1.1（API `0.1.1-SNAPSHOT` / Web `0.1.1`）新增真实浏览器 E2E 门禁、摄入诊断、知识库详情 `RAG 评估`、上传治理提示与聚合运维告警；设计与实施记录见 [docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md](docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md) 与 [docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md](docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md)。
+> V1.2（API `0.1.2-SNAPSHOT` / Web `0.1.2`）扩展真实浏览器门禁，新增文档索引详情、结构化 Chat 错误、持久化 RAG 评估用例/历史、混合检索与 Rerank 控制、审计告警 Webhook，以及知识库元数据/分块快照导出恢复；实施计划见 [docs/superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md](docs/superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md)。
+> V1.2.1 收尾将真实浏览器门禁业务数据隔离到 `e2e` 租户；成功运行会删除临时知识库和账号，失败运行仅保留 `e2e` 证据。设计见 [docs/superpowers/specs/2026-07-14-v1.2.1-e2e-isolation-cleanup-design.md](docs/superpowers/specs/2026-07-14-v1.2.1-e2e-isolation-cleanup-design.md)。
 
 企业级 RAG 知识库引擎 — 类似 Dify/扣子底层知识库模块。
 
@@ -47,6 +70,8 @@ cp deploy/.env.example deploy/.env
 | `AUDIT_RETENTION_CRON` | 审计日志保留清理 cron | 默认每天 `02:15` |
 | `AUDIT_ALERT_WINDOW_MINUTES` | 审计失败告警统计窗口 | 默认 `30` 分钟 |
 | `AUDIT_ALERT_FAILED_THRESHOLD` | 审计失败告警阈值 | 默认 `10` 次 |
+| `AUDIT_ALERT_WEBHOOK_URL` | 可选审计告警 Webhook 地址 | 留空时通知接口返回 `configured=false` |
+| `AUDIT_ALERT_WEBHOOK_TIMEOUT_SECONDS` | 审计告警 Webhook 超时 | 默认 `10` 秒 |
 
 配置后重启应用容器：
 
@@ -66,9 +91,10 @@ docker compose up -d --build
 
 浏览器打开 **http://localhost:8080**
 
-1. **新建知识库** → 点击卡片或「去问答」进入详情
-2. **文档管理** → 上传文件，等待状态 `COMPLETED`
+1. **新建知识库** → 选择向量检索或混合检索，点击卡片进入详情
+2. **文档管理** → 上传文件，等待状态 `COMPLETED`；点击查看按钮检查对象、摄入任务、分块总数、最多 20 个分块样例与索引就绪状态
 3. **智能问答** → 基于已摄入文档提问（需配置 `CHAT_API_KEY` 与 `EMBEDDING_API_KEY`）
+4. **RAG 评估** → 管理持久化用例（空库自动创建内置用例，每库最多 100 条），选择是否启用 Rerank，运行并查看最近 10 次结果与逐用例诊断
 
 ### 4. 验证
 
@@ -94,6 +120,7 @@ powershell -ExecutionPolicy Bypass -NoProfile -File scripts/compose-config-redac
 - **前端构建 Node 版本问题**：Web 脚本已通过 `services/web/scripts/node16-webcrypto.cjs` 兼容本机 Node 16；生产构建仍建议使用项目 Dockerfile 中固定的构建环境或 Node 18+。
 - **CORS 或端口访问异常**：默认只访问 `http://localhost:8080`，由 Web Nginx 反代 `/api`；如需直连 API、PostgreSQL、Redis、Milvus 或 MinIO，请使用临时 Compose override 显式暴露端口。
 - **Milvus 维度不一致**：`EMBEDDING_DIMENSION` 必须与当前 `MILVUS_COLLECTION` 的 `embedding` 向量维度一致。切换 embedding 模型/维度后，旧知识库可用 `POST /api/v1/knowledge-bases/{kbId}/reindex` 重建；如果 collection 本身维度不匹配，API 会在启动时 fail-fast，需要删除/重建 collection，或把 `MILVUS_COLLECTION` 指向新的维度专用集合。
+- **Milvus 集合加载较慢**：API 启动只异步发起 collection load，不再同步等待 QueryNode 导致 Web 长时间 502；集合未就绪期间检索会沿用已有本地文本 fallback，并在诊断中报告原因。
 
 ### 4.2 端到端主流程自动化（推荐）
 
@@ -108,6 +135,12 @@ powershell -NoProfile -File scripts/e2e-main-flow.ps1
 新增维护与回归验证脚本：
 
 ```powershell
+# 真实浏览器 E2E 门禁：使用真实登录、Cookie 与 CSRF，不依赖本地开放模式
+$env:E2E_BASE_URL="http://localhost:8080"
+$env:E2E_ADMIN_USERNAME="<admin>"
+$env:E2E_ADMIN_PASSWORD="<password>"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-browser-gate.ps1
+
 # 索引维护流程：批量上传、reindex、摄入任务重试入口、向量清理任务入口
 powershell -NoProfile -File scripts/e2e-web-maintenance-flow.ps1
 
@@ -115,13 +148,15 @@ powershell -NoProfile -File scripts/e2e-web-maintenance-flow.ps1
 powershell -NoProfile -File scripts/rag-regression-eval.ps1
 ```
 
+`e2e-browser-gate.ps1` 需要 `E2E_ADMIN_USERNAME` 与 `E2E_ADMIN_PASSWORD`，缺少凭据时会明确失败。门禁仅以配置管理员创建 `e2e` 租户中的临时管理员，后续知识库、RAG 用例和验证账号均在该租户完成；成功后自动删除临时知识库及 `e2e_*` 账号，失败时在 Playwright 结果中保留资源标识和页面 URL 作为证据。`rag-regression-eval.ps1` 会写入 `scripts/rag-regression-eval-last-run.json`，其中 `caseResults` 包含每条用例的 query、pass/fail、命中数、期望/命中文件、命中 token、检索模式、fallback 原因和 embedding 信息。
+
 ### 5. API 示例
 
 ```bash
 # 创建知识库
 curl -X POST http://localhost:8080/api/v1/knowledge-bases \
   -H "Content-Type: application/json" \
-  -d '{"name":"demo","description":"测试库","chunkSize":512,"chunkOverlap":64,"topK":5}'
+  -d '{"name":"demo","description":"测试库","chunkSize":512,"chunkOverlap":64,"topK":5,"retrievalMode":"HYBRID"}'
 
 # 上传文档
 curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/documents \
@@ -140,6 +175,22 @@ curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/reindex
 # 重试失败或死信摄入任务
 curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs/{jobId}/retry
 
+# 查看摄入任务诊断；响应包含 documentFileName、documentStatus、diagnosis
+curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs
+
+# 查看单文档上传/摄入/索引详情；包含对象状态、最近任务、分块数与分块样例
+curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/documents/{docId}/index-detail
+
+# 管理持久化 RAG 评估用例、运行评估并查看最近历史
+curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/rag-eval/cases
+curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/rag-eval/cases \
+  -H "Content-Type: application/json" \
+  -d '{"caseKey":"format-check","query":"支持哪些格式？","minHits":1,"topK":5,"expectedFileName":"guide.md","mustContainAny":["PDF"]}'
+curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/rag-eval/runs \
+  -H "Content-Type: application/json" \
+  -d '{"useRerank":true}'
+curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/rag-eval/runs
+
 # 查看并重试残留向量补偿清理任务
 curl http://localhost:8080/api/v1/ops/vector-cleanup-tasks
 curl -X POST http://localhost:8080/api/v1/ops/vector-cleanup-tasks/{taskId}/retry
@@ -148,9 +199,26 @@ curl -X POST http://localhost:8080/api/v1/ops/vector-cleanup-tasks/{taskId}/retr
 curl "http://localhost:8080/api/v1/ops/audit-logs?limit=50"
 curl "http://localhost:8080/api/v1/ops/audit-logs/export" -o audit-logs.csv
 curl http://localhost:8080/api/v1/ops/audit-alerts
+curl -X POST http://localhost:8080/api/v1/ops/audit-alerts/notify
 curl http://localhost:8080/api/v1/ops/metadata
 curl http://localhost:8080/api/v1/ops/accounts
 curl http://localhost:8080/api/v1/ops/roles
+
+# 仅测试清理：需 OPS_ADMIN，且仅允许删除 e2e 租户中的 e2e_* 账号。
+# 账号管理页面不提供通用删除入口。
+curl -X DELETE http://localhost:8080/api/v1/ops/accounts/e2e_account_42
+
+# /ops/metadata 返回 guardrails：上传限流、摄入队列、审计阈值和 multipart 最大文件大小
+# /ops/audit-alerts 聚合审计失败峰值、摄入失败/死信任务和向量清理失败任务
+# /ops/audit-alerts/notify 仅在 AUDIT_ALERT_WEBHOOK_URL 非空时投递，响应返回 configured/delivered/statusCode
+# 调用主体须同时拥有 OPS_ADMIN、OPS_AUDIT_READ、OPS_ALERT_NOTIFY；超时由 AUDIT_ALERT_WEBHOOK_TIMEOUT_SECONDS 控制
+
+# schemaVersion=1；单次最多导出 1,000 个文档快照和 10,000 个分块快照
+# 导入时创建新知识库，仅通过业务服务恢复知识库配置和评估用例
+curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/export -o kb-export.json
+curl -X POST http://localhost:8080/api/v1/knowledge-bases/import \
+  -H "Content-Type: application/json" \
+  --data-binary @kb-export.json
 
 # 新建/更新账号、重置密码、禁用/启用账号、轮换 tokenVersion
 curl -X POST http://localhost:8080/api/v1/ops/accounts \
@@ -181,7 +249,7 @@ curl -N -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/chat \
   -d '{"query":"你的问题","stream":true}'
 ```
 
-问答 SSE 的 `retrieval` 事件返回 `{ citations, diagnostics }`；当回答提示“根据现有知识库资料无法回答”时，优先检查 `diagnostics.hitCount`、`fallbackReason`，以及知识库详情页是否提示 embedding 模型/维度与当前运行配置不一致。
+问答 SSE 的 `retrieval` 事件返回 `{ citations, diagnostics }`；HTTP 与 SSE 错误都返回结构化 JSON（`error`、`message`、`stage`、`suggestion`、`requestId`），前端会按检索、LLM、鉴权等阶段给出可执行提示。知识库导入仅接受 `schemaVersion=1`，当前不重新上传 MinIO 原始二进制、不恢复文档主记录，也不直接重建向量；导出中的文档/分块属于审计与迁移快照，完整灾备仍需对象存储备份配合。
 
 ### 6. 本地前端开发（可选）
 
@@ -213,8 +281,15 @@ cd services/api
 | 版本 | 能力 |
 |------|------|
 | V1 | 知识库 CRUD、异步摄入、纯向量检索、SSE RAG、Web 控制台 |
-| V2 | BM25 混合检索、Rerank、语义分块、Excel、生成中断 |
+| V1.1 | 真实浏览器 E2E 门禁、摄入诊断、RAG 评估闭环、上传治理提示、聚合运维告警 |
+| V1.2 | 索引详情、结构化 Chat 错误、持久化 RAG 评估、混合检索/Rerank 控制、Webhook、导出恢复 |
+| V2 | BM25 sparse 生产调优、语义分块、生成中断、完整对象/向量灾备恢复 |
 | V3 | Parent-Child 索引、多模态 OCR、Pipeline DSL |
 | V4 | K8s、多租户、合规审计 |
 
 详细规划见 [docs/todo.md](docs/todo.md) 与 [docs/decisions.md](docs/decisions.md)。
+# V1.3 发布硬化
+
+V1.3 使用 30 条、六分类检索清单及当前/legacy 冲突语料作为发布基准，Worker 支持 Rerank 启动预热和持久化 Hugging Face 缓存，知识库 RAG 评估页提供 Sparse Migration 状态轨道和受保护的 Cutover 操作。Milvus 2.4.1 到 2.5.4 的备份/恢复演练及依赖、许可证、CVE、镜像体积扫描均提供可重复脚本。
+
+完整发布步骤、环境变量、失败策略和证据位置见 [V1.3 发布运行手册](docs/v1.3-release-runbook.md)。实际生产同规格演练、30 Case 环境基准和镜像扫描仍是正式发布前的必做项。

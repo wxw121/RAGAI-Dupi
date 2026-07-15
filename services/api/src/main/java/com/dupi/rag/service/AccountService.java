@@ -160,6 +160,16 @@ public class AccountService {
         return response(userAccountRepository.save(user));
     }
 
+    @Transactional
+    public String deleteE2e(String username) {
+        UserAccount user = requireUser(username);
+        if (!user.getUsername().startsWith("e2e_") || !"e2e".equals(user.getTenantId())) {
+            throw new IllegalArgumentException("only e2e_* accounts in the e2e tenant can be deleted");
+        }
+        userAccountRepository.delete(user);
+        return user.getUsername();
+    }
+
     public String generatePasswordHash(String password) {
         if (password == null || password.isBlank()) {
             throw new IllegalArgumentException("password is required");

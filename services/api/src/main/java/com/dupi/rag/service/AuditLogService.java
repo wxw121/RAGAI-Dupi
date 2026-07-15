@@ -115,6 +115,20 @@ public class AuditLogService {
                 .build());
     }
 
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void recordSuccessInCurrentTransaction(
+            String action, String targetType, UUID targetId, String message
+    ) {
+        repository.save(AuditLog.builder()
+                .tenantId(TenantContext.getTenantId())
+                .action(action)
+                .targetType(targetType)
+                .targetId(targetId)
+                .status(AuditLogStatus.SUCCESS)
+                .message(message)
+                .build());
+    }
+
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void recordFailure(String action, String targetType, UUID targetId, Exception error) {
         repository.save(AuditLog.builder()

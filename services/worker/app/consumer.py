@@ -96,8 +96,12 @@ def process_ingest_job(job: dict):
 
         update("processing", "indexing")
         indexer = MilvusIndexer(dimension=embedding_dimension)
-        indexer.delete_by_doc(doc_id)
-        indexer.index_chunks(kb_id, doc_id, chunks, vectors)
+        sparse_profile_version = int(job.get("sparseProfileVersion") or job.get("sparse_profile_version") or 0)
+        indexer.delete_by_doc(doc_id, kb_id=kb_id, sparse_profile_version=sparse_profile_version)
+        indexer.index_chunks(
+            kb_id, doc_id, chunks, vectors,
+            sparse_profile_version=sparse_profile_version,
+        )
 
         update("completed", "completed", chunks=chunks)
         logger.info("Ingest job %s completed with %d chunks", job_id, len(chunks))

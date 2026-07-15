@@ -16,9 +16,11 @@ import io.milvus.param.R;
 import io.milvus.param.collection.CreateCollectionParam;
 import io.milvus.param.collection.GetLoadingProgressParam;
 import io.milvus.param.collection.GetLoadStateParam;
+import io.milvus.param.collection.LoadCollectionParam;
 import io.milvus.param.dml.DeleteParam;
 import io.milvus.param.dml.SearchParam;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.UUID;
@@ -31,7 +33,7 @@ import static org.mockito.Mockito.*;
 class MilvusVectorServiceTest {
 
     @Test
-    void ensureCollectionLoadsExistingCollection() {
+    void ensureCollectionLoadsExistingCollectionAsynchronously() {
         MilvusServiceClient client = mock(MilvusServiceClient.class);
         when(client.hasCollection(any())).thenReturn(R.success(true));
         when(client.describeCollection(any())).thenReturn(R.success(describeCollection(1536)));
@@ -40,7 +42,9 @@ class MilvusVectorServiceTest {
 
         verify(client, never()).createCollection(any(CreateCollectionParam.class));
         verify(client, never()).createIndex(any());
-        verify(client).loadCollection(any());
+        ArgumentCaptor<LoadCollectionParam> load = ArgumentCaptor.forClass(LoadCollectionParam.class);
+        verify(client).loadCollection(load.capture());
+        assertThat(load.getValue().isSyncLoad()).isFalse();
     }
 
     @Test
@@ -214,6 +218,28 @@ class MilvusVectorServiceTest {
         service(client).deleteByDocId(UUID.randomUUID());
 
         verify(client).delete(any(DeleteParam.class));
+    }
+
+    @Test
+    void sparseDeletesTargetEveryVersionedKnowledgeBaseCollection() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        when(client.delete(any(DeleteParam.class))).thenReturn(R.success());
+        UUID kbId = UUID.fromString("12345678-1234-1234-1234-123456789abc");
+        UUID docId = UUID.randomUUID();
+
+        service(client).deleteSparseByDocId(kbId, docId, List.of(1, 3));
+        service(client).deleteSparseByKbId(kbId, List.of(1, 3));
+
+        ArgumentCaptor<DeleteParam> deletes = ArgumentCaptor.forClass(DeleteParam.class);
+        verify(client, times(4)).delete(deletes.capture());
+        assertThat(deletes.getAllValues()).extracting(DeleteParam::getCollectionName)
+                .containsExactly("chunks_sparse_12345678123412341234123456789abc_v1",
+                        "chunks_sparse_12345678123412341234123456789abc_v3",
+                        "chunks_sparse_12345678123412341234123456789abc_v1",
+                        "chunks_sparse_12345678123412341234123456789abc_v3");
+        assertThat(deletes.getAllValues()).extracting(DeleteParam::getExpr)
+                .containsExactly("doc_id == \"" + docId + "\"", "doc_id == \"" + docId + "\"",
+                        "kb_id == \"" + kbId + "\"", "kb_id == \"" + kbId + "\"");
     }
 
     @Test

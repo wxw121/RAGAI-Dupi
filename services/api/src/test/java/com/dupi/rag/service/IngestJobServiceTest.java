@@ -419,6 +419,160 @@ class IngestJobServiceTest {
         verify(knowledgeBaseService).findOrThrow(kbId);
     }
 
+    @Test
+    void getLatestMapsDocumentMetadataAndFailedDiagnosis() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, UUID.randomUUID());
+        job.setStatus(IngestJobStatus.FAILED);
+        job.setStage(IngestStage.FAILED);
+        job.setRetryCount(1);
+        job.setErrorMessage("bad pdf");
+        Document doc = doc(kbId, docId);
+        doc.setStatus(DocumentStatus.FAILED);
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(docId)).thenReturn(Optional.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        var response = service().getLatestByDoc(docId);
+
+        assertThat(response.getDocumentFileName()).isEqualTo("a.md");
+        assertThat(response.getDocumentStatus()).isEqualTo(DocumentStatus.FAILED);
+        assertThat(response.getDiagnosis().getSeverity()).isEqualTo("error");
+        assertThat(response.getDiagnosis().getSummary()).contains("bad pdf");
+        assertThat(response.getDiagnosis().getNextAction()).contains("Embedding");
+        assertThat(response.getDiagnosis().isRetryable()).isTrue();
+        assertThat(response.getDiagnosis().isStalled()).isFalse();
+        assertThat(response.getDiagnosis().getAgeSeconds()).isGreaterThanOrEqualTo(0);
+        assertThat(response.getDiagnosis().getLastUpdatedSeconds()).isGreaterThanOrEqualTo(0);
+    }
+
+    @Test
+    void getLatestDiagnosisWarnsWhenQueuedJobIsStalled() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, UUID.randomUUID());
+        job.setUpdatedAt(Instant.now().minusSeconds(1_200));
+        job.setCreatedAt(Instant.now().minusSeconds(1_500));
+        Document doc = doc(kbId, docId);
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(docId)).thenReturn(Optional.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        var response = service().getLatestByDoc(docId);
+
+        assertThat(response.getDiagnosis().getSeverity()).isEqualTo("warning");
+        assertThat(response.getDiagnosis().isStalled()).isTrue();
+        assertThat(response.getDiagnosis().getSummary()).contains("无进展");
+        assertThat(response.getDiagnosis().getNextAction()).contains("队列").contains("Worker");
+        assertThat(response.getDiagnosis().isRetryable()).isFalse();
+        assertThat(response.getDiagnosis().getLastUpdatedSeconds()).isGreaterThanOrEqualTo(1_200);
+    }
+
+    @Test
+    void getLatestDiagnosisCoversCompletedProcessingPendingAndProcessingStalledStates() {
+        UUID kbId = UUID.randomUUID();
+        UUID completedDocId = UUID.randomUUID();
+        IngestJob completed = job(kbId, completedDocId, UUID.randomUUID());
+        completed.setStatus(IngestJobStatus.COMPLETED);
+        completed.setStage(IngestStage.COMPLETED);
+        Document completedDoc = doc(kbId, completedDocId);
+        completedDoc.setStatus(DocumentStatus.COMPLETED);
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(completedDocId)).thenReturn(Optional.of(completed));
+        when(documentRepository.findById(completedDocId)).thenReturn(Optional.of(completedDoc));
+
+        UUID processingDocId = UUID.randomUUID();
+        IngestJob processing = job(kbId, processingDocId, UUID.randomUUID());
+        processing.setStatus(IngestJobStatus.PROCESSING);
+        processing.setStage(IngestStage.PARSING);
+        Document processingDoc = doc(kbId, processingDocId);
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(processingDocId)).thenReturn(Optional.of(processing));
+        when(documentRepository.findById(processingDocId)).thenReturn(Optional.of(processingDoc));
+
+        UUID pendingDocId = UUID.randomUUID();
+        IngestJob pending = job(kbId, pendingDocId, UUID.randomUUID());
+        pending.setCreatedAt(null);
+        pending.setUpdatedAt(null);
+        Document pendingDoc = doc(kbId, pendingDocId);
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(pendingDocId)).thenReturn(Optional.of(pending));
+        when(documentRepository.findById(pendingDocId)).thenReturn(Optional.of(pendingDoc));
+
+        UUID stalledProcessingDocId = UUID.randomUUID();
+        IngestJob stalledProcessing = job(kbId, stalledProcessingDocId, UUID.randomUUID());
+        stalledProcessing.setStatus(IngestJobStatus.PROCESSING);
+        stalledProcessing.setStage(IngestStage.INDEXING);
+        stalledProcessing.setUpdatedAt(Instant.now().minusSeconds(1_200));
+        Document stalledDoc = doc(kbId, stalledProcessingDocId);
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(stalledProcessingDocId)).thenReturn(Optional.of(stalledProcessing));
+        when(documentRepository.findById(stalledProcessingDocId)).thenReturn(Optional.of(stalledDoc));
+
+        IngestJobService service = service();
+
+        assertThat(service.getLatestByDoc(completedDocId).getDiagnosis().getNextAction()).contains("RAG 评估");
+        assertThat(service.getLatestByDoc(processingDocId).getDiagnosis().getSummary()).contains("正在摄入");
+        assertThat(service.getLatestByDoc(pendingDocId).getDiagnosis().getSummary()).contains("等待摄入队列");
+        assertThat(service.getLatestByDoc(pendingDocId).getDiagnosis().getAgeSeconds()).isZero();
+        assertThat(service.getLatestByDoc(stalledProcessingDocId).getDiagnosis().getNextAction()).contains("Embedding");
+    }
+
+    @Test
+    void getLatestDiagnosisCoversDeadLetterAndFailedRetryLimit() {
+        UUID kbId = UUID.randomUUID();
+        UUID deadLetterDocId = UUID.randomUUID();
+        IngestJob deadLetter = job(kbId, deadLetterDocId, UUID.randomUUID());
+        deadLetter.setStatus(IngestJobStatus.DEAD_LETTER);
+        deadLetter.setStage(IngestStage.DEAD_LETTER);
+        Document deadLetterDoc = doc(kbId, deadLetterDocId);
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(deadLetterDocId)).thenReturn(Optional.of(deadLetter));
+        when(documentRepository.findById(deadLetterDocId)).thenReturn(Optional.of(deadLetterDoc));
+
+        UUID failedDocId = UUID.randomUUID();
+        IngestJob failed = job(kbId, failedDocId, UUID.randomUUID());
+        failed.setStatus(IngestJobStatus.FAILED);
+        failed.setStage(IngestStage.FAILED);
+        failed.setRetryCount(3);
+        failed.setErrorMessage(" ");
+        Document failedDoc = doc(kbId, failedDocId);
+        failedDoc.setStatus(DocumentStatus.FAILED);
+        failedDoc.setErrorMessage("doc parse failed");
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(failedDocId)).thenReturn(Optional.of(failed));
+        when(documentRepository.findById(failedDocId)).thenReturn(Optional.of(failedDoc));
+
+        IngestJobService service = service();
+
+        var deadLetterDiagnosis = service.getLatestByDoc(deadLetterDocId).getDiagnosis();
+        assertThat(deadLetterDiagnosis.getSummary()).contains("死信").contains("未提供错误信息");
+        assertThat(deadLetterDiagnosis.isRetryable()).isTrue();
+
+        var failedDiagnosis = service.getLatestByDoc(failedDocId).getDiagnosis();
+        assertThat(failedDiagnosis.getSummary()).contains("doc parse failed");
+        assertThat(failedDiagnosis.isRetryable()).isFalse();
+    }
+
+    @Test
+    void summarizeAlertsReportsOpenFailedAndDeadLetterJobs() {
+        when(ingestJobRepository.countByStatusIn(List.of(
+                IngestJobStatus.FAILED,
+                IngestJobStatus.DEAD_LETTER
+        ))).thenReturn(4L);
+
+        var alerts = service().summarizeAlerts();
+
+        assertThat(alerts).hasSize(1);
+        assertThat(alerts.get(0).getCode()).isEqualTo("INGEST_FAILURES_OPEN");
+        assertThat(alerts.get(0).getSeverity()).isEqualTo("WARN");
+        assertThat(alerts.get(0).getCount()).isEqualTo(4L);
+        assertThat(alerts.get(0).getMessage()).contains("ingest");
+    }
+
+    @Test
+    void summarizeAlertsReturnsEmptyWhenNoOpenFailuresExist() {
+        when(ingestJobRepository.countByStatusIn(List.of(
+                IngestJobStatus.FAILED,
+                IngestJobStatus.DEAD_LETTER
+        ))).thenReturn(0L);
+
+        assertThat(service().summarizeAlerts()).isEmpty();
+    }
+
     private static IngestJob job(UUID kbId, UUID docId, UUID jobId) {
         return IngestJob.builder()
                 .id(jobId)

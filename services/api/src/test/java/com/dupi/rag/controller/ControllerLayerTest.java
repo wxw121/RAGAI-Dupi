@@ -4,15 +4,20 @@ import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.config.ApiSecurityProperties;
 import com.dupi.rag.config.ApiTokenService;
+import com.dupi.rag.config.AuditProperties;
+import com.dupi.rag.config.RedisQueueProperties;
+import com.dupi.rag.config.UploadRateLimitProperties;
 import com.dupi.rag.dto.*;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.service.*;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.web.servlet.MultipartProperties;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.util.unit.DataSize;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 
@@ -95,7 +100,8 @@ class ControllerLayerTest {
     void documentControllerDelegatesAllRoutesAndValidatesIngestJobOwnership() {
         DocumentService documentService = mock(DocumentService.class);
         IngestJobService ingestJobService = mock(IngestJobService.class);
-        DocumentController controller = new DocumentController(documentService, ingestJobService);
+        DocumentIndexInspectionService documentIndexInspectionService = mock(DocumentIndexInspectionService.class);
+        DocumentController controller = new DocumentController(documentService, ingestJobService, documentIndexInspectionService);
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         MockMultipartFile file = new MockMultipartFile("file", "a.txt", "text/plain", "x".getBytes());
@@ -113,11 +119,16 @@ class ControllerLayerTest {
                         .build()))
                 .build();
         IngestJobResponse jobResponse = IngestJobResponse.builder().docId(docId).build();
+        DocumentIndexDetailResponse detailResponse = DocumentIndexDetailResponse.builder()
+                .document(docResponse)
+                .objectKey("key")
+                .build();
         when(documentService.upload(kbId, file)).thenReturn(docResponse);
         when(documentService.uploadBatch(kbId, List.of(batchFile))).thenReturn(batchUploadResponse);
         when(documentService.listByKb(kbId)).thenReturn(List.of(docResponse));
         when(documentService.get(kbId, docId)).thenReturn(docResponse);
         when(ingestJobService.getLatestByDoc(docId)).thenReturn(jobResponse);
+        when(documentIndexInspectionService.inspect(kbId, docId)).thenReturn(detailResponse);
 
         assertThat(controller.upload(kbId, file)).isSameAs(docResponse);
         assertThat(controller.uploadBatch(kbId, List.of(batchFile))).isSameAs(batchUploadResponse);
@@ -125,6 +136,7 @@ class ControllerLayerTest {
         assertThat(controller.get(kbId, docId)).isSameAs(docResponse);
         controller.delete(kbId, docId);
         assertThat(controller.getIngestJob(kbId, docId)).isSameAs(jobResponse);
+        assertThat(controller.getIndexDetail(kbId, docId)).isSameAs(detailResponse);
 
         verify(documentService).findOrThrow(kbId, docId);
         verify(documentService).delete(kbId, docId);
@@ -151,8 +163,13 @@ class ControllerLayerTest {
         ChatService chatService = mock(ChatService.class);
         IngestJobService ingestJobService = mock(IngestJobService.class);
         ChatSessionService chatSessionService = mock(ChatSessionService.class);
+        RagEvalService ragEvalService = mock(RagEvalService.class);
+        KnowledgeBaseExportService knowledgeBaseExportService = mock(KnowledgeBaseExportService.class);
+        RetrievalProfileService retrievalProfileService = mock(RetrievalProfileService.class);
+        SparseMigrationService sparseMigrationService = mock(SparseMigrationService.class);
         KnowledgeBaseController controller = new KnowledgeBaseController(kbService, retrievalService, chatService,
-                ingestJobService, chatSessionService);
+                ingestJobService, chatSessionService, ragEvalService, knowledgeBaseExportService,
+                retrievalProfileService, sparseMigrationService);
         UUID kbId = UUID.randomUUID();
         UUID sessionId = UUID.randomUUID();
         UUID secondSessionId = UUID.randomUUID();
@@ -174,6 +191,58 @@ class ControllerLayerTest {
         RetrieveResponse retrieveResponse = RetrieveResponse.builder().query("q").hits(List.of()).build();
         IngestJobResponse jobResponse = IngestJobResponse.builder().kbId(kbId).build();
         IngestJobResponse retryResponse = IngestJobResponse.builder().id(UUID.randomUUID()).kbId(kbId).build();
+        RagEvalRunResponse ragEvalRun = RagEvalRunResponse.builder()
+                .id(UUID.randomUUID())
+                .kbId(kbId)
+                .passedCount(0)
+                .totalCount(0)
+                .results(List.of())
+                .build();
+        RagEvalCaseResponse ragEvalCase = RagEvalCaseResponse.builder()
+                .id(UUID.randomUUID())
+                .kbId(kbId)
+                .caseKey("case")
+                .query("q")
+                .build();
+        RagQualityPolicyRequest qualityPolicyRequest = new RagQualityPolicyRequest();
+        qualityPolicyRequest.setMinimumPassRate(80);
+        qualityPolicyRequest.setMaximumPassRateDrop(5);
+        qualityPolicyRequest.setMaximumNewFailures(0);
+        qualityPolicyRequest.setBlockWhenUnbaselined(false);
+        RagQualityPolicyResponse qualityPolicy = RagQualityPolicyResponse.builder()
+                .kbId(kbId)
+                .minimumPassRate(80)
+                .maximumPassRateDrop(5)
+                .maximumNewFailures(0)
+                .blockWhenUnbaselined(false)
+                .build();
+        RetrievalProfileRequest profileRequest = new RetrievalProfileRequest();
+        profileRequest.setName("balanced");
+        profileRequest.setVectorCandidateCount(30);
+        profileRequest.setSparseCandidateCount(30);
+        profileRequest.setRrfConstant(60);
+        profileRequest.setRerankEnabled(true);
+        profileRequest.setRerankCandidateLimit(20);
+        profileRequest.setFinalTopK(5);
+        RetrievalProfileResponse profileResponse = RetrievalProfileResponse.builder()
+                .id(UUID.randomUUID()).kbId(kbId).name("balanced").version(1).build();
+        SparseMigrationResponse migrationResponse = SparseMigrationResponse.builder().id(UUID.randomUUID())
+                .kbId(kbId).profileId(profileResponse.getId())
+                .state(com.dupi.rag.domain.enums.SparseMigrationState.PREPARING).build();
+        KnowledgeBaseExportResponse exportResponse = KnowledgeBaseExportResponse.builder()
+                .knowledgeBase(KnowledgeBaseExportResponse.KnowledgeBaseSnapshot.builder()
+                        .originalId(kbId)
+                        .name("KB")
+                        .build())
+                .documents(List.of())
+                .chunks(List.of())
+                .evalCases(List.of())
+                .build();
+        KnowledgeBaseImportRequest importRequest = new KnowledgeBaseImportRequest();
+        KnowledgeBaseImportRequest.KnowledgeBaseSnapshot importSnapshot =
+                new KnowledgeBaseImportRequest.KnowledgeBaseSnapshot();
+        importSnapshot.setName("KB");
+        importRequest.setKnowledgeBase(importSnapshot);
         ChatSessionResponse sessionResponse = ChatSessionResponse.builder().id(sessionId).kbId(kbId).title("Session").build();
         ChatSessionDetailResponse sessionDetail = ChatSessionDetailResponse.builder()
                 .session(sessionResponse)
@@ -192,6 +261,30 @@ class ControllerLayerTest {
         when(chatSessionService.getDetail(kbId, sessionId)).thenReturn(sessionDetail);
         when(chatSessionService.rename(kbId, sessionId, renameSession)).thenReturn(sessionResponse);
         when(ingestJobService.reindexKnowledgeBase(kbId)).thenReturn(List.of(jobResponse));
+        when(ragEvalService.listCases(kbId)).thenReturn(List.of(ragEvalCase));
+        when(ragEvalService.createCase(eq(kbId), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
+        when(ragEvalService.updateCase(eq(kbId), eq(ragEvalCase.getId()), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
+        when(ragEvalService.listRuns(kbId)).thenReturn(List.of(ragEvalRun));
+        when(ragEvalService.run(eq(kbId), eq(true), isNull(), isNull())).thenReturn(ragEvalRun);
+        when(ragEvalService.getPolicy(kbId)).thenReturn(qualityPolicy);
+        when(ragEvalService.updatePolicy(kbId, qualityPolicyRequest)).thenReturn(qualityPolicy);
+        when(ragEvalService.promoteBaseline(kbId, ragEvalRun.getId())).thenReturn(qualityPolicy);
+        when(ragEvalService.getRunComparison(kbId, ragEvalRun.getId())).thenReturn(ragEvalRun);
+        when(retrievalProfileService.list(kbId)).thenReturn(List.of(profileResponse));
+        when(retrievalProfileService.create(kbId, profileRequest)).thenReturn(profileResponse);
+        when(retrievalProfileService.activate(kbId, profileResponse.getId())).thenReturn(profileResponse);
+        when(retrievalProfileService.rollback(kbId, profileResponse.getId())).thenReturn(profileResponse);
+        when(sparseMigrationService.list(kbId)).thenReturn(List.of(migrationResponse));
+        when(sparseMigrationService.start(kbId, profileResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.backfill(kbId, migrationResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.beginShadowValidation(kbId, migrationResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.recordShadowValidation(eq(kbId), eq(migrationResponse.getId()), any()))
+                .thenReturn(migrationResponse);
+        when(sparseMigrationService.cutover(kbId, migrationResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.complete(kbId, migrationResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.setLegacyFallback(kbId, migrationResponse.getId(), true)).thenReturn(migrationResponse);
+        when(knowledgeBaseExportService.exportKnowledgeBase(kbId)).thenReturn(exportResponse);
+        when(knowledgeBaseExportService.restore(importRequest)).thenReturn(kbResponse);
 
         assertThat(controller.create(create)).isSameAs(kbResponse);
         assertThat(controller.list()).containsExactly(kbResponse);
@@ -205,18 +298,49 @@ class ControllerLayerTest {
         assertThat(controller.listJobs(kbId)).containsExactly(jobResponse);
         assertThat(controller.retryJob(kbId, retryResponse.getId())).isSameAs(retryResponse);
         assertThat(controller.reindex(kbId)).containsExactly(jobResponse);
+        assertThat(controller.exportKnowledgeBase(kbId)).isSameAs(exportResponse);
+        assertThat(controller.importKnowledgeBase(importRequest)).isSameAs(kbResponse);
         assertThat(controller.listChatSessions(kbId)).containsExactly(sessionResponse);
         assertThat(controller.createChatSession(kbId, createSession)).isSameAs(sessionResponse);
         assertThat(controller.getChatSession(kbId, sessionId)).isSameAs(sessionDetail);
         assertThat(controller.renameChatSession(kbId, sessionId, renameSession)).isSameAs(sessionResponse);
         controller.deleteChatSession(kbId, sessionId);
         controller.batchDeleteChatSessions(kbId, batchDeleteSessions);
+        RagEvalCaseRequest ragEvalRequest = new RagEvalCaseRequest();
+        ragEvalRequest.setCaseKey("case");
+        ragEvalRequest.setQuery("q");
+        assertThat(controller.listRagEvalCases(kbId)).containsExactly(ragEvalCase);
+        assertThat(controller.createRagEvalCase(kbId, ragEvalRequest)).isSameAs(ragEvalCase);
+        assertThat(controller.updateRagEvalCase(kbId, ragEvalCase.getId(), ragEvalRequest)).isSameAs(ragEvalCase);
+        controller.deleteRagEvalCase(kbId, ragEvalCase.getId());
+        assertThat(controller.listRagEvalRuns(kbId)).containsExactly(ragEvalRun);
+        RagEvalRunRequest ragEvalRunRequest = new RagEvalRunRequest();
+        ragEvalRunRequest.setUseRerank(true);
+        assertThat(controller.runRagEval(kbId, ragEvalRunRequest)).isSameAs(ragEvalRun);
+        assertThat(controller.getRagQualityPolicy(kbId)).isSameAs(qualityPolicy);
+        assertThat(controller.updateRagQualityPolicy(kbId, qualityPolicyRequest)).isSameAs(qualityPolicy);
+        assertThat(controller.promoteRagEvalBaseline(kbId, ragEvalRun.getId())).isSameAs(qualityPolicy);
+        assertThat(controller.getRagEvalRunComparison(kbId, ragEvalRun.getId())).isSameAs(ragEvalRun);
+        assertThat(controller.listRetrievalProfiles(kbId)).containsExactly(profileResponse);
+        assertThat(controller.createRetrievalProfile(kbId, profileRequest)).isSameAs(profileResponse);
+        assertThat(controller.activateRetrievalProfile(kbId, profileResponse.getId())).isSameAs(profileResponse);
+        assertThat(controller.rollbackRetrievalProfile(kbId, profileResponse.getId())).isSameAs(profileResponse);
+        assertThat(controller.listSparseMigrations(kbId)).containsExactly(migrationResponse);
+        assertThat(controller.startSparseMigration(kbId, profileResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.backfillSparseMigration(kbId, migrationResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.beginSparseShadowValidation(kbId, migrationResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.validateSparseMigration(kbId, migrationResponse.getId(),
+                new SparseMigrationValidationRequest())).isSameAs(migrationResponse);
+        assertThat(controller.cutoverSparseMigration(kbId, migrationResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.completeSparseMigration(kbId, migrationResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.setLegacySparseFallback(kbId, migrationResponse.getId(), true)).isSameAs(migrationResponse);
 
         verify(kbService).delete(kbId);
         verify(chatService).cancel("s1");
         verify(chatService, never()).cancel(null);
         verify(chatSessionService).delete(kbId, sessionId);
         verify(chatSessionService).batchDelete(kbId, List.of(sessionId, secondSessionId));
+        verify(ragEvalService).deleteCase(kbId, ragEvalCase.getId());
     }
 
     @Test
@@ -225,7 +349,32 @@ class ControllerLayerTest {
         AuditLogService auditLogService = mock(AuditLogService.class);
         AccountService accountService = mock(AccountService.class);
         RoleService roleService = mock(RoleService.class);
-        OpsController controller = new OpsController(service, auditLogService, accountService, roleService);
+        IngestJobService ingestJobService = mock(IngestJobService.class);
+        UploadRateLimitProperties uploadRateLimitProperties = new UploadRateLimitProperties();
+        uploadRateLimitProperties.setEnabled(true);
+        uploadRateLimitProperties.setRequests(11);
+        uploadRateLimitProperties.setWindowSeconds(45);
+        RedisQueueProperties redisQueueProperties = new RedisQueueProperties();
+        redisQueueProperties.setMaxPendingJobs(123);
+        redisQueueProperties.setMaxRecoveryAttempts(5);
+        AuditProperties auditProperties = new AuditProperties();
+        auditProperties.setAlertWindowMinutes(12);
+        auditProperties.setAlertFailedThreshold(7);
+        MultipartProperties multipartProperties = new MultipartProperties();
+        multipartProperties.setMaxFileSize(DataSize.ofMegabytes(32));
+        OpsNotificationService opsNotificationService = mock(OpsNotificationService.class);
+        OpsController controller = new OpsController(
+                service,
+                auditLogService,
+                accountService,
+                roleService,
+                ingestJobService,
+                uploadRateLimitProperties,
+                redisQueueProperties,
+                auditProperties,
+                multipartProperties,
+                opsNotificationService
+        );
         UUID taskId = UUID.randomUUID();
         VectorCleanupTaskResponse response = VectorCleanupTaskResponse.builder()
                 .id(taskId)
@@ -253,6 +402,20 @@ class ControllerLayerTest {
                 .message("Too many failed audit events")
                 .count(3)
                 .threshold(2)
+                .build()));
+        when(ingestJobService.summarizeAlerts()).thenReturn(List.of(AuditAlertResponse.builder()
+                .code("INGEST_FAILURES_OPEN")
+                .severity("WARN")
+                .message("Open ingest failures")
+                .count(2)
+                .threshold(0)
+                .build()));
+        when(service.summarizeAlerts()).thenReturn(List.of(AuditAlertResponse.builder()
+                .code("VECTOR_CLEANUP_FAILURES_OPEN")
+                .severity("WARN")
+                .message("Open vector cleanup failures")
+                .count(1)
+                .threshold(0)
                 .build()));
         when(accountService.listUsers()).thenReturn(List.of(AccountResponse.builder()
                 .username("admin")
@@ -282,6 +445,7 @@ class ControllerLayerTest {
         when(accountService.disable("analyst")).thenReturn(analyst);
         when(accountService.enable("analyst")).thenReturn(analyst);
         when(accountService.rotateTokenVersion("analyst")).thenReturn(analyst);
+        when(accountService.deleteE2e("e2e_account_42")).thenReturn("e2e_account_42");
         when(accountService.generatePasswordHash("secret")).thenReturn("pbkdf2$hash");
         when(accountService.resetPassword(eq("analyst"), eq("secret"))).thenReturn(analyst);
         RoleResponse role = RoleResponse.builder()
@@ -294,6 +458,13 @@ class ControllerLayerTest {
         when(roleService.create(any(RoleRequest.class))).thenReturn(role);
         when(roleService.update(eq(role.getId()), any(RoleRequest.class))).thenReturn(role);
         when(roleService.disable(role.getId())).thenReturn(role);
+        OpsNotificationResponse notification = OpsNotificationResponse.builder()
+                .configured(true)
+                .delivered(true)
+                .alertCount(3)
+                .statusCode(202)
+                .build();
+        when(opsNotificationService.notifyAlerts(any())).thenReturn(notification);
 
         assertThat(controller.listVectorCleanupTasks()).containsExactly(response);
         assertThat(controller.retryVectorCleanupTask(taskId)).isSameAs(response);
@@ -302,7 +473,8 @@ class ControllerLayerTest {
         assertThat(controller.exportAuditLogs("tenant-a", "DOCUMENT_DELETE", "DOCUMENT", "SUCCESS"))
                 .contains("createdAt,tenantId");
         assertThat(controller.listAuditAlerts()).extracting(AuditAlertResponse::getCode)
-                .containsExactly("AUDIT_FAILED_SPIKE");
+                .containsExactly("AUDIT_FAILED_SPIKE", "INGEST_FAILURES_OPEN", "VECTOR_CLEANUP_FAILURES_OPEN");
+        assertThat(controller.notifyAuditAlerts()).isSameAs(notification);
         assertThat(controller.listAccounts()).extracting(AccountResponse::getUsername)
                 .containsExactly("admin");
         assertThat(controller.createAccount(accountRequest)).isSameAs(analyst);
@@ -310,12 +482,22 @@ class ControllerLayerTest {
         assertThat(controller.disableAccount("analyst")).isSameAs(analyst);
         assertThat(controller.enableAccount("analyst")).isSameAs(analyst);
         assertThat(controller.rotateAccountToken("analyst")).isSameAs(analyst);
+        controller.deleteE2eAccount("e2e_account_42");
         PasswordResetRequest passwordResetRequest = new PasswordResetRequest();
         passwordResetRequest.setPassword("secret");
         assertThat(controller.resetAccountPassword("analyst", passwordResetRequest)).isSameAs(analyst);
         assertThat(controller.generatePasswordHash(Map.of("password", "secret"))).containsEntry("passwordHash", "pbkdf2$hash");
         OpsMetadataResponse metadata = controller.metadata();
-        assertThat(metadata.getPermissions()).contains("KB_READ", "ACCOUNT_PASSWORD_RESET");
+        assertThat(metadata.getPermissions()).contains("KB_READ", "ACCOUNT_PASSWORD_RESET", "OPS_ALERT_NOTIFY");
+        assertThat(metadata.getAuditActions()).contains("ACCOUNT_DELETE_E2E");
+        assertThat(metadata.getGuardrails().getUploadRateLimit().isEnabled()).isTrue();
+        assertThat(metadata.getGuardrails().getUploadRateLimit().getRequests()).isEqualTo(11);
+        assertThat(metadata.getGuardrails().getUploadRateLimit().getWindowSeconds()).isEqualTo(45);
+        assertThat(metadata.getGuardrails().getIngestQueue().getMaxPendingJobs()).isEqualTo(123);
+        assertThat(metadata.getGuardrails().getIngestQueue().getMaxRecoveryAttempts()).isEqualTo(5);
+        assertThat(metadata.getGuardrails().getAudit().getAlertWindowMinutes()).isEqualTo(12);
+        assertThat(metadata.getGuardrails().getAudit().getAlertFailedThreshold()).isEqualTo(7);
+        assertThat(metadata.getGuardrails().getMultipart().getMaxFileSizeBytes()).isEqualTo(DataSize.ofMegabytes(32).toBytes());
         assertThat(metadata.getPermissionDetails())
                 .extracting(PermissionMetadataResponse::getCode)
                 .contains("KB_READ", "ACCOUNT_PASSWORD_RESET");
@@ -327,6 +509,18 @@ class ControllerLayerTest {
                     assertThat(detail.getAllows()).contains("重置其他账号密码");
                     assertThat(detail.getDenies()).contains("创建、禁用或编辑账号基础信息");
                 });
+        assertThat(metadata.getPermissionDetails())
+                .filteredOn(detail -> "KB_READ".equals(detail.getCode()))
+                .singleElement()
+                .satisfies(detail -> assertThat(detail.getAllows()).contains("查看 RAG 评估用例和历史", "导出知识库快照"));
+        assertThat(metadata.getPermissionDetails())
+                .filteredOn(detail -> "KB_WRITE".equals(detail.getCode()))
+                .singleElement()
+                .satisfies(detail -> assertThat(detail.getAllows()).contains("导入知识库快照", "管理 RAG 评估用例"));
+        assertThat(metadata.getPermissionDetails())
+                .filteredOn(detail -> "MAINTENANCE".equals(detail.getCode()))
+                .singleElement()
+                .satisfies(detail -> assertThat(detail.getAllows()).contains("运行 RAG 评估"));
         assertThat(controller.listRoles()).containsExactly(role);
         RoleRequest roleRequest = new RoleRequest();
         roleRequest.setCode("ANALYST");
@@ -335,17 +529,23 @@ class ControllerLayerTest {
         assertThat(controller.disableRole(role.getId())).isSameAs(role);
         verify(auditLogService).list(any(AuditLogQuery.class));
         verify(auditLogService).exportCsv(any(AuditLogQuery.class));
-        verify(auditLogService).summarizeAlerts();
+        verify(auditLogService, times(2)).summarizeAlerts();
+        verify(ingestJobService, times(2)).summarizeAlerts();
+        verify(service, times(2)).summarizeAlerts();
+        verify(opsNotificationService).notifyAlerts(any());
+        verify(auditLogService).recordSuccess(eq("AUDIT_ALERT_NOTIFY"), eq("AUDIT_ALERT"), isNull(), anyString());
         verify(accountService).listUsers();
         verify(accountService).create(accountRequest);
         verify(accountService).update("analyst", accountRequest);
         verify(accountService).disable("analyst");
         verify(accountService).enable("analyst");
         verify(accountService).rotateTokenVersion("analyst");
+        verify(accountService).deleteE2e("e2e_account_42");
         verify(accountService).resetPassword("analyst", "secret");
         verify(auditLogService).recordSuccess(eq("ACCOUNT_CREATE"), eq("ACCOUNT"), isNull(), anyString());
         verify(auditLogService).recordSuccess(eq("ACCOUNT_UPDATE"), eq("ACCOUNT"), isNull(), anyString());
         verify(auditLogService).recordSuccess(eq("ACCOUNT_PASSWORD_RESET"), eq("ACCOUNT"), isNull(), anyString());
+        verify(auditLogService).recordSuccess(eq("ACCOUNT_DELETE_E2E"), eq("ACCOUNT"), isNull(), contains("e2e_account_42"));
         verify(auditLogService).recordSuccess(eq("ROLE_CREATE"), eq("ROLE"), eq(role.getId()), anyString());
     }
 

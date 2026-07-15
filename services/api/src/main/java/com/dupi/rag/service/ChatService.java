@@ -4,9 +4,11 @@ import com.dupi.rag.client.LlmClient;
 import com.dupi.rag.config.RedisQueueProperties;
 import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.dto.*;
+import com.dupi.rag.exception.ChatPipelineException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
@@ -64,6 +66,7 @@ public class ChatService {
     private final Map<String, Set<CancellationRegistration>> cancellationSignals = new ConcurrentHashMap<>();
 
     public Flux<ServerSentEvent<String>> chatStream(UUID kbId, ChatRequest request) {
+        String requestId = requestId();
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
         UUID persistedSessionId = resolveSessionId(kbId, request);
         String sessionId = persistedSessionId.toString();
@@ -139,9 +142,7 @@ public class ChatService {
                 );
 
                 return Flux.concat(retrievalEvent, tokenEvents, doneEvent)
-                        .onErrorResume(ex -> Flux.just(
-                                ServerSentEvent.<String>builder().event("error").data(ex.getMessage()).build()
-                        ))
+                        .onErrorResume(ex -> Flux.just(errorEvent("llm", ex, requestId)))
                         .doFinally(signal -> {
                             if (signal == SignalType.CANCEL) {
                                 saveAssistantIfPresent.run();
@@ -150,7 +151,7 @@ public class ChatService {
                         });
             } catch (Exception ex) {
                 removeCancellationRegistration(sessionId, cancellation);
-                return Flux.error(ex);
+                return Flux.just(errorEvent("retrieval", ex, requestId));
             }
         });
     }
@@ -162,10 +163,19 @@ public class ChatService {
         retrieveRequest.setTopK(clampTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK()));
         retrieveRequest.setUseRerank(request.getUseRerank());
 
-        RetrieveResponse retrieval = retrievalService.retrieve(kbId, retrieveRequest);
-        String context = retrievalService.buildContext(retrieval.getHits());
+        String context;
+        try {
+            RetrieveResponse retrieval = retrievalService.retrieve(kbId, retrieveRequest);
+            context = retrievalService.buildContext(retrieval.getHits());
+        } catch (Exception ex) {
+            throw pipelineException("retrieval", ex);
+        }
         String userPrompt = "上下文：\n" + context + "\n\n问题：" + request.getQuery();
-        return llmClient.chat(SYSTEM_PROMPT, userPrompt);
+        try {
+            return llmClient.chat(SYSTEM_PROMPT, userPrompt);
+        } catch (Exception ex) {
+            throw pipelineException("llm", ex);
+        }
     }
 
     public void cancel(String sessionId) {
@@ -214,6 +224,57 @@ public class ChatService {
     private String truncate(String text, int max) {
         if (text == null) return "";
         return text.length() <= max ? text : text.substring(0, max) + "...";
+    }
+
+    private ServerSentEvent<String> errorEvent(String stage, Throwable ex, String requestId) {
+        String message = ex.getMessage() == null || ex.getMessage().isBlank()
+                ? ex.getClass().getSimpleName()
+                : ex.getMessage();
+        log.warn("Chat pipeline failed, stage={}, requestId={}, message={}", stage, requestId, message);
+        return ServerSentEvent.<String>builder()
+                .event("error")
+                .data(errorJson(stage, ex, requestId))
+                .build();
+    }
+
+    private String errorJson(String stage, Throwable ex, String requestId) {
+        String message = ex.getMessage() == null || ex.getMessage().isBlank()
+                ? ex.getClass().getSimpleName()
+                : ex.getMessage();
+        ApiErrorResponse response = ApiErrorResponse.of(
+                "chat_pipeline_error",
+                message,
+                stage,
+                suggestionFor(stage),
+                requestId
+        );
+        try {
+            return objectMapper.writeValueAsString(response);
+        } catch (Exception ignored) {
+            return "{\"error\":\"chat_pipeline_error\",\"message\":\"" + message.replace("\"", "'") + "\"}";
+        }
+    }
+
+    private String suggestionFor(String stage) {
+        if ("llm".equals(stage)) {
+            return "Check CHAT_API_KEY, model provider availability, and chat model configuration.";
+        }
+        if ("retrieval".equals(stage)) {
+            return "Check indexed documents, embedding configuration, vector service state, and retrieval diagnostics.";
+        }
+        return "Use the requestId to inspect server logs.";
+    }
+
+    private ChatPipelineException pipelineException(String stage, Exception cause) {
+        String message = cause.getMessage() == null || cause.getMessage().isBlank()
+                ? cause.getClass().getSimpleName()
+                : cause.getMessage();
+        return new ChatPipelineException(stage, message, suggestionFor(stage), cause);
+    }
+
+    private String requestId() {
+        String traceId = MDC.get("traceId");
+        return traceId == null || traceId.isBlank() ? UUID.randomUUID().toString().replace("-", "").substring(0, 16) : traceId;
     }
 
     private int clampTopK(Integer topK) {

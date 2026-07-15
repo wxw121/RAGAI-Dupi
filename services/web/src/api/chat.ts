@@ -1,11 +1,11 @@
 import { authHeaders } from './client'
-import type { Citation, RetrievalDiagnostics } from '@/types'
+import type { Citation, RetrievalDiagnostics, StructuredChatError } from '@/types'
 
 export interface ChatStreamCallbacks {
   onRetrieval?: (citations: Citation[], diagnostics?: RetrievalDiagnostics) => void
   onToken?: (token: string) => void
   onDone?: (sessionId: string) => void
-  onError?: (message: string) => void
+  onError?: (message: string, error?: StructuredChatError) => void
   onAbort?: () => void
 }
 
@@ -13,6 +13,18 @@ function fallbackErrorMessage(message: string | undefined | null, status?: numbe
   const trimmed = message?.trim()
   if (trimmed) return trimmed
   return status ? `HTTP ${status}` : '问答请求失败，请稍后重试'
+}
+
+function parseStructuredError(data: string): { message: string; error?: StructuredChatError } {
+  try {
+    const parsed = JSON.parse(data) as StructuredChatError
+    if (parsed && typeof parsed === 'object' && typeof parsed.message === 'string') {
+      return { message: fallbackErrorMessage(parsed.message), error: parsed }
+    }
+  } catch {
+    /* Plain SSE error strings remain supported. */
+  }
+  return { message: fallbackErrorMessage(data) }
 }
 
 function parseSseBlock(block: string): { event: string; data: string } | null {
@@ -65,7 +77,8 @@ function dispatchSseEvent(
       callbacks.onDone?.('')
     }
   } else if (event === 'error') {
-    callbacks.onError?.(fallbackErrorMessage(data))
+    const parsed = parseStructuredError(data)
+    callbacks.onError?.(parsed.message, parsed.error)
   }
 }
 
@@ -99,10 +112,14 @@ export async function streamChat(
 
   if (!res.ok) {
     let message = fallbackErrorMessage(res.statusText, res.status)
+    let structuredError: StructuredChatError | undefined
 
     try {
-      const err = await res.json()
+      const err = await res.json() as Partial<StructuredChatError>
       message = fallbackErrorMessage(err.message ?? message, res.status)
+      if (typeof err.error === 'string' && typeof err.message === 'string') {
+        structuredError = err as StructuredChatError
+      }
     } catch {
       /* 非 JSON 错误响应时保留 HTTP 状态文本。 */
     }
@@ -111,7 +128,7 @@ export async function streamChat(
       message = `401 Unauthorized: ${message}`
     }
 
-    callbacks.onError?.(message)
+    callbacks.onError?.(message, structuredError)
     return
   }
 

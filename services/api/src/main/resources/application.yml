@@ -78,6 +78,8 @@ dupi:
     retention-cron: ${AUDIT_RETENTION_CRON:0 15 2 * * *}
     alert-window-minutes: ${AUDIT_ALERT_WINDOW_MINUTES:30}
     alert-failed-threshold: ${AUDIT_ALERT_FAILED_THRESHOLD:10}
+    alert-webhook-url: ${AUDIT_ALERT_WEBHOOK_URL:}
+    alert-webhook-timeout-seconds: ${AUDIT_ALERT_WEBHOOK_TIMEOUT_SECONDS:10}
 
 management:
   endpoints:

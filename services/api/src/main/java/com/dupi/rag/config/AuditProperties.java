@@ -25,4 +25,14 @@ public class AuditProperties {
      * 窗口内失败审计事件达到该阈值时返回 WARN 告警。设置为 0 或负数时关闭告警摘要。
      */
     private int alertFailedThreshold = 10;
+
+    /**
+     * Optional webhook endpoint used by ops alert notification.
+     */
+    private String alertWebhookUrl;
+
+    /**
+     * Maximum time to wait for an alert webhook response.
+     */
+    private int alertWebhookTimeoutSeconds = 10;
 }

@@ -1,5 +1,6 @@
 package com.dupi.rag.dto;
 
+import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
 import com.dupi.rag.domain.enums.IngestStage;
 import lombok.Builder;
@@ -14,10 +15,13 @@ public class IngestJobResponse {
     private UUID id;
     private UUID kbId;
     private UUID docId;
+    private String documentFileName;
+    private DocumentStatus documentStatus;
     private IngestJobStatus status;
     private IngestStage stage;
     private Integer retryCount;
     private String errorMessage;
+    private IngestDiagnosisResponse diagnosis;
     private Instant createdAt;
     private Instant updatedAt;
 }

@@ -9,10 +9,19 @@ import com.dupi.rag.domain.entity.DocumentTombstone;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.IngestOutboxEvent;
 import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.entity.RagEvalCase;
+import com.dupi.rag.domain.entity.RagEvalRun;
+import com.dupi.rag.domain.entity.RagEvalRunResult;
+import com.dupi.rag.domain.entity.RagQualityPolicy;
+import com.dupi.rag.domain.entity.Role;
+import com.dupi.rag.domain.entity.UserAccount;
 import com.dupi.rag.domain.entity.VectorCleanupTask;
 import com.dupi.rag.domain.enums.AuditLogStatus;
 import com.dupi.rag.domain.enums.ChatMessageRole;
 import com.dupi.rag.domain.enums.DocumentStatus;
+import com.dupi.rag.domain.enums.RagEvalRunStatus;
+import com.dupi.rag.domain.enums.RagEvalComparisonStatus;
+import com.dupi.rag.domain.enums.RagQualityGateStatus;
 import com.dupi.rag.domain.enums.VectorCleanupStatus;
 import com.dupi.rag.domain.enums.VectorCleanupTargetType;
 import com.dupi.rag.domain.enums.IngestOutboxStatus;
@@ -20,6 +29,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -61,6 +71,36 @@ class EntityLifecycleTest {
         assertThat(chunk.getId()).isNotNull();
         assertThat(chunk.getCreatedAt()).isNotNull();
         assertThat(chunk.getTokenCount()).isZero();
+
+        Role role = Role.builder()
+                .code("SUPPORT")
+                .name("Support")
+                .permissions("KB_READ")
+                .build();
+        invoke(role, "onCreate");
+        assertThat(role.getId()).isNotNull();
+        assertThat(role.getCreatedAt()).isNotNull();
+        assertThat(role.getUpdatedAt()).isNotNull();
+        Instant roleCreatedAt = role.getCreatedAt();
+        invoke(role, "onUpdate");
+        assertThat(role.getCreatedAt()).isEqualTo(roleCreatedAt);
+        assertThat(role.getUpdatedAt()).isNotNull();
+
+        UserAccount userAccount = UserAccount.builder()
+                .username("alice")
+                .passwordHash("hash")
+                .build();
+        invoke(userAccount, "onCreate");
+        assertThat(userAccount.getId()).isNotNull();
+        assertThat(userAccount.getTenantId()).isEqualTo("default");
+        assertThat(userAccount.getRoleCode()).isEqualTo("ANALYST");
+        assertThat(userAccount.getTokenVersion()).isEqualTo("1");
+        assertThat(userAccount.isDisabled()).isFalse();
+        assertThat(userAccount.getCreatedAt()).isNotNull();
+        assertThat(userAccount.getUpdatedAt()).isNotNull();
+        Instant userUpdatedAt = userAccount.getUpdatedAt();
+        invoke(userAccount, "onUpdate");
+        assertThat(userAccount.getUpdatedAt()).isAfterOrEqualTo(userUpdatedAt);
     }
 
     @Test
@@ -162,6 +202,18 @@ class EntityLifecycleTest {
         Thread.sleep(2L);
         invoke(event, "onUpdate");
         assertThat(event.getUpdatedAt()).isAfterOrEqualTo(previousUpdatedAt);
+
+        IngestOutboxEvent nullAttemptEvent = IngestOutboxEvent.builder()
+                .jobId(jobId)
+                .kbId(kbId)
+                .docId(docId)
+                .objectKey("kb/doc/b.md")
+                .fileName("b.md")
+                .mimeType("text/markdown")
+                .attemptCount(null)
+                .build();
+        invoke(nullAttemptEvent, "onCreate");
+        assertThat(nullAttemptEvent.getAttemptCount()).isZero();
     }
 
     @Test
@@ -185,11 +237,138 @@ class EntityLifecycleTest {
         assertThat(session.getId()).isNotNull();
         assertThat(session.getCreatedAt()).isNotNull();
         assertThat(session.getUpdatedAt()).isNotNull();
+        Instant sessionUpdatedAt = session.getUpdatedAt();
+        invoke(session, "onUpdate");
+        assertThat(session.getUpdatedAt()).isAfterOrEqualTo(sessionUpdatedAt);
         assertThat(message.getId()).isNotNull();
         assertThat(message.getCreatedAt()).isNotNull();
         assertThat(message.getSequenceNumber()).isZero();
         assertThat(message.getRole()).isEqualTo(ChatMessageRole.USER);
         assertThat(message.getCitations()).containsEntry("source", "a.md");
+    }
+
+    @Test
+    void ragEvaluationEntitiesExposeFieldsAndPopulateLifecycleValues() throws Exception {
+        UUID kbId = UUID.randomUUID();
+        RagEvalCase evalCase = RagEvalCase.builder()
+                .kbId(kbId)
+                .caseKey("case-1")
+                .query("query")
+                .minHits(2)
+                .topK(8)
+                .expectedFileName("guide.md")
+                .mustContainAny(List.of("token"))
+                .build();
+        invoke(evalCase, "onCreate");
+        Instant caseCreatedAt = evalCase.getCreatedAt();
+        invoke(evalCase, "onUpdate");
+        assertThat(evalCase.getId()).isNotNull();
+        assertThat(evalCase.getKbId()).isEqualTo(kbId);
+        assertThat(evalCase.getCaseKey()).isEqualTo("case-1");
+        assertThat(evalCase.getQuery()).isEqualTo("query");
+        assertThat(evalCase.getMinHits()).isEqualTo(2);
+        assertThat(evalCase.getTopK()).isEqualTo(8);
+        assertThat(evalCase.getExpectedFileName()).isEqualTo("guide.md");
+        assertThat(evalCase.getMustContainAny()).containsExactly("token");
+        assertThat(evalCase.getCreatedAt()).isEqualTo(caseCreatedAt);
+        assertThat(evalCase.getUpdatedAt()).isAfterOrEqualTo(caseCreatedAt);
+
+        RagEvalRun run = RagEvalRun.builder()
+                .kbId(kbId)
+                .useRerank(true)
+                .passedCount(1)
+                .totalCount(2)
+                .build();
+        invoke(run, "onCreate");
+        assertThat(run.getId()).isNotNull();
+        assertThat(run.getKbId()).isEqualTo(kbId);
+        assertThat(run.getUseRerank()).isTrue();
+        assertThat(run.getPassedCount()).isEqualTo(1);
+        assertThat(run.getTotalCount()).isEqualTo(2);
+        assertThat(run.getStatus()).isEqualTo(RagEvalRunStatus.RUNNING);
+        assertThat(run.getFailureMessage()).isNull();
+        assertThat(run.getCreatedAt()).isNotNull();
+
+        RagEvalRunResult result = RagEvalRunResult.builder()
+                .runId(run.getId())
+                .caseId(evalCase.getId())
+                .caseKey(evalCase.getCaseKey())
+                .query(evalCase.getQuery())
+                .passed(true)
+                .failureReasons(List.of("none"))
+                .hitCount(3)
+                .expectedFileName("guide.md")
+                .matchedFileName("guide.md")
+                .matchedToken("token")
+                .retrievalMode("hybrid_rerank")
+                .fallbackReason("none")
+                .embeddingModel("bge-m3")
+                .embeddingDimension(1024)
+                .topK(8)
+                .build();
+        invoke(result, "onCreate");
+        assertThat(result.getId()).isNotNull();
+        assertThat(result.getRunId()).isEqualTo(run.getId());
+        assertThat(result.getCaseId()).isEqualTo(evalCase.getId());
+        assertThat(result.getCaseKey()).isEqualTo("case-1");
+        assertThat(result.getQuery()).isEqualTo("query");
+        assertThat(result.isPassed()).isTrue();
+        assertThat(result.getFailureReasons()).containsExactly("none");
+        assertThat(result.getHitCount()).isEqualTo(3);
+        assertThat(result.getExpectedFileName()).isEqualTo("guide.md");
+        assertThat(result.getMatchedFileName()).isEqualTo("guide.md");
+        assertThat(result.getMatchedToken()).isEqualTo("token");
+        assertThat(result.getRetrievalMode()).isEqualTo("hybrid_rerank");
+        assertThat(result.getFallbackReason()).isEqualTo("none");
+        assertThat(result.getEmbeddingModel()).isEqualTo("bge-m3");
+        assertThat(result.getEmbeddingDimension()).isEqualTo(1024);
+        assertThat(result.getTopK()).isEqualTo(8);
+        assertThat(result.getCreatedAt()).isNotNull();
+    }
+
+    @Test
+    void ragQualityEvidenceExposesPolicyRunAndComparisonFields() throws Exception {
+        UUID kbId = UUID.randomUUID();
+        UUID baselineRunId = UUID.randomUUID();
+        RagQualityPolicy policy = RagQualityPolicy.builder()
+                .kbId(kbId)
+                .minimumPassRate(80)
+                .maximumPassRateDrop(5)
+                .maximumNewFailures(0)
+                .blockWhenUnbaselined(true)
+                .baselineRunId(baselineRunId)
+                .build();
+        invoke(policy, "onCreate");
+
+        assertThat(policy.getId()).isNotNull();
+        assertThat(policy.getKbId()).isEqualTo(kbId);
+        assertThat(policy.getBaselineRunId()).isEqualTo(baselineRunId);
+        assertThat(policy.getCreatedAt()).isNotNull();
+        assertThat(policy.getUpdatedAt()).isNotNull();
+
+        RagEvalRun run = RagEvalRun.builder()
+                .kbId(kbId)
+                .gateStatus(RagQualityGateStatus.PASS)
+                .metrics(Map.of("passRate", 100, "fallbackCount", 0))
+                .profileSnapshot(Map.of("version", 1))
+                .build();
+        invoke(run, "onCreate");
+
+        assertThat(run.getGateStatus()).isEqualTo(RagQualityGateStatus.PASS);
+        assertThat(run.getMetrics()).containsEntry("passRate", 100);
+        assertThat(run.getProfileSnapshot()).containsEntry("version", 1);
+
+        RagEvalRunResult result = RagEvalRunResult.builder()
+                .runId(run.getId())
+                .caseKey("case-1")
+                .query("query")
+                .caseFingerprint("sha256:fingerprint")
+                .comparisonStatus(RagEvalComparisonStatus.UNCHANGED)
+                .build();
+        invoke(result, "onCreate");
+
+        assertThat(result.getCaseFingerprint()).isEqualTo("sha256:fingerprint");
+        assertThat(result.getComparisonStatus()).isEqualTo(RagEvalComparisonStatus.UNCHANGED);
     }
 
     private static void invoke(Object target, String methodName) throws Exception {

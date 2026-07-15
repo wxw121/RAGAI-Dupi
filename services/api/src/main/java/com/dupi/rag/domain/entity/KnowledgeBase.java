@@ -59,6 +59,9 @@ public class KnowledgeBase {
     @Builder.Default
     private RetrievalMode retrievalMode = RetrievalMode.VECTOR;
 
+    @Column(name = "active_retrieval_profile_id")
+    private UUID activeRetrievalProfileId;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

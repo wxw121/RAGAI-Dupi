@@ -62,6 +62,7 @@ class MilvusIndexer:
         doc_id: str,
         chunks: list[TextChunk],
         vectors: list[list[float]],
+        sparse_profile_version: int = 0,
     ) -> list[str]:
         if not chunks:
             return []
@@ -75,11 +76,17 @@ class MilvusIndexer:
 
         for chunk, cid in zip(chunks, chunk_ids):
             chunk.milvus_id = cid
+        if sparse_profile_version > 0:
+            from app.retrieval.sparse import SparseMilvusAdapter
+            SparseMilvusAdapter(kb_id, sparse_profile_version).upsert(kb_id, doc_id, chunks)
         return chunk_ids
 
-    def delete_by_doc(self, doc_id: str):
+    def delete_by_doc(self, doc_id: str, kb_id: str = "", sparse_profile_version: int = 0):
         try:
             self.collection.delete(expr=f'doc_id == "{doc_id}"', timeout=MILVUS_OPERATION_TIMEOUT_SECONDS)
+            if sparse_profile_version > 0:
+                from app.retrieval.sparse import SparseMilvusAdapter
+                SparseMilvusAdapter(kb_id, sparse_profile_version).delete_by_doc(doc_id)
         except MilvusException as exc:
             error = str(exc).lower()
             if (

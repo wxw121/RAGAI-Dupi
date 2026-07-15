@@ -47,7 +47,7 @@ services:
       retries: 5
 
   milvus:
-    image: milvusdb/milvus:v2.4.1
+    image: milvusdb/milvus:v2.5.4
     command: ["milvus", "run", "standalone"]
     environment:
       ETCD_ENDPOINTS: etcd:2379
@@ -103,6 +103,14 @@ services:
       dockerfile: Dockerfile
     env_file:
       - .env
+    environment:
+      HF_HOME: /models/huggingface
+      SENTENCE_TRANSFORMERS_HOME: /models/huggingface
+      TRANSFORMERS_CACHE: /models/huggingface
+      RERANK_WARMUP_ENABLED: ${RERANK_WARMUP_ENABLED:-true}
+      RERANK_MODEL: ${RERANK_MODEL:-BAAI/bge-reranker-base}
+    volumes:
+      - hf_model_cache:/models/huggingface
     expose:
       - "8000"
     depends_on:
@@ -117,3 +125,4 @@ volumes:
   etcd_data:
   minio_data:
   milvus_data:
+  hf_model_cache:

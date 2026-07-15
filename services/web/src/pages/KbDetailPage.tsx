@@ -3,16 +3,28 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   getKnowledgeBase,
   listIngestJobs,
+  listOpsMetadata,
   listVectorCleanupTasks,
   reindexKnowledgeBase,
   retryIngestJob,
   retryVectorCleanupTask,
 } from '@/api/knowledgeBase'
-import { deleteDocument, getIngestJob, listDocuments, uploadDocuments } from '@/api/documents'
-import type { Document, IngestJob, KnowledgeBase, VectorCleanupTask } from '@/types'
+import { deleteDocument, getDocumentIndexDetail, getIngestJob, listDocuments, uploadDocuments } from '@/api/documents'
+import type {
+  Document,
+  DocumentIndexDetail,
+  IngestJob,
+  KnowledgeBase,
+  OpsGuardrails,
+  VectorCleanupTask,
+} from '@/types'
 import { AppLayout } from '@/components/AppLayout'
 import { ChatPanel } from '@/components/ChatPanel'
 import { DocTable } from '@/components/DocTable'
+import { DocumentIndexDetailPanel } from '@/components/DocumentIndexDetailPanel'
+import { RagEvalPanel } from '@/components/RagEvalPanel'
+import { RetrievalProfilePanel } from '@/components/RetrievalProfilePanel'
+import { SparseMigrationPanel } from '@/components/SparseMigrationPanel'
 import { UploadZone } from '@/components/UploadZone'
 import { useToast } from '@/components/Toast'
 import { Button } from '@/components/ui/button'
@@ -21,6 +33,7 @@ import { cn } from '@/lib/utils'
 import {
   AlertTriangle,
   ArrowLeft,
+  BarChart3,
   FileText,
   Loader2,
   MessageSquare,
@@ -28,7 +41,7 @@ import {
   RotateCcw,
 } from 'lucide-react'
 
-type Tab = 'documents' | 'chat'
+type Tab = 'documents' | 'chat' | 'eval'
 
 export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const { kbId } = useParams<{ kbId: string }>()
@@ -37,15 +50,19 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const [documents, setDocuments] = useState<Document[]>([])
   const [ingestJobs, setIngestJobs] = useState<IngestJob[]>([])
   const [vectorCleanupTasks, setVectorCleanupTasks] = useState<VectorCleanupTask[]>([])
+  const [guardrails, setGuardrails] = useState<OpsGuardrails | null>(null)
   const [jobStages, setJobStages] = useState<Record<string, string | null>>({})
-  const [tab, setTab] = useState<Tab>(() =>
-    searchParams.get('tab') === 'chat' ? 'chat' : 'documents',
-  )
+  const [tab, setTab] = useState<Tab>(() => {
+    const initialTab = searchParams.get('tab')
+    return initialTab === 'chat' || initialTab === 'eval' ? initialTab : 'documents'
+  })
   const [loading, setLoading] = useState(true)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [reindexing, setReindexing] = useState(false)
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
   const [retryingCleanupTaskId, setRetryingCleanupTaskId] = useState<string | null>(null)
+  const [indexDetail, setIndexDetail] = useState<DocumentIndexDetail | null>(null)
+  const [indexDetailLoadingId, setIndexDetailLoadingId] = useState<string | null>(null)
   const { showError, showSuccess } = useToast()
 
   const completedCount = documents.filter((d) => d.status === 'COMPLETED').length
@@ -106,6 +123,15 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
     }
   }, [showError])
 
+  const loadGuardrails = useCallback(async () => {
+    try {
+      const metadata = await listOpsMetadata()
+      setGuardrails(metadata.guardrails ?? null)
+    } catch {
+      setGuardrails(null)
+    }
+  }, [])
+
   useEffect(() => {
     const init = async () => {
       setLoading(true)
@@ -113,15 +139,16 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       await loadDocs()
       await loadJobs()
       await loadVectorCleanupTasks()
+      await loadGuardrails()
       setLoading(false)
     }
     init()
-  }, [loadKb, loadDocs, loadJobs, loadVectorCleanupTasks])
+  }, [loadGuardrails, loadKb, loadDocs, loadJobs, loadVectorCleanupTasks])
 
   useEffect(() => {
     const urlTab = searchParams.get('tab')
-    if (urlTab === 'chat') {
-      setTab('chat')
+    if (urlTab === 'chat' || urlTab === 'eval') {
+      setTab(urlTab)
     }
   }, [searchParams])
 
@@ -142,8 +169,8 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
 
   const switchTab = (next: Tab) => {
     setTab(next)
-    if (next === 'chat') {
-      setSearchParams({ tab: 'chat' }, { replace: true })
+    if (next === 'chat' || next === 'eval') {
+      setSearchParams({ tab: next }, { replace: true })
     } else {
       setSearchParams({}, { replace: true })
     }
@@ -202,6 +229,18 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       showError(e instanceof Error ? e.message : '删除失败')
     } finally {
       setDeletingId(null)
+    }
+  }
+
+  const handleInspectDocument = async (doc: Document) => {
+    if (!kbId) return
+    setIndexDetailLoadingId(doc.id)
+    try {
+      setIndexDetail(await getDocumentIndexDetail(kbId, doc.id))
+    } catch (e) {
+      showError(e instanceof Error ? e.message : '加载索引详情失败')
+    } finally {
+      setIndexDetailLoadingId(null)
     }
   }
 
@@ -313,6 +352,18 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
               <span className="ml-1 rounded-full bg-secondary px-1.5 py-0.5 text-[11px] font-normal text-muted-foreground">
                 {completedCount}
               </span>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                'flex-1 rounded-lg px-3 md:flex-none',
+                tab === 'eval' && 'bg-background shadow-sm',
+              )}
+              onClick={() => switchTab('eval')}
+            >
+              <BarChart3 className="h-4 w-4" />
+              RAG 评估
             </Button>
           </div>
         </div>
@@ -454,16 +505,27 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
               </div>
             )}
           </div>
-          <UploadZone onUpload={handleUpload} />
+          <UploadZone onUpload={handleUpload} guardrails={guardrails} />
           <DocTable
             documents={documents}
             jobStages={jobStages}
+            ingestJobs={ingestJobs}
+            onInspect={handleInspectDocument}
             onDelete={handleDelete}
             deletingId={deletingId}
           />
+          {indexDetailLoadingId && (
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-background p-4 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading index detail...
+            </div>
+          )}
+          {indexDetail && <DocumentIndexDetailPanel detail={indexDetail} />}
         </div>
-      ) : (
+      ) : tab === 'chat' ? (
         <ChatPanel kbId={kbId!} completedDocCount={completedCount} />
+      ) : (
+        <><RagEvalPanel kbId={kbId!} /><RetrievalProfilePanel kbId={kbId!} /><SparseMigrationPanel kbId={kbId!} /></>
       )}
     </AppLayout>
   )

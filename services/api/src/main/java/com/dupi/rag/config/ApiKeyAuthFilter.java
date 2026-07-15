@@ -82,9 +82,12 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
                 reject(response, "Unauthorized API request");
                 return;
             }
-            String requiredPermission = requiredPermission(request);
-            if (!requiredPermission.isBlank() && !SecurityContext.hasPermission(requiredPermission)) {
-                reject(response, HttpStatus.FORBIDDEN, "forbidden", "permission required: " + requiredPermission);
+            String missingPermission = requiredPermissions(request).stream()
+                    .filter(permission -> !SecurityContext.hasPermission(permission))
+                    .findFirst()
+                    .orElse("");
+            if (!missingPermission.isBlank()) {
+                reject(response, HttpStatus.FORBIDDEN, "forbidden", "permission required: " + missingPermission);
                 return;
             }
             String requiredKnowledgeBaseId = requiredKnowledgeBaseId(request);
@@ -202,49 +205,83 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
         return "";
     }
 
-    private String requiredPermission(HttpServletRequest request) {
+    private List<String> requiredPermissions(HttpServletRequest request) {
         String method = request.getMethod();
         String uri = request.getRequestURI();
         // 集中式路由权限映射：先在过滤器层拦截高风险动作，避免控制器遗漏权限判断。
         // 当前设计是轻量 RBAC + 权限点模型，ADMIN 在 SecurityContext 中映射为通配权限。
+        if ("POST".equalsIgnoreCase(method) && "/api/v1/ops/audit-alerts/notify".equals(uri)) {
+            return List.of("OPS_ADMIN", "OPS_AUDIT_READ", "OPS_ALERT_NOTIFY");
+        }
         if (uri.startsWith("/api/v1/ops/")) {
-            return "OPS_ADMIN";
+            return List.of("OPS_ADMIN");
+        }
+        if ("POST".equalsIgnoreCase(method) && "/api/v1/knowledge-bases/import".equals(uri)) {
+            return List.of("KB_WRITE");
+        }
+        if (uri.contains("/retrieval-profiles")) {
+            if ("POST".equalsIgnoreCase(method)
+                    && (uri.endsWith("/activate") || uri.endsWith("/rollback"))) {
+                return List.of("OPS_ADMIN", "KB_READ");
+            }
+            if ("POST".equalsIgnoreCase(method)) {
+                return List.of("KB_WRITE");
+            }
+        }
+        if (uri.contains("/sparse-migrations") && "POST".equalsIgnoreCase(method)) {
+            return List.of("OPS_ADMIN", "KB_READ");
+        }
+        if (uri.contains("/rag-eval/")) {
+            if ("POST".equalsIgnoreCase(method) && uri.endsWith("/baseline")) {
+                return List.of("OPS_ADMIN", "KB_READ");
+            }
+            if ("POST".equalsIgnoreCase(method) && uri.endsWith("/runs")) {
+                return List.of("MAINTENANCE", "KB_READ");
+            }
+            if ("POST".equalsIgnoreCase(method)
+                    || "PATCH".equalsIgnoreCase(method)
+                    || "DELETE".equalsIgnoreCase(method)) {
+                return List.of("KB_WRITE");
+            }
         }
         if ("DELETE".equalsIgnoreCase(method) && uri.startsWith("/api/v1/knowledge-bases/")) {
             if (uri.contains("/documents/")) {
-                return "DOCUMENT_DELETE";
+                return List.of("DOCUMENT_DELETE");
             }
             if (uri.contains("/chat-sessions")) {
-                return "CHAT_DELETE";
+                return List.of("CHAT_DELETE");
             }
-            return "KB_DELETE";
+            return List.of("KB_DELETE");
         }
         if ("POST".equalsIgnoreCase(method) && uri.matches(".*/ingest-jobs/[^/]+/retry$")) {
-            return "MAINTENANCE";
+            return List.of("MAINTENANCE");
         }
         if ("POST".equalsIgnoreCase(method) && uri.endsWith("/reindex")) {
-            return "MAINTENANCE";
+            return List.of("MAINTENANCE");
         }
         if ("POST".equalsIgnoreCase(method) && uri.contains("/documents")) {
-            return "DOCUMENT_UPLOAD";
+            return List.of("DOCUMENT_UPLOAD");
         }
         if ("POST".equalsIgnoreCase(method) && uri.endsWith("/chat")) {
-            return "CHAT_WRITE";
+            return List.of("CHAT_WRITE");
         }
         if ("POST".equalsIgnoreCase(method) && uri.endsWith("/retrieve")) {
-            return "KB_READ";
+            return List.of("KB_READ");
         }
         if ("GET".equalsIgnoreCase(method) && uri.startsWith("/api/v1/knowledge-bases")) {
-            return "KB_READ";
+            return List.of("KB_READ");
         }
         if ("POST".equalsIgnoreCase(method) && "/api/v1/knowledge-bases".equals(uri)) {
-            return "KB_WRITE";
+            return List.of("KB_WRITE");
         }
-        return "";
+        return List.of();
     }
 
     private String requiredKnowledgeBaseId(HttpServletRequest request) {
         String uri = request.getRequestURI();
+        if ("/api/v1/knowledge-bases/import".equals(uri)) {
+            return "";
+        }
         String prefix = "/api/v1/knowledge-bases/";
         if (!uri.startsWith(prefix)) {
             return "";

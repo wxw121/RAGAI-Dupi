@@ -5,6 +5,7 @@ import com.dupi.rag.config.SecurityContext;
 import com.dupi.rag.domain.entity.VectorCleanupTask;
 import com.dupi.rag.domain.enums.VectorCleanupStatus;
 import com.dupi.rag.domain.enums.VectorCleanupTargetType;
+import com.dupi.rag.dto.AuditAlertResponse;
 import com.dupi.rag.dto.VectorCleanupTaskResponse;
 import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.VectorCleanupTaskRepository;
@@ -56,6 +57,24 @@ public class VectorCleanupTaskService {
                 .filter(this::canAccessTask)
                 .map(this::toResponse)
                 .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public java.util.List<AuditAlertResponse> summarizeAlerts() {
+        long openFailures = repository.countByStatusIn(java.util.List.of(
+                VectorCleanupStatus.PENDING,
+                VectorCleanupStatus.FAILED
+        ));
+        if (openFailures <= 0) {
+            return java.util.List.of();
+        }
+        return java.util.List.of(AuditAlertResponse.builder()
+                .code("VECTOR_CLEANUP_FAILURES_OPEN")
+                .severity("WARN")
+                .message("Open vector cleanup tasks need operator review")
+                .count(openFailures)
+                .threshold(0)
+                .build());
     }
 
     @Transactional

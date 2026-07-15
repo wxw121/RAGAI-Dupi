@@ -49,6 +49,7 @@ public class MilvusVectorService {
             validateExistingCollectionSchema(collection);
             client.loadCollection(LoadCollectionParam.newBuilder()
                     .withCollectionName(collection)
+                    .withSyncLoad(false)
                     .build());
             return;
         }
@@ -104,8 +105,9 @@ public class MilvusVectorService {
         client.createIndex(index);
         client.loadCollection(LoadCollectionParam.newBuilder()
                 .withCollectionName(collection)
+                .withSyncLoad(false)
                 .build());
-        log.info("Milvus collection {} ready", collection);
+        log.info("Milvus collection {} load requested asynchronously", collection);
     }
 
     private void validateExistingCollectionSchema(String collection) {
@@ -254,6 +256,31 @@ public class MilvusVectorService {
                 .withExpr("doc_id == \"" + docId + "\"")
                 .build();
         deleteStrict(param);
+    }
+
+    public void deleteSparseByDocId(UUID kbId, UUID docId, java.util.Collection<Integer> profileVersions) {
+        for (Integer version : profileVersions) {
+            DeleteParam param = DeleteParam.newBuilder()
+                    .withCollectionName(sparseCollection(kbId, version))
+                    .withExpr("doc_id == \"" + docId + "\"")
+                    .build();
+            deleteStrict(param);
+        }
+    }
+
+    public void deleteSparseByKbId(UUID kbId, java.util.Collection<Integer> profileVersions) {
+        for (Integer version : profileVersions) {
+            DeleteParam param = DeleteParam.newBuilder()
+                    .withCollectionName(sparseCollection(kbId, version))
+                    .withExpr("kb_id == \"" + kbId + "\"")
+                    .build();
+            deleteStrict(param);
+        }
+    }
+
+    private String sparseCollection(UUID kbId, Integer version) {
+        return properties.getCollection() + "_sparse_" + kbId.toString().replace("-", "").toLowerCase()
+                + "_v" + version;
     }
 
     public void deleteByKbId(UUID kbId) {

@@ -23,6 +23,7 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
   const [chunkSize, setChunkSize] = useState(512)
   const [chunkOverlap, setChunkOverlap] = useState(64)
   const [topK, setTopK] = useState(5)
+  const [retrievalMode, setRetrievalMode] = useState<'VECTOR' | 'HYBRID'>('VECTOR')
   const { showError, showSuccess } = useToast()
 
   const load = useCallback(async () => {
@@ -50,11 +51,13 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
         chunkSize,
         chunkOverlap,
         topK,
+        retrievalMode,
       })
       showSuccess('知识库创建成功')
       setDialogOpen(false)
       setName('')
       setDescription('')
+      setRetrievalMode('VECTOR')
       await load()
     } catch (e) {
       showError(e instanceof Error ? e.message : '创建失败')
@@ -208,6 +211,22 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
               placeholder="可选"
               rows={2}
             />
+          </div>
+          <div>
+            <label htmlFor="retrieval-mode" className="mb-1 block text-sm font-medium">检索模式</label>
+            <select
+              id="retrieval-mode"
+              name="retrievalMode"
+              value={retrievalMode}
+              onChange={(event) => setRetrievalMode(event.target.value as 'VECTOR' | 'HYBRID')}
+              className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+            >
+              <option value="VECTOR">向量检索</option>
+              <option value="HYBRID">混合检索（向量 + 关键词）</option>
+            </select>
+            <p className="mt-1 text-xs text-muted-foreground">
+              混合检索适合同时依赖语义和精确关键词的知识库。
+            </p>
           </div>
           <div className="grid grid-cols-3 gap-3">
             <div>

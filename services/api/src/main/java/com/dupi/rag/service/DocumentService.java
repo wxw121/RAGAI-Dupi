@@ -14,6 +14,7 @@ import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
+import com.dupi.rag.repository.RetrievalProfileRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -40,6 +41,7 @@ public class DocumentService {
     private final DocumentTombstoneService documentTombstoneService;
     private final VectorCleanupTaskService vectorCleanupTaskService;
     private final AuditLogService auditLogService;
+    private final RetrievalProfileRepository retrievalProfileRepository;
 
     @Transactional
     public DocumentResponse upload(UUID kbId, MultipartFile file) {
@@ -155,6 +157,9 @@ public class DocumentService {
         vectorCleanupTaskService.enqueueDocument(docId);
         try {
             milvusVectorService.deleteByDocId(docId);
+            milvusVectorService.deleteSparseByDocId(kbId, docId,
+                    retrievalProfileRepository.findByKbIdOrderByVersionDesc(kbId).stream()
+                            .map(profile -> profile.getVersion()).toList());
         } catch (Exception e) {
             log.warn("Failed to delete Milvus vectors for doc {}", docId, e);
             // 删除采用“数据库为最终事实源”的容错思想：即使向量库短暂不可用，

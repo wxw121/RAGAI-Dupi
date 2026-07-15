@@ -1,12 +1,17 @@
 package com.dupi.rag.controller;
 
+import com.dupi.rag.config.AuditProperties;
+import com.dupi.rag.config.RedisQueueProperties;
+import com.dupi.rag.config.UploadRateLimitProperties;
 import com.dupi.rag.domain.enums.AuditLogStatus;
 import com.dupi.rag.dto.AccountResponse;
 import com.dupi.rag.dto.AccountUpsertRequest;
 import com.dupi.rag.dto.AuditAlertResponse;
 import com.dupi.rag.dto.AuditLogQuery;
 import com.dupi.rag.dto.AuditLogResponse;
+import com.dupi.rag.dto.OpsGuardrailsResponse;
 import com.dupi.rag.dto.OpsMetadataResponse;
+import com.dupi.rag.dto.OpsNotificationResponse;
 import com.dupi.rag.dto.PasswordResetRequest;
 import com.dupi.rag.dto.RoleRequest;
 import com.dupi.rag.dto.RoleResponse;
@@ -14,9 +19,13 @@ import com.dupi.rag.dto.VectorCleanupTaskResponse;
 import jakarta.validation.Valid;
 import com.dupi.rag.service.AccountService;
 import com.dupi.rag.service.AuditLogService;
+import com.dupi.rag.service.IngestJobService;
+import com.dupi.rag.service.OpsNotificationService;
 import com.dupi.rag.service.RoleService;
 import com.dupi.rag.service.VectorCleanupTaskService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.boot.autoconfigure.web.servlet.MultipartProperties;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -25,6 +34,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -38,6 +48,12 @@ public class OpsController {
     private final AuditLogService auditLogService;
     private final AccountService accountService;
     private final RoleService roleService;
+    private final IngestJobService ingestJobService;
+    private final UploadRateLimitProperties uploadRateLimitProperties;
+    private final RedisQueueProperties redisQueueProperties;
+    private final AuditProperties auditProperties;
+    private final MultipartProperties multipartProperties;
+    private final OpsNotificationService opsNotificationService;
 
     @GetMapping("/vector-cleanup-tasks")
     public List<VectorCleanupTaskResponse> listVectorCleanupTasks() {
@@ -78,7 +94,32 @@ public class OpsController {
 
     @GetMapping("/audit-alerts")
     public List<AuditAlertResponse> listAuditAlerts() {
-        return auditLogService.summarizeAlerts();
+        List<AuditAlertResponse> alerts = new ArrayList<>();
+        alerts.addAll(auditLogService.summarizeAlerts());
+        alerts.addAll(ingestJobService.summarizeAlerts());
+        alerts.addAll(vectorCleanupTaskService.summarizeAlerts());
+        return alerts;
+    }
+
+    @PostMapping("/audit-alerts/notify")
+    public OpsNotificationResponse notifyAuditAlerts() {
+        OpsNotificationResponse response = opsNotificationService.notifyAlerts(listAuditAlerts());
+        if (response.isDelivered()) {
+            auditLogService.recordSuccess(
+                    "AUDIT_ALERT_NOTIFY",
+                    "AUDIT_ALERT",
+                    null,
+                    "Delivered " + response.getAlertCount() + " alerts to the configured webhook"
+            );
+        } else {
+            auditLogService.recordFailure(
+                    "AUDIT_ALERT_NOTIFY",
+                    "AUDIT_ALERT",
+                    null,
+                    new IllegalStateException(response.getMessage() == null ? "webhook delivery failed" : response.getMessage())
+            );
+        }
+        return response;
     }
 
     @GetMapping("/accounts")
@@ -98,6 +139,7 @@ public class OpsController {
                         "ACCOUNT_DISABLE",
                         "ACCOUNT_ENABLE",
                         "ACCOUNT_TOKEN_ROTATE",
+                        "ACCOUNT_DELETE_E2E",
                         "ROLE_CREATE",
                         "ROLE_UPDATE",
                         "ROLE_DISABLE",
@@ -105,10 +147,12 @@ public class OpsController {
                         "KNOWLEDGE_BASE_DELETE",
                         "REINDEX",
                         "INGEST_RETRY",
-                        "VECTOR_CLEANUP_RETRY"
+                        "VECTOR_CLEANUP_RETRY",
+                        "AUDIT_ALERT_NOTIFY"
                 ))
-                .auditTargetTypes(List.of("ACCOUNT", "ROLE", "DOCUMENT", "KNOWLEDGE_BASE", "INGEST_JOB", "VECTOR_CLEANUP_TASK", "CHAT_SESSION"))
+                .auditTargetTypes(List.of("ACCOUNT", "ROLE", "DOCUMENT", "KNOWLEDGE_BASE", "INGEST_JOB", "VECTOR_CLEANUP_TASK", "CHAT_SESSION", "AUDIT_ALERT"))
                 .auditStatuses(List.of("SUCCESS", "FAILED"))
+                .guardrails(guardrails())
                 .build();
     }
 
@@ -124,6 +168,12 @@ public class OpsController {
         AccountResponse response = accountService.update(username, request);
         auditLogService.recordSuccess("ACCOUNT_UPDATE", "ACCOUNT", null, "Updated account " + response.getUsername());
         return response;
+    }
+
+    @DeleteMapping("/accounts/{username}")
+    public void deleteE2eAccount(@PathVariable String username) {
+        String deleted = accountService.deleteE2e(username);
+        auditLogService.recordSuccess("ACCOUNT_DELETE_E2E", "ACCOUNT", null, "Deleted E2E account " + deleted);
     }
 
     @PostMapping("/accounts/{username}/reset-password")
@@ -183,6 +233,29 @@ public class OpsController {
         RoleResponse response = roleService.disable(roleId);
         auditLogService.recordSuccess("ROLE_DISABLE", "ROLE", response.getId(), "Disabled role " + response.getCode());
         return response;
+    }
+
+    private OpsGuardrailsResponse guardrails() {
+        return OpsGuardrailsResponse.builder()
+                .uploadRateLimit(OpsGuardrailsResponse.UploadRateLimit.builder()
+                        .enabled(uploadRateLimitProperties.isEnabled())
+                        .requests(uploadRateLimitProperties.getRequests())
+                        .windowSeconds(uploadRateLimitProperties.getWindowSeconds())
+                        .build())
+                .ingestQueue(OpsGuardrailsResponse.IngestQueue.builder()
+                        .maxPendingJobs(redisQueueProperties.getMaxPendingJobs())
+                        .maxRecoveryAttempts(redisQueueProperties.getMaxRecoveryAttempts())
+                        .build())
+                .audit(OpsGuardrailsResponse.Audit.builder()
+                        .alertWindowMinutes(auditProperties.getAlertWindowMinutes())
+                        .alertFailedThreshold(auditProperties.getAlertFailedThreshold())
+                        .build())
+                .multipart(OpsGuardrailsResponse.Multipart.builder()
+                        .maxFileSizeBytes(multipartProperties.getMaxFileSize() == null
+                                ? 0
+                                : multipartProperties.getMaxFileSize().toBytes())
+                        .build())
+                .build();
     }
 
     private AuditLogQuery query(String tenantId, String action, String targetType, String status, Integer limit) {

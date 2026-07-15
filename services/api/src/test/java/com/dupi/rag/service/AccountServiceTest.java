@@ -17,6 +17,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -188,6 +189,37 @@ class AccountServiceTest {
                 .hasMessageContaining("password is required");
     }
 
+    @Test
+    void deletesOnlyE2ePrefixedAccountsInTheE2eTenant() {
+        InMemoryStores stores = stores();
+        AccountService service = service(new ApiSecurityProperties(), stores);
+        service.bootstrapConfiguredUsers();
+
+        service.create(account("e2e_account_42", "e2e"));
+        service.create(account("analyst", "default"));
+        service.create(account("e2e_account_default", "default"));
+
+        assertThat(service.deleteE2e("e2e_account_42")).isEqualTo("e2e_account_42");
+        assertThat(stores.users).extracting(UserAccount::getUsername)
+                .doesNotContain("e2e_account_42")
+                .contains("analyst", "e2e_account_default");
+        assertThatThrownBy(() -> service.deleteE2e("analyst"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("e2e_*");
+        assertThatThrownBy(() -> service.deleteE2e("e2e_account_default"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("e2e tenant");
+    }
+
+    private static AccountUpsertRequest account(String username, String tenantId) {
+        AccountUpsertRequest request = new AccountUpsertRequest();
+        request.setUsername(username);
+        request.setPassword("test-secret");
+        request.setTenantId(tenantId);
+        request.setRoleCode("ANALYST");
+        return request;
+    }
+
     private static AccountService service(ApiSecurityProperties properties, InMemoryStores stores) {
         RoleService roleService = new RoleService(stores.roleRepository, stores.userAccountRepository);
         return new AccountService(properties, stores.userAccountRepository, stores.roleRepository, roleService);
@@ -235,6 +267,11 @@ class AccountServiceTest {
             stores.users.add(user);
             return user;
         });
+        doAnswer(invocation -> {
+            UserAccount user = invocation.getArgument(0);
+            stores.users.removeIf(existing -> existing.getUsername().equals(user.getUsername()));
+            return null;
+        }).when(stores.userAccountRepository).delete(any(UserAccount.class));
         return stores;
     }
 
