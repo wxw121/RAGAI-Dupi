@@ -166,9 +166,10 @@ class ControllerLayerTest {
         RagEvalService ragEvalService = mock(RagEvalService.class);
         KnowledgeBaseExportService knowledgeBaseExportService = mock(KnowledgeBaseExportService.class);
         RetrievalProfileService retrievalProfileService = mock(RetrievalProfileService.class);
+        SparseMigrationService sparseMigrationService = mock(SparseMigrationService.class);
         KnowledgeBaseController controller = new KnowledgeBaseController(kbService, retrievalService, chatService,
                 ingestJobService, chatSessionService, ragEvalService, knowledgeBaseExportService,
-                retrievalProfileService);
+                retrievalProfileService, sparseMigrationService);
         UUID kbId = UUID.randomUUID();
         UUID sessionId = UUID.randomUUID();
         UUID secondSessionId = UUID.randomUUID();
@@ -225,6 +226,9 @@ class ControllerLayerTest {
         profileRequest.setFinalTopK(5);
         RetrievalProfileResponse profileResponse = RetrievalProfileResponse.builder()
                 .id(UUID.randomUUID()).kbId(kbId).name("balanced").version(1).build();
+        SparseMigrationResponse migrationResponse = SparseMigrationResponse.builder().id(UUID.randomUUID())
+                .kbId(kbId).profileId(profileResponse.getId())
+                .state(com.dupi.rag.domain.enums.SparseMigrationState.PREPARING).build();
         KnowledgeBaseExportResponse exportResponse = KnowledgeBaseExportResponse.builder()
                 .knowledgeBase(KnowledgeBaseExportResponse.KnowledgeBaseSnapshot.builder()
                         .originalId(kbId)
@@ -261,7 +265,7 @@ class ControllerLayerTest {
         when(ragEvalService.createCase(eq(kbId), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.updateCase(eq(kbId), eq(ragEvalCase.getId()), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.listRuns(kbId)).thenReturn(List.of(ragEvalRun));
-        when(ragEvalService.run(eq(kbId), eq(true), isNull())).thenReturn(ragEvalRun);
+        when(ragEvalService.run(eq(kbId), eq(true), isNull(), isNull())).thenReturn(ragEvalRun);
         when(ragEvalService.getPolicy(kbId)).thenReturn(qualityPolicy);
         when(ragEvalService.updatePolicy(kbId, qualityPolicyRequest)).thenReturn(qualityPolicy);
         when(ragEvalService.promoteBaseline(kbId, ragEvalRun.getId())).thenReturn(qualityPolicy);
@@ -270,6 +274,15 @@ class ControllerLayerTest {
         when(retrievalProfileService.create(kbId, profileRequest)).thenReturn(profileResponse);
         when(retrievalProfileService.activate(kbId, profileResponse.getId())).thenReturn(profileResponse);
         when(retrievalProfileService.rollback(kbId, profileResponse.getId())).thenReturn(profileResponse);
+        when(sparseMigrationService.list(kbId)).thenReturn(List.of(migrationResponse));
+        when(sparseMigrationService.start(kbId, profileResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.backfill(kbId, migrationResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.beginShadowValidation(kbId, migrationResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.recordShadowValidation(eq(kbId), eq(migrationResponse.getId()), any()))
+                .thenReturn(migrationResponse);
+        when(sparseMigrationService.cutover(kbId, migrationResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.complete(kbId, migrationResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.setLegacyFallback(kbId, migrationResponse.getId(), true)).thenReturn(migrationResponse);
         when(knowledgeBaseExportService.exportKnowledgeBase(kbId)).thenReturn(exportResponse);
         when(knowledgeBaseExportService.restore(importRequest)).thenReturn(kbResponse);
 
@@ -312,6 +325,15 @@ class ControllerLayerTest {
         assertThat(controller.createRetrievalProfile(kbId, profileRequest)).isSameAs(profileResponse);
         assertThat(controller.activateRetrievalProfile(kbId, profileResponse.getId())).isSameAs(profileResponse);
         assertThat(controller.rollbackRetrievalProfile(kbId, profileResponse.getId())).isSameAs(profileResponse);
+        assertThat(controller.listSparseMigrations(kbId)).containsExactly(migrationResponse);
+        assertThat(controller.startSparseMigration(kbId, profileResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.backfillSparseMigration(kbId, migrationResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.beginSparseShadowValidation(kbId, migrationResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.validateSparseMigration(kbId, migrationResponse.getId(),
+                new SparseMigrationValidationRequest())).isSameAs(migrationResponse);
+        assertThat(controller.cutoverSparseMigration(kbId, migrationResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.completeSparseMigration(kbId, migrationResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.setLegacySparseFallback(kbId, migrationResponse.getId(), true)).isSameAs(migrationResponse);
 
         verify(kbService).delete(kbId);
         verify(chatService).cancel("s1");

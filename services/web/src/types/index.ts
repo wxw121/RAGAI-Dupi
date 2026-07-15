@@ -298,10 +298,68 @@ export interface RagEvalRun {
   failureMessage: string | null
   createdAt: string
   results: RagEvalResult[]
+  gateStatus?: 'PASS' | 'WARN' | 'BLOCKED' | 'UNBASELINED'
+  metrics?: Record<string, number>
+  baselineRunId?: string | null
 }
 
 export interface RagEvalRunRequest {
   useRerank?: boolean
+  profileId?: string
+}
+
+export interface RagQualityPolicy {
+  id: string
+  kbId: string
+  minimumPassRate: number
+  maximumPassRateDrop: number
+  maximumNewFailures: number
+  blockWhenUnbaselined: boolean
+  baselineRunId: string | null
+}
+
+export type RagQualityPolicyRequest = Pick<RagQualityPolicy,
+  'minimumPassRate' | 'maximumPassRateDrop' | 'maximumNewFailures' | 'blockWhenUnbaselined'>
+
+export interface RetrievalProfile {
+  id: string
+  kbId: string
+  name: string
+  version: number
+  vectorCandidateCount: number
+  sparseCandidateCount: number
+  rrfConstant: number
+  sparseIndexParams: Record<string, unknown>
+  sparseSearchParams: Record<string, unknown>
+  rerankEnabled: boolean
+  rerankCandidateLimit: number
+  finalTopK: number
+  active: boolean
+  createdAt: string
+}
+
+export type RetrievalProfileRequest = Omit<RetrievalProfile, 'id' | 'kbId' | 'version' | 'active' | 'createdAt'>
+
+export type SparseMigrationState = 'PREPARING' | 'BACKFILLING' | 'DUAL_WRITING' |
+  'SHADOW_VALIDATING' | 'CUTOVER' | 'COMPLETED' | 'FAILED'
+
+export interface SparseMigration {
+  id: string
+  kbId: string
+  profileId: string
+  state: SparseMigrationState
+  sourceChunkCount: number
+  indexedChunkCount: number
+  expectedDimension: number | null
+  actualDimension: number | null
+  baselineP95Ms: number | null
+  candidateP95Ms: number | null
+  baselineFallbackRate: number | null
+  candidateFallbackRate: number | null
+  legacyBm25Enabled: boolean
+  errorMessage: string | null
+  createdAt: string
+  updatedAt: string
 }
 
 export interface DocumentIndexDetail {

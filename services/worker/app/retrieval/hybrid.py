@@ -8,10 +8,12 @@ import httpx
 from app.config import settings
 from app.embedder import Embedder
 from app.indexer import MilvusIndexer
+from app.reranker import RerankerLifecycle
+from app.retrieval.sparse import SparseMilvusAdapter
 
 logger = logging.getLogger(__name__)
 
-_reranker = None
+_reranker_lifecycle = RerankerLifecycle(settings.rerank_model, settings.rerank_cache_dir)
 
 
 def get_reranker():
@@ -21,15 +23,7 @@ def get_reranker():
     第一次失败后缓存 False，后续请求不再重复导入，避免检索接口被可选
     依赖拖慢或刷屏记录相同告警。
     """
-    global _reranker
-    if _reranker is None:
-        try:
-            from sentence_transformers import CrossEncoder
-            _reranker = CrossEncoder("BAAI/bge-reranker-base")
-        except Exception as exc:
-            logger.warning("Reranker not available: %s", exc)
-            _reranker = False
-    return _reranker if _reranker is not False else None
+    return _reranker_lifecycle.get_model()
 
 
 def tokenize(text: str) -> list[str]:
@@ -143,6 +137,11 @@ def hybrid_retrieve(
     final_top_k: int | None = None,
     sparse_index_params: dict | None = None,
     sparse_search_params: dict | None = None,
+    profile_version: int | None = None,
+    allow_legacy_bm25_fallback: bool = False,
+    shadow_profile_version: int | None = None,
+    shadow_sparse_index_params: dict | None = None,
+    shadow_sparse_search_params: dict | None = None,
 ) -> list[dict]:
     """执行混合检索主流程：向量召回、BM25 召回、RRF 融合、可选重排。
 
@@ -158,10 +157,33 @@ def hybrid_retrieve(
     rerank_limit = rerank_candidate_limit or max(vector_limit, sparse_limit)
     vector_hits = indexer.search(kb_id, embedder.embed(query), vector_limit)
 
-    corpus = corpus_fetcher(kb_id) if corpus_fetcher else fetch_kb_corpus(kb_id)
-
-    bm25_hits = bm25_search(corpus, query, sparse_limit, sparse_index_params, sparse_search_params)
+    shadow_sparse_hits = None
+    if shadow_profile_version is not None:
+        shadow_sparse_hits = SparseMilvusAdapter(
+            kb_id, shadow_profile_version, shadow_sparse_index_params
+        ).search(kb_id, query, sparse_limit, shadow_sparse_search_params)
+        corpus = corpus_fetcher(kb_id) if corpus_fetcher else fetch_kb_corpus(kb_id)
+        bm25_hits = bm25_search(corpus, query, sparse_limit, sparse_index_params, sparse_search_params)
+    else:
+        try:
+            if profile_version is None:
+                raise ValueError("Sparse retrieval requires a profile version")
+            bm25_hits = SparseMilvusAdapter(kb_id, profile_version, sparse_index_params).search(
+                kb_id, query, sparse_limit, sparse_search_params
+            )
+        except Exception as exc:
+            if not allow_legacy_bm25_fallback and corpus_fetcher is None:
+                raise
+            logger.warning("Sparse retrieval unavailable; using temporary legacy BM25 fallback: %s", exc)
+            corpus = corpus_fetcher(kb_id) if corpus_fetcher else fetch_kb_corpus(kb_id)
+            bm25_hits = bm25_search(corpus, query, sparse_limit, sparse_index_params, sparse_search_params)
     fused = rrf_fusion(vector_hits, bm25_hits, k=rrf_constant)
+    if shadow_sparse_hits is not None:
+        shadow_ranks = {hit["chunk_id"]: rank for rank, hit in enumerate(shadow_sparse_hits, start=1)}
+        for hit in fused:
+            hit["shadow_sparse_rank"] = shadow_ranks.get(hit["chunk_id"])
+            if hit["shadow_sparse_rank"] is not None:
+                hit["shadow_rank_delta"] = hit["fusion_rank"] - hit["shadow_sparse_rank"]
 
     if use_rerank:
         return rerank_hits(query, fused[:rerank_limit], output_limit)

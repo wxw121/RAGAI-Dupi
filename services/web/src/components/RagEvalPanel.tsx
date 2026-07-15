@@ -4,14 +4,17 @@ import {
   deleteRagEvalCase,
   listRagEvalCases,
   listRagEvalRuns,
+  getRagQualityPolicy,
+  promoteRagEvalBaseline,
   runRagEval,
+  updateRagQualityPolicy,
   updateRagEvalCase,
 } from '@/api/knowledgeBase'
 import { useToast } from '@/components/Toast'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import type { RagEvalCase, RagEvalCaseRequest, RagEvalRun } from '@/types'
+import type { RagEvalCase, RagEvalCaseRequest, RagEvalRun, RagQualityPolicy } from '@/types'
 import { CheckCircle2, Loader2, Pencil, Play, Save, Trash2, X, XCircle } from 'lucide-react'
 
 interface RagEvalPanelProps {
@@ -36,16 +39,18 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
   const [saving, setSaving] = useState(false)
   const [running, setRunning] = useState(false)
   const [useRerank, setUseRerank] = useState(false)
+  const [policy, setPolicy] = useState<RagQualityPolicy | null>(null)
   const { showError, showSuccess } = useToast()
 
   useEffect(() => {
     let active = true
     setLoading(true)
-    void Promise.all([listRagEvalCases(kbId), listRagEvalRuns(kbId)])
-      .then(([nextCases, nextRuns]) => {
+    void Promise.all([listRagEvalCases(kbId), listRagEvalRuns(kbId), getRagQualityPolicy(kbId)])
+      .then(([nextCases, nextRuns, nextPolicy]) => {
         if (!active) return
         setCases(nextCases)
         setRuns(nextRuns)
+        setPolicy(nextPolicy)
       })
       .catch((error: unknown) => {
         if (active) showError(error instanceof Error ? error.message : 'RAG 评估数据加载失败')
@@ -149,6 +154,25 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
     }
   }
 
+  const savePolicy = async () => {
+    if (!policy) return
+    setSaving(true)
+    try {
+      setPolicy(await updateRagQualityPolicy(kbId, policy))
+      showSuccess('质量策略已更新')
+    } catch (error) { showError(error instanceof Error ? error.message : '质量策略更新失败') }
+    finally { setSaving(false) }
+  }
+
+  const promoteBaseline = async (runId: string) => {
+    setSaving(true)
+    try {
+      setPolicy(await promoteRagEvalBaseline(kbId, runId))
+      showSuccess('评测运行已设为基线')
+    } catch (error) { showError(error instanceof Error ? error.message : '基线设置失败') }
+    finally { setSaving(false) }
+  }
+
   return (
     <div className="mx-auto max-w-6xl space-y-6 px-4 py-6 md:px-8">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -173,6 +197,16 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
           </Button>
         </div>
       </div>
+
+      {policy && <section className="border-y border-border py-4">
+        <div className="grid gap-3 md:grid-cols-5">
+          <label className="text-xs text-muted-foreground">最低通过率<Input type="number" min={0} max={100} value={policy.minimumPassRate} onChange={(e) => setPolicy({ ...policy, minimumPassRate: Number(e.target.value) })} /></label>
+          <label className="text-xs text-muted-foreground">最大通过率下降<Input type="number" min={0} max={100} value={policy.maximumPassRateDrop} onChange={(e) => setPolicy({ ...policy, maximumPassRateDrop: Number(e.target.value) })} /></label>
+          <label className="text-xs text-muted-foreground">最大新增失败<Input type="number" min={0} value={policy.maximumNewFailures} onChange={(e) => setPolicy({ ...policy, maximumNewFailures: Number(e.target.value) })} /></label>
+          <label className="flex items-center gap-2 pt-5 text-sm"><input type="checkbox" checked={policy.blockWhenUnbaselined} onChange={(e) => setPolicy({ ...policy, blockWhenUnbaselined: e.target.checked })} />无基线时阻断</label>
+          <Button className="self-end" onClick={() => void savePolicy()} disabled={saving}><Save className="h-4 w-4" />保存策略</Button>
+        </div>
+      </section>}
 
       <section className="border-y border-border py-5">
         <div className="mb-4 flex items-center justify-between gap-3">
@@ -298,7 +332,12 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
         ) : (
           <div className="flex gap-2 overflow-x-auto pb-2">
             {runSummary.map((item) => (
-              <div key={item.id} className="min-w-44 rounded-lg border border-border px-3 py-2 text-xs">
+              <div key={item.id} className="min-w-52 rounded border border-border px-3 py-2 text-xs">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <Badge variant={item.gateStatus === 'PASS' ? 'success' : item.gateStatus === 'WARN' || item.gateStatus === 'UNBASELINED' ? 'warning' : 'error'}>{item.gateStatus ?? 'NO GATE'}</Badge>
+                  {item.gateStatus === 'PASS' && policy?.baselineRunId !== item.id && <Button size="sm" variant="ghost" onClick={() => void promoteBaseline(item.id)}>设为基线</Button>}
+                </div>
+                <p className="mb-2 font-mono text-muted-foreground">P95 {item.metrics?.latencyP95Ms ?? '-'} ms</p>
                 <div className="flex items-center justify-between gap-3">
                   <span className="font-semibold">{item.passedCount}/{item.totalCount}</span>
                   <Badge variant={item.status === 'RUNNING' ? 'warning' : item.status === 'FAILED' ? 'error' : item.passed ? 'success' : 'error'}>

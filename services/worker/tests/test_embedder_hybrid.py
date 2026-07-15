@@ -225,9 +225,42 @@ def test_hybrid_retrieve_without_rerank_fetches_default_corpus(monkeypatch):
     monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
     monkeypatch.setattr(hybrid, "fetch_kb_corpus", lambda kb_id: [{"chunk_id": "b1", "doc_id": "d", "content": "hello bm25"}])
 
-    result = hybrid.hybrid_retrieve("kb", "hello", 2, "m", 3, use_rerank=False)
+    result = hybrid.hybrid_retrieve(
+        "kb", "hello", 2, "m", 3, use_rerank=False, allow_legacy_bm25_fallback=True
+    )
 
     assert [hit["chunk_id"] for hit in result] == ["v1", "b1"]
+
+
+def test_shadow_validation_records_candidate_rank_without_changing_legacy_order(monkeypatch):
+    class FakeEmbedder:
+        def __init__(self, model): pass
+        def embed(self, query): return [0.1]
+
+    class FakeIndexer:
+        def __init__(self, dimension): pass
+        def search(self, kb_id, vector, top_k):
+            return [{"chunk_id": "legacy", "doc_id": "d", "content": "hello", "score": 0.8}]
+
+    class FakeSparse:
+        def __init__(self, kb_id, version, params): assert kb_id == "kb" and version == 7
+        def search(self, kb_id, query, top_k, params):
+            return [{"chunk_id": "candidate", "doc_id": "d", "content": "other", "score": 3.0},
+                    {"chunk_id": "legacy", "doc_id": "d", "content": "hello", "score": 2.0}]
+
+    monkeypatch.setattr(hybrid, "Embedder", FakeEmbedder)
+    monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
+    monkeypatch.setattr(hybrid, "SparseMilvusAdapter", FakeSparse)
+
+    result = hybrid.hybrid_retrieve(
+        "kb", "hello", 2, "m", 3,
+        corpus_fetcher=lambda _: [{"chunk_id": "legacy", "doc_id": "d", "content": "hello"}],
+        shadow_profile_version=7,
+    )
+
+    assert result[0]["chunk_id"] == "legacy"
+    assert result[0]["shadow_sparse_rank"] == 2
+    assert result[0]["shadow_rank_delta"] == -1
 
 
 def test_hybrid_retrieve_applies_profile_limits_and_stage_ranks(monkeypatch):

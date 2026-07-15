@@ -80,6 +80,21 @@ public class RagEvalRunResult {
     @Column(name = "top_k")
     private Integer topK;
 
+    @Column(name = "matched_rank")
+    private Integer matchedRank;
+
+    @Column(name = "vector_rank")
+    private Integer vectorRank;
+
+    @Column(name = "sparse_rank")
+    private Integer sparseRank;
+
+    @Column(name = "fusion_rank")
+    private Integer fusionRank;
+
+    @Column(name = "rerank_rank")
+    private Integer rerankRank;
+
     @Column(name = "case_fingerprint", length = 128)
     private String caseFingerprint;
 

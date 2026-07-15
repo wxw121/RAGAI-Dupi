@@ -23,6 +23,8 @@ import { ChatPanel } from '@/components/ChatPanel'
 import { DocTable } from '@/components/DocTable'
 import { DocumentIndexDetailPanel } from '@/components/DocumentIndexDetailPanel'
 import { RagEvalPanel } from '@/components/RagEvalPanel'
+import { RetrievalProfilePanel } from '@/components/RetrievalProfilePanel'
+import { SparseMigrationPanel } from '@/components/SparseMigrationPanel'
 import { UploadZone } from '@/components/UploadZone'
 import { useToast } from '@/components/Toast'
 import { Button } from '@/components/ui/button'
@@ -523,7 +525,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       ) : tab === 'chat' ? (
         <ChatPanel kbId={kbId!} completedDocCount={completedCount} />
       ) : (
-        <RagEvalPanel kbId={kbId!} />
+        <><RagEvalPanel kbId={kbId!} /><RetrievalProfilePanel kbId={kbId!} /><SparseMigrationPanel kbId={kbId!} /></>
       )}
     </AppLayout>
   )

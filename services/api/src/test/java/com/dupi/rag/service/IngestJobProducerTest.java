@@ -16,6 +16,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
+import com.dupi.rag.repository.RetrievalProfileRepository;
+import com.dupi.rag.repository.SparseMigrationRepository;
 
 class IngestJobProducerTest {
 
@@ -27,7 +29,8 @@ class IngestJobProducerTest {
         RedisQueueProperties props = new RedisQueueProperties();
         props.setIngestQueue("jobs");
         ObjectMapper mapper = new ObjectMapper();
-        IngestJobProducer producer = new IngestJobProducer(redis, props, mapper);
+        IngestJobProducer producer = new IngestJobProducer(redis, props, mapper,
+                mock(SparseMigrationRepository.class), mock(RetrievalProfileRepository.class));
         IngestJob job = IngestJob.builder().id(UUID.randomUUID()).kbId(UUID.randomUUID()).docId(UUID.randomUUID()).build();
         KnowledgeBase kb = KnowledgeBase.builder()
                 .chunkSize(300)
@@ -61,7 +64,8 @@ class IngestJobProducerTest {
         RedisQueueProperties props = new RedisQueueProperties();
         props.setIngestQueue("jobs");
         props.setMaxPendingJobs(10);
-        IngestJobProducer producer = new IngestJobProducer(redis, props, new ObjectMapper());
+        IngestJobProducer producer = new IngestJobProducer(redis, props, new ObjectMapper(),
+                mock(SparseMigrationRepository.class), mock(RetrievalProfileRepository.class));
         IngestJob job = IngestJob.builder().id(UUID.randomUUID()).kbId(UUID.randomUUID()).docId(UUID.randomUUID()).build();
         KnowledgeBase kb = KnowledgeBase.builder()
                 .chunkSize(300)

@@ -18,6 +18,11 @@ import type {
   RagEvalCaseRequest,
   RagEvalRun,
   RagEvalRunRequest,
+  RagQualityPolicy,
+  RagQualityPolicyRequest,
+  RetrievalProfile,
+  RetrievalProfileRequest,
+  SparseMigration,
   RetrieveRequest,
   RetrieveResponse,
   Role,
@@ -94,6 +99,62 @@ export function listRagEvalRuns(kbId: string): Promise<RagEvalRun[]> {
 
 export function runRagEval(kbId: string, request: RagEvalRunRequest = {}): Promise<RagEvalRun> {
   return apiPost<RagEvalRun>(`${BASE}/${kbId}/rag-eval/runs`, request)
+}
+
+export function getRagQualityPolicy(kbId: string): Promise<RagQualityPolicy> {
+  return apiGet<RagQualityPolicy>(`${BASE}/${kbId}/rag-eval/policy`)
+}
+
+export function updateRagQualityPolicy(kbId: string, request: RagQualityPolicyRequest): Promise<RagQualityPolicy> {
+  return apiPatch<RagQualityPolicy>(`${BASE}/${kbId}/rag-eval/policy`, request)
+}
+
+export function promoteRagEvalBaseline(kbId: string, runId: string): Promise<RagQualityPolicy> {
+  return apiPost<RagQualityPolicy>(`${BASE}/${kbId}/rag-eval/runs/${runId}/baseline`)
+}
+
+export function listRetrievalProfiles(kbId: string): Promise<RetrievalProfile[]> {
+  return apiGet<RetrievalProfile[]>(`${BASE}/${kbId}/retrieval-profiles`)
+}
+
+export function createRetrievalProfile(kbId: string, request: RetrievalProfileRequest): Promise<RetrievalProfile> {
+  return apiPost<RetrievalProfile>(`${BASE}/${kbId}/retrieval-profiles`, request)
+}
+
+export function activateRetrievalProfile(kbId: string, profileId: string): Promise<RetrievalProfile> {
+  return apiPost<RetrievalProfile>(`${BASE}/${kbId}/retrieval-profiles/${profileId}/activate`)
+}
+
+export function rollbackRetrievalProfile(kbId: string, profileId: string): Promise<RetrievalProfile> {
+  return apiPost<RetrievalProfile>(`${BASE}/${kbId}/retrieval-profiles/${profileId}/rollback`)
+}
+
+export function listSparseMigrations(kbId: string): Promise<SparseMigration[]> {
+  return apiGet<SparseMigration[]>(`${BASE}/${kbId}/sparse-migrations`)
+}
+
+export function startSparseMigration(kbId: string, profileId: string): Promise<SparseMigration> {
+  return apiPost<SparseMigration>(`${BASE}/${kbId}/sparse-migrations?profileId=${encodeURIComponent(profileId)}`)
+}
+
+export function backfillSparseMigration(kbId: string, migrationId: string): Promise<SparseMigration> {
+  return apiPost<SparseMigration>(`${BASE}/${kbId}/sparse-migrations/${migrationId}/backfill`)
+}
+
+export function beginSparseShadowValidation(kbId: string, migrationId: string): Promise<SparseMigration> {
+  return apiPost<SparseMigration>(`${BASE}/${kbId}/sparse-migrations/${migrationId}/shadow`)
+}
+
+export function cutoverSparseMigration(kbId: string, migrationId: string): Promise<SparseMigration> {
+  return apiPost<SparseMigration>(`${BASE}/${kbId}/sparse-migrations/${migrationId}/cutover`)
+}
+
+export function completeSparseMigration(kbId: string, migrationId: string): Promise<SparseMigration> {
+  return apiPost<SparseMigration>(`${BASE}/${kbId}/sparse-migrations/${migrationId}/complete`)
+}
+
+export function setLegacySparseFallback(kbId: string, migrationId: string, enabled: boolean): Promise<SparseMigration> {
+  return apiPost<SparseMigration>(`${BASE}/${kbId}/sparse-migrations/${migrationId}/legacy-fallback?enabled=${enabled}`)
 }
 
 export function listVectorCleanupTasks(): Promise<VectorCleanupTask[]> {

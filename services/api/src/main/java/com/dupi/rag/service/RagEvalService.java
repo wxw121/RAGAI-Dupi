@@ -8,6 +8,7 @@ import com.dupi.rag.domain.entity.RetrievalProfile;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
 import com.dupi.rag.domain.enums.RagEvalComparisonStatus;
 import com.dupi.rag.domain.enums.RagQualityGateStatus;
+import com.dupi.rag.domain.enums.RetrievalMode;
 import com.dupi.rag.dto.RagEvalCaseRequest;
 import com.dupi.rag.dto.RagEvalCaseResponse;
 import com.dupi.rag.dto.RagEvalRunResponse;
@@ -89,10 +90,17 @@ public class RagEvalService {
     }
 
     public RagEvalRunResponse run(UUID kbId, boolean useRerank) {
-        return run(kbId, useRerank, null);
+        return run(kbId, useRerank, null, null);
     }
 
     public RagEvalRunResponse run(UUID kbId, boolean useRerank, UUID profileId) {
+        return run(kbId, useRerank, profileId, null);
+    }
+
+    public RagEvalRunResponse run(UUID kbId, boolean useRerank, UUID profileId, RetrievalMode retrievalMode) {
+        if (profileId != null && retrievalMode == RetrievalMode.VECTOR) {
+            throw new IllegalArgumentException("VECTOR evaluation cannot use a retrieval profile");
+        }
         List<RagEvalCase> cases = caseCoordinator.loadOrSeed(kbId);
         RetrievalProfile profile = profileId == null ? null : retrievalProfileService.find(kbId, profileId);
         boolean effectiveRerank = profile == null ? useRerank : Boolean.TRUE.equals(profile.getRerankEnabled());
@@ -121,7 +129,7 @@ public class RagEvalService {
         List<RagEvalRunResult> results = new ArrayList<>();
         try {
             for (RagEvalCase evalCase : cases) {
-                results.add(evaluate(kbId, run.getId(), evalCase, effectiveRerank, profile));
+                results.add(evaluate(kbId, run.getId(), evalCase, effectiveRerank, profile, retrievalMode));
             }
             RagQualityGateService.ComparisonReport comparison = baselineRun == null
                     ? null
@@ -158,7 +166,7 @@ public class RagEvalService {
     }
 
     private RagEvalRunResult evaluate(UUID kbId, UUID runId, RagEvalCase evalCase, boolean useRerank,
-                                      RetrievalProfile profile) {
+                                      RetrievalProfile profile, RetrievalMode retrievalMode) {
         long startedAt = System.nanoTime();
         List<String> failureReasons = new ArrayList<>();
         RetrieveResponse response = null;
@@ -171,11 +179,18 @@ public class RagEvalService {
             request.setQuery(evalCase.getQuery());
             request.setTopK(safeTopK(evalCase));
             request.setUseRerank(useRerank);
-            response = profile == null
+            response = profile != null
+                    ? retrievalService.retrieveForProfile(kbId, request, profile.getId())
+                    : retrievalMode == null
                     ? retrievalService.retrieve(kbId, request)
-                    : retrievalService.retrieveForProfile(kbId, request, profile.getId());
+                    : retrievalService.retrieveForEvaluation(kbId, request, retrievalMode);
             hits = response.getHits() == null ? List.of() : response.getHits();
-            if (hits.size() < safeMinHits(evalCase)) {
+            boolean expectsNoHits = safeMinHits(evalCase) == 0
+                    && (evalCase.getExpectedFileName() == null || evalCase.getExpectedFileName().isBlank())
+                    && (evalCase.getMustContainAny() == null || evalCase.getMustContainAny().isEmpty());
+            if (expectsNoHits && !hits.isEmpty()) {
+                failureReasons.add("expected no hits, got " + hits.size());
+            } else if (hits.size() < safeMinHits(evalCase)) {
                 failureReasons.add("expected at least " + safeMinHits(evalCase) + " hits, got " + hits.size());
             }
             matchedFile = matchFile(evalCase, hits, failureReasons);
@@ -187,6 +202,7 @@ public class RagEvalService {
         Map<String, Object> diagnostics = response == null || response.getDiagnostics() == null
                 ? Map.of()
                 : response.getDiagnostics();
+        RankEvidence ranks = rankEvidence(evalCase, hits);
         return RagEvalRunResult.builder()
                 .runId(runId)
                 .caseId(evalCase.getId())
@@ -206,6 +222,11 @@ public class RagEvalService {
                 .embeddingModel(stringDiagnostic(diagnostics, "embeddingModel", null))
                 .embeddingDimension(intDiagnostic(diagnostics, "embeddingDimension"))
                 .topK(safeTopK(evalCase))
+                .matchedRank(ranks.matchedRank())
+                .vectorRank(ranks.vectorRank())
+                .sparseRank(ranks.sparseRank())
+                .fusionRank(ranks.fusionRank())
+                .rerankRank(ranks.rerankRank())
                 .latencyMs(Math.max(0L, (System.nanoTime() - startedAt) / 1_000_000L))
                 .createdAt(Instant.now())
                 .build();
@@ -549,11 +570,43 @@ public class RagEvalService {
                 .embeddingModel(result.getEmbeddingModel())
                 .embeddingDimension(result.getEmbeddingDimension())
                 .topK(result.getTopK())
+                .matchedRank(result.getMatchedRank())
+                .vectorRank(result.getVectorRank())
+                .sparseRank(result.getSparseRank())
+                .fusionRank(result.getFusionRank())
+                .rerankRank(result.getRerankRank())
                 .caseFingerprint(result.getCaseFingerprint())
                 .comparisonStatus(result.getComparisonStatus())
                 .latencyMs(result.getLatencyMs())
                 .build();
     }
+
+    private RankEvidence rankEvidence(RagEvalCase evalCase, List<RetrievalHit> hits) {
+        for (int index = 0; index < hits.size(); index++) {
+            RetrievalHit hit = hits.get(index);
+            boolean matchesFile = evalCase.getExpectedFileName() != null
+                    && evalCase.getExpectedFileName().equals(hit.getFileName());
+            boolean matchesToken = evalCase.getMustContainAny() != null && hit.getContent() != null
+                    && evalCase.getMustContainAny().stream().filter(java.util.Objects::nonNull)
+                    .anyMatch(token -> hit.getContent().toLowerCase(Locale.ROOT).contains(token.toLowerCase(Locale.ROOT)));
+            boolean unconstrained = evalCase.getExpectedFileName() == null
+                    && (evalCase.getMustContainAny() == null || evalCase.getMustContainAny().isEmpty());
+            if (matchesFile || matchesToken || unconstrained) {
+                Map<?, ?> stages = hit.getMetadata() != null && hit.getMetadata().get("retrievalStages") instanceof Map<?, ?> map
+                        ? map : Map.of();
+                return new RankEvidence(index + 1, number(stages.get("vectorRank")), number(stages.get("sparseRank")),
+                        number(stages.get("fusionRank")), number(stages.get("rerankRank")));
+            }
+        }
+        return new RankEvidence(null, null, null, null, null);
+    }
+
+    private Integer number(Object value) {
+        return value instanceof Number number ? number.intValue() : null;
+    }
+
+    private record RankEvidence(Integer matchedRank, Integer vectorRank, Integer sparseRank,
+                                Integer fusionRank, Integer rerankRank) {}
 
     private RagQualityPolicyResponse toPolicyResponse(RagQualityPolicy policy) {
         return RagQualityPolicyResponse.builder()

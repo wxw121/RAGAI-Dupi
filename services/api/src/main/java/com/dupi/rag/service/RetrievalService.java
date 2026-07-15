@@ -13,6 +13,8 @@ import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.dto.RetrieveResponse;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
+import com.dupi.rag.repository.SparseMigrationRepository;
+import com.dupi.rag.domain.enums.SparseMigrationState;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -58,6 +60,7 @@ public class RetrievalService {
     private final RagProperties ragProperties;
     private final WebClient.Builder webClientBuilder;
     private final RetrievalProfileService retrievalProfileService;
+    private final SparseMigrationRepository sparseMigrationRepository;
 
     @Value("${dupi.worker.base-url:http://worker:8000}")
     private String workerBaseUrl;
@@ -73,13 +76,23 @@ public class RetrievalService {
         return retrieve(kb, request, retrievalProfileService.find(kbId, profileId));
     }
 
+    public RetrieveResponse retrieveForEvaluation(UUID kbId, RetrieveRequest request, RetrievalMode mode) {
+        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
+        return retrieve(kb, request, mode == RetrievalMode.HYBRID ? retrievalProfileService.resolveActive(kb) : null, mode);
+    }
+
     private RetrieveResponse retrieve(KnowledgeBase kb, RetrieveRequest request, RetrievalProfile profile) {
+        return retrieve(kb, request, profile, kb.getRetrievalMode());
+    }
+
+    private RetrieveResponse retrieve(KnowledgeBase kb, RetrieveRequest request, RetrievalProfile profile,
+                                      RetrievalMode mode) {
         UUID kbId = kb.getId();
         int topK = profile == null
                 ? clampTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK())
                 : clampTopK(profile.getFinalTopK());
 
-        if (profile != null || kb.getRetrievalMode() == RetrievalMode.HYBRID || Boolean.TRUE.equals(request.getUseRerank())) {
+        if (profile != null || mode == RetrievalMode.HYBRID || Boolean.TRUE.equals(request.getUseRerank())) {
             boolean useRerank = profile == null
                     ? Boolean.TRUE.equals(request.getUseRerank())
                     : Boolean.TRUE.equals(profile.getRerankEnabled());
@@ -143,6 +156,19 @@ public class RetrievalService {
             body.put("rerank_candidate_limit", profile.getRerankCandidateLimit());
             body.put("final_top_k", profile.getFinalTopK());
         }
+        var validatingMigration = sparseMigrationRepository
+                .findTopByKbIdAndStateInOrderByCreatedAtDesc(kb.getId(), List.of(
+                        SparseMigrationState.DUAL_WRITING, SparseMigrationState.SHADOW_VALIDATING));
+        boolean allowLegacyFallback = profile == null || validatingMigration
+                .map(migration -> Boolean.TRUE.equals(migration.getLegacyBm25Enabled())).orElse(false);
+        body.put("allow_legacy_bm25_fallback", allowLegacyFallback);
+        validatingMigration.filter(migration -> migration.getState() == SparseMigrationState.SHADOW_VALIDATING)
+                .ifPresent(migration -> {
+                    RetrievalProfile shadowProfile = retrievalProfileService.find(kb.getId(), migration.getProfileId());
+                    body.put("shadow_profile_version", shadowProfile.getVersion());
+                    body.put("shadow_sparse_index_params", shadowProfile.getSparseIndexParams());
+                    body.put("shadow_sparse_search_params", shadowProfile.getSparseSearchParams());
+                });
 
         @SuppressWarnings("unchecked")
         Map<String, Object> response = webClientBuilder.build()
@@ -180,14 +206,17 @@ public class RetrievalService {
                     .build();
         }).toList();
 
-        Map<String, Object> diagnostics = diagnostics(kb, useRerank ? "hybrid_rerank" : "hybrid",
+        boolean rerankApplied = Boolean.TRUE.equals(response.get("rerank_applied"));
+        String retrievalMode = rerankApplied ? "hybrid_rerank" : "hybrid";
+        Map<String, Object> diagnostics = diagnostics(kb, retrievalMode,
                 topK, hits.size(), stringValue(response.get("fallback_reason")));
+        diagnostics.put("rerankApplied", rerankApplied);
         if (profile != null) diagnostics.put("profileVersion", profile.getVersion());
         if (!rawHits.isEmpty()) diagnostics.putAll(stageDiagnostics(rawHits.get(0)));
 
         return RetrieveResponse.builder()
                 .query(query)
-                .retrievalMode(useRerank ? "hybrid_rerank" : "hybrid")
+                .retrievalMode(retrievalMode)
                 .hits(hits)
                 .diagnostics(diagnostics)
                 .build();
@@ -201,6 +230,8 @@ public class RetrievalService {
         copyStage(hit, stages, "fusion_rank", "fusionRank");
         copyStage(hit, stages, "rerank_score", "rerankScore");
         copyStage(hit, stages, "rerank_rank", "rerankRank");
+        copyStage(hit, stages, "shadow_sparse_rank", "shadowSparseRank");
+        copyStage(hit, stages, "shadow_rank_delta", "shadowRankDelta");
         return stages;
     }
 

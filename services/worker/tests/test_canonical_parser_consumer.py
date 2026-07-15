@@ -108,10 +108,10 @@ def test_process_ingest_job_success_uses_canonical_pipeline(monkeypatch):
         def __init__(self, dimension):
             self.dimension = dimension
 
-        def delete_by_doc(self, doc_id):
-            statuses.append({"deleted": doc_id})
+        def delete_by_doc(self, doc_id, **kwargs):
+            statuses.append({"deleted": doc_id, **kwargs})
 
-        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors, **kwargs):
             chunks_arg[0].milvus_id = "m1"
             return ["m1"]
 

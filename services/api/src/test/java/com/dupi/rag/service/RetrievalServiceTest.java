@@ -12,6 +12,7 @@ import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
+import com.dupi.rag.repository.SparseMigrationRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -46,6 +47,7 @@ class RetrievalServiceTest {
     @Mock ChunkRepository chunkRepository;
     @Mock DocumentRepository documentRepository;
     @Mock RetrievalProfileService retrievalProfileService;
+    @Mock SparseMigrationRepository sparseMigrationRepository;
 
     RetrievalService service(RagProperties properties) {
         return service(properties, WebClient.builder());
@@ -60,7 +62,8 @@ class RetrievalServiceTest {
                 documentRepository,
                 properties,
                 builder,
-                retrievalProfileService
+                retrievalProfileService,
+                sparseMigrationRepository
         );
     }
 
@@ -451,7 +454,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(1000);
         ExchangeFunction exchange = request -> {
             String json = """
-                    {"hits":[{"chunk_id":"%s","doc_id":"%s","file_name":"doc.md","content":"hybrid hit","score":0.7,"metadata":{"heading":"H"}}]}
+                    {"rerank_applied":true,"hits":[{"chunk_id":"%s","doc_id":"%s","file_name":"doc.md","content":"hybrid hit","score":0.7,"metadata":{"heading":"H"}}]}
                     """.formatted(chunkId, docId);
             return Mono.just(ClientResponse.create(HttpStatus.OK)
                     .header("Content-Type", "application/json")
@@ -523,7 +526,7 @@ class RetrievalServiceTest {
         ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK)
                 .header("Content-Type", "application/json")
                 .body("""
-                        {"profile_version":4,"hits":[{"chunk_id":"%s","doc_id":"%s","file_name":"doc.md",
+                        {"profile_version":4,"rerank_applied":false,"fallback_reason":"reranker_unavailable","hits":[{"chunk_id":"%s","doc_id":"%s","file_name":"doc.md",
                         "content":"hit","score":0.7,"metadata":{"embedding":[0.3],"provider_url":"secret",
                         "nested":[[{"base_url":"secret","authorization":"bearer","safe":"kept","nullable":null}]]},
                         "vector_rank":2,"sparse_rank":1,"fusion_rank":1,
@@ -532,15 +535,17 @@ class RetrievalServiceTest {
         RetrievalService retrievalService = service(rag, WebClient.builder().exchangeFunction(exchange));
         ReflectionTestUtils.setField(retrievalService, "workerBaseUrl", "http://worker");
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
-        when(retrievalProfileService.resolveActive(kb)).thenReturn(profile);
+        when(retrievalProfileService.find(kbId, profile.getId())).thenReturn(profile);
         RetrieveRequest request = new RetrieveRequest();
         request.setQuery("hello");
 
-        var response = retrievalService.retrieve(kbId, request);
+        var response = retrievalService.retrieveForProfile(kbId, request, profile.getId());
 
         assertThat(response.getDiagnostics()).containsEntry("profileVersion", 4)
+                .containsEntry("rerankApplied", false).containsEntry("fallbackReason", "reranker_unavailable")
                 .containsEntry("vectorRank", 2).containsEntry("sparseRank", 1)
                 .containsEntry("fusionRank", 1).doesNotContainKey("embedding");
+        assertThat(response.getRetrievalMode()).isEqualTo("hybrid");
         assertThat(response.getHits()).singleElement().satisfies(hit ->
                 assertThat(hit.getMetadata()).containsKey("retrievalStages")
                         .doesNotContainKeys("embedding", "provider_url")

@@ -11,6 +11,7 @@ import com.dupi.rag.dto.DocumentResponse;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
+import com.dupi.rag.repository.RetrievalProfileRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -43,6 +44,7 @@ class DocumentServiceTest {
     @Mock DocumentTombstoneService documentTombstoneService;
     @Mock VectorCleanupTaskService vectorCleanupTaskService;
     @Mock AuditLogService auditLogService;
+    @Mock RetrievalProfileRepository retrievalProfileRepository;
 
     DocumentService service() {
         return new DocumentService(
@@ -56,7 +58,8 @@ class DocumentServiceTest {
                 ingestOutboxService,
                 documentTombstoneService,
                 vectorCleanupTaskService,
-                auditLogService
+                auditLogService,
+                retrievalProfileRepository
         );
     }
 

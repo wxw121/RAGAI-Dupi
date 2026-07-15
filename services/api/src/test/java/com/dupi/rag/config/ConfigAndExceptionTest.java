@@ -826,6 +826,13 @@ class ConfigAndExceptionTest {
         ReflectionTestUtils.setField(milvusConfig, "client", milvusClient);
         milvusConfig.close();
         verify(milvusClient).close();
+
+        MilvusProperties properties = new MilvusProperties();
+        properties.setHost("localhost");
+        properties.setPort(19530);
+        try (var construction = mockConstruction(MilvusServiceClient.class)) {
+            assertThat(new MilvusConfig().milvusClient(properties)).isSameAs(construction.constructed().get(0));
+        }
     }
 
     @Test

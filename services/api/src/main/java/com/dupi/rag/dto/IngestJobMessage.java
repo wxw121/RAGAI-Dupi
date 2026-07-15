@@ -25,4 +25,5 @@ public class IngestJobMessage {
     private String chunkStrategy;
     private String embeddingModel;
     private Integer embeddingDimension;
+    private Integer sparseProfileVersion;
 }

@@ -17,6 +17,9 @@ RUN pip install --no-cache-dir \
 
 COPY app ./app
 
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    HF_HOME=/models/huggingface \
+    SENTENCE_TRANSFORMERS_HOME=/models/huggingface \
+    TRANSFORMERS_CACHE=/models/huggingface
 
 CMD ["python", "-m", "app.main"]

@@ -21,6 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.any;
 
 @ExtendWith(MockitoExtension.class)
 class RetrievalProfileServiceTest {
@@ -28,6 +29,68 @@ class RetrievalProfileServiceTest {
     @Mock RagEvalRunRepository runRepository;
     @Mock KnowledgeBaseService knowledgeBaseService;
     @Mock AuditLogService auditLogService;
+
+    @Test
+    void createListAndResolveActiveProfile() {
+        UUID kbId = UUID.randomUUID();
+        RetrievalProfile previous = profile(kbId);
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).activeRetrievalProfileId(previous.getId()).build();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(profileRepository.findByKbIdOrderByVersionDesc(kbId)).thenReturn(List.of(previous));
+        when(profileRepository.findByIdAndKbId(previous.getId(), kbId)).thenReturn(Optional.of(previous));
+        when(profileRepository.findTopByKbIdOrderByVersionDesc(kbId)).thenReturn(Optional.of(previous));
+        when(profileRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        com.dupi.rag.dto.RetrievalProfileRequest request = request();
+        request.setName(" next ");
+        request.setSparseIndexParams(Map.of("bm25", Map.of("k1", 1.5)));
+        request.setSparseSearchParams(Map.of("drop", List.of(0.1, 0.2)));
+
+        var listed = service().list(kbId);
+        var created = service().create(kbId, request);
+        var active = service().resolveActive(kb);
+
+        assertThat(listed).singleElement().satisfies(item -> assertThat(item.isActive()).isTrue());
+        assertThat(created.getName()).isEqualTo("next");
+        assertThat(created.getVersion()).isEqualTo(3);
+        assertThat(created.getSparseIndexParams()).containsKey("bm25");
+        assertThat(active).isSameAs(previous);
+    }
+
+    @Test
+    void firstProfileUsesVersionOneAndNullParameterMaps() {
+        UUID kbId = UUID.randomUUID();
+        com.dupi.rag.dto.RetrievalProfileRequest request = request();
+        request.setSparseIndexParams(null);
+        request.setSparseSearchParams(null);
+        when(profileRepository.findTopByKbIdOrderByVersionDesc(kbId)).thenReturn(Optional.empty());
+        when(profileRepository.save(any())).thenReturn(null);
+
+        var created = service().create(kbId, request);
+
+        assertThat(created.getVersion()).isEqualTo(1);
+        assertThat(created.getSparseIndexParams()).isEmpty();
+        assertThat(created.getSparseSearchParams()).isEmpty();
+        assertThat(service().resolveActive(KnowledgeBase.builder().id(kbId).build())).isNull();
+    }
+
+    @Test
+    void missingProfileAndInvalidRollbackAreRejected() {
+        UUID kbId = UUID.randomUUID();
+        UUID missing = UUID.randomUUID();
+        when(profileRepository.findByIdAndKbId(missing, kbId)).thenReturn(Optional.empty());
+        assertThatThrownBy(() -> service().find(kbId, missing))
+                .isInstanceOf(com.dupi.rag.exception.ResourceNotFoundException.class);
+
+        RetrievalProfile target = profile(kbId);
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
+        when(profileRepository.findByIdAndKbId(target.getId(), kbId)).thenReturn(Optional.of(target));
+        when(runRepository.findByKbIdAndStatusAndGateStatus(kbId, RagEvalRunStatus.COMPLETED,
+                RagQualityGateStatus.PASS)).thenReturn(List.of(RagEvalRun.builder()
+                .profileSnapshot(target.snapshot()).build()));
+        when(knowledgeBaseService.findForUpdateOrThrow(kbId)).thenReturn(kb);
+        assertThatThrownBy(() -> service().rollback(kbId, target.getId()))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("older");
+    }
 
     @Test
     void activateRejectsProfileWithoutMatchingPassingQualityGate() {
@@ -166,5 +229,17 @@ class RetrievalProfileServiceTest {
                 .rerankCandidateLimit(20)
                 .finalTopK(5)
                 .build();
+    }
+
+    private com.dupi.rag.dto.RetrievalProfileRequest request() {
+        com.dupi.rag.dto.RetrievalProfileRequest request = new com.dupi.rag.dto.RetrievalProfileRequest();
+        request.setName("candidate");
+        request.setVectorCandidateCount(20);
+        request.setSparseCandidateCount(20);
+        request.setRrfConstant(60);
+        request.setRerankEnabled(false);
+        request.setRerankCandidateLimit(10);
+        request.setFinalTopK(5);
+        return request;
     }
 }

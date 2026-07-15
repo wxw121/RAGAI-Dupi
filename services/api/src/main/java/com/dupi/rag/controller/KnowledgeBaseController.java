@@ -9,6 +9,7 @@ import com.dupi.rag.service.KnowledgeBaseService;
 import com.dupi.rag.service.RagEvalService;
 import com.dupi.rag.service.RetrievalService;
 import com.dupi.rag.service.RetrievalProfileService;
+import com.dupi.rag.service.SparseMigrationService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
@@ -32,6 +33,7 @@ public class KnowledgeBaseController {
     private final RagEvalService ragEvalService;
     private final KnowledgeBaseExportService knowledgeBaseExportService;
     private final RetrievalProfileService retrievalProfileService;
+    private final SparseMigrationService sparseMigrationService;
 
     @PostMapping
     public KnowledgeBaseResponse create(@Valid @RequestBody CreateKnowledgeBaseRequest request) {
@@ -181,7 +183,8 @@ public class KnowledgeBaseController {
     ) {
         return ragEvalService.run(kbId,
                 request != null && Boolean.TRUE.equals(request.getUseRerank()),
-                request == null ? null : request.getProfileId());
+                request == null ? null : request.getProfileId(),
+                request == null ? null : request.getRetrievalMode());
     }
 
     @GetMapping("/{kbId}/rag-eval/policy")
@@ -234,5 +237,53 @@ public class KnowledgeBaseController {
             @PathVariable UUID profileId
     ) {
         return retrievalProfileService.rollback(kbId, profileId);
+    }
+
+    @GetMapping("/{kbId}/sparse-migrations")
+    public java.util.List<SparseMigrationResponse> listSparseMigrations(@PathVariable UUID kbId) {
+        return sparseMigrationService.list(kbId);
+    }
+
+    @PostMapping("/{kbId}/sparse-migrations")
+    public SparseMigrationResponse startSparseMigration(
+            @PathVariable UUID kbId, @RequestParam UUID profileId) {
+        return sparseMigrationService.start(kbId, profileId);
+    }
+
+    @PostMapping("/{kbId}/sparse-migrations/{migrationId}/backfill")
+    public SparseMigrationResponse backfillSparseMigration(
+            @PathVariable UUID kbId, @PathVariable UUID migrationId) {
+        return sparseMigrationService.backfill(kbId, migrationId);
+    }
+
+    @PostMapping("/{kbId}/sparse-migrations/{migrationId}/shadow-validation")
+    public SparseMigrationResponse validateSparseMigration(
+            @PathVariable UUID kbId, @PathVariable UUID migrationId,
+            @Valid @RequestBody SparseMigrationValidationRequest request) {
+        return sparseMigrationService.recordShadowValidation(kbId, migrationId, request);
+    }
+
+    @PostMapping("/{kbId}/sparse-migrations/{migrationId}/shadow")
+    public SparseMigrationResponse beginSparseShadowValidation(
+            @PathVariable UUID kbId, @PathVariable UUID migrationId) {
+        return sparseMigrationService.beginShadowValidation(kbId, migrationId);
+    }
+
+    @PostMapping("/{kbId}/sparse-migrations/{migrationId}/cutover")
+    public SparseMigrationResponse cutoverSparseMigration(
+            @PathVariable UUID kbId, @PathVariable UUID migrationId) {
+        return sparseMigrationService.cutover(kbId, migrationId);
+    }
+
+    @PostMapping("/{kbId}/sparse-migrations/{migrationId}/complete")
+    public SparseMigrationResponse completeSparseMigration(
+            @PathVariable UUID kbId, @PathVariable UUID migrationId) {
+        return sparseMigrationService.complete(kbId, migrationId);
+    }
+
+    @PostMapping("/{kbId}/sparse-migrations/{migrationId}/legacy-fallback")
+    public SparseMigrationResponse setLegacySparseFallback(
+            @PathVariable UUID kbId, @PathVariable UUID migrationId, @RequestParam boolean enabled) {
+        return sparseMigrationService.setLegacyFallback(kbId, migrationId, enabled);
     }
 }

@@ -29,6 +29,11 @@ public class RagEvalRunResultResponse {
     private String embeddingModel;
     private Integer embeddingDimension;
     private Integer topK;
+    private Integer matchedRank;
+    private Integer vectorRank;
+    private Integer sparseRank;
+    private Integer fusionRank;
+    private Integer rerankRank;
     private String caseFingerprint;
     private RagEvalComparisonStatus comparisonStatus;
     private Long latencyMs;
