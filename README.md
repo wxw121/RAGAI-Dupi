@@ -15,6 +15,19 @@ Routes are below `/api/v1/knowledge-bases/{kbId}/recovery`. Commands return `202
 | `DUPI_RECOVERY_PAGE_SIZE` | `500` | Bounded vector snapshot page size |
 | `DUPI_RECOVERY_MAX_CONCURRENT_JOBS` | `2` | Bounded archive/restore concurrency |
 
+### V1.4.0 Release Gate
+
+The Worker image installs CPU-only PyTorch from the official CPU wheel index, uses PyMilvus 2.5.18 with the current patched packaging toolchain, and runs as UID/GID `65534`. The gate runs `pip check` and imports the production Worker modules before scanning. Run it from the repository root:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scan-release.ps1 `
+  -Image dupi-rag-worker:v1.4 `
+  -OutputPath artifacts/v1.4-release-scan `
+  -HighExceptionPath deploy/release-exceptions/v1.4.0.json
+```
+
+The scan exports the image's exact `pip freeze --all` result to `worker-requirements.lock.txt`, then audits that lock without resolving a second dependency graph. It accepts either a `pip-audit` executable on `PATH` or an installed `pip_audit` module through `python -m pip_audit`, retries transient audit failures up to three times, and falls back to the pinned `dupi-rag-pip-audit:2.10.1` container when host networking cannot reach OSV. Every path deletes stale output first and records the execution mode in `summary.md`. Use `-TrivySkipDbUpdate` only when the local Trivy database was refreshed separately. The structured exception release must match the normalized image tag, cover every active upstream-unfixed finding exactly, and expires on `2026-08-15`; fixable, expired, unused, or unmatched entries fail the gate. The release scan generates the dependency lock, pip-audit JSON, CycloneDX/Syft SBOM, Trivy version/result JSON, and `summary.md` under `artifacts/v1.4-release-scan`. The summary records the immutable image digest and Trivy vulnerability-database timestamp.
+
 > V1.3 增加可阻断的 RAG 质量策略/基线、版本化 Retrieval Profile，以及 Milvus 原生 Sparse BM25 的回填、双写、Shadow、Cutover 和 Rollback。生产部署要求 Milvus 2.5.4；升级前必须备份 Milvus/etcd/MinIO/PostgreSQL，并在隔离环境完成回填与回滚演练。
 
 ## V1.3 Sparse 迁移运维

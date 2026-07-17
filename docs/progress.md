@@ -10,7 +10,9 @@
 - Real Compose rehearsal passed on 2026-07-16 with 2 documents, 9 archive items, 10,946 bytes, matching object/vector checksums, matching restored record counts and retrieval hits, canonical-object corruption rejection, and scoped cleanup. Evidence: `artifacts/v1.4-recovery/rehearsal.json`.
 - Credentialed Chromium passed 1/1 against `http://localhost:8080`, including the Recovery panel and successful E2E cleanup.
 - The real rehearsal exposed and fixed managed-entity timestamp loss, dense-vector `Double`/`Float` conversion, strong read-after-write verification, terminal async failure recording, and V15/V16 archive-evidence cleanup constraints.
-- V1.4.0 recovery scope is complete: the final artifact records `corruptionBlocked=true`. V1.4.1 upload quotas, cancellation, and notifications remain deferred.
+- V1.4.0 recovery scope is complete: the final artifact records `corruptionBlocked=true`.
+- The formal release scan passed on 2026-07-17 with a 634,098,035-byte non-root CPU Worker image and 23 exact upstream-unfixed exceptions expiring on 2026-08-15. Evidence: `artifacts/v1.4-release-scan/summary.md`, image dependency lock, SBOM, pip-audit, and Trivy JSON.
+- Final local gates passed: API 351 tests with JaCoCo checks, Worker 45 tests, Web 68 tests plus production build, and Pester 26 tests. V1.4.1 starts after V1.4.0 publication.
 
 - 已完成质量策略、baseline、不可变评测证据和门禁。
 - 已完成 Retrieval Profile 控制台、激活和受 PASS 证据约束的 rollback。

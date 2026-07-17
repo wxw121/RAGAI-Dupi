@@ -12,6 +12,7 @@
 - [x] Retain a real `artifacts/v1.4-recovery/rehearsal.json` with two fixtures, 9 items / 10,946 bytes, object/vector checksums, restored record counts, retrieval equivalence, corruption blocking, and scoped cleanup.
 - [x] Run the credentialed Playwright gate against the full Compose stack (`1 passed`).
 - [x] Inject canonical-object corruption and retain a rehearsal artifact with `corruptionBlocked=true` before closing V1.4.0.
+- [x] Pass the dependency/SBOM/license/CVE/image-size scan with the non-root CPU Worker image and dated structured exceptions.
 - [ ] Start V1.4.1 upload quotas, cancellation, and notification after V1.4.0 closes.
 
 - [x] Milvus Sparse 回填、双写、Shadow、Cutover、Rollback 和删除同步。
