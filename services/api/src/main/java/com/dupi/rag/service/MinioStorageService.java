@@ -58,14 +58,16 @@ public class MinioStorageService {
         }
     }
 
-    public void delete(String objectKey) {
+    public boolean delete(String objectKey) {
         try {
             minioClient.removeObject(RemoveObjectArgs.builder()
                     .bucket(properties.getBucket())
                     .object(objectKey)
                     .build());
+            return true;
         } catch (Exception e) {
             log.warn("Failed to delete object {}: {}", objectKey, e.getMessage());
+            return false;
         }
     }
 }

@@ -253,8 +253,10 @@ ENTRYPOINT ["python", "-m", "pip_audit"]
     }
     if ($pipAuditExitCode -notin @(0, 1)) { throw "pip-audit failed with exit code $pipAuditExitCode" }
     if (-not (Test-Path $PipAuditJson)) { throw "pip-audit did not produce an audit artifact" }
-    & syft $Image -o "syft-json=$SbomJson" -o "cyclonedx-json=$cycloneDx"
-    if ($LASTEXITCODE -ne 0) { throw "Syft scan failed" }
+    & syft $Image -o "syft-json=$SbomJson"
+    if ($LASTEXITCODE -ne 0) { throw "Syft JSON scan failed" }
+    & syft $Image -o "cyclonedx-json=$cycloneDx"
+    if ($LASTEXITCODE -ne 0) { throw "Syft CycloneDX scan failed" }
     $trivyVersionOutput = @(& trivy --version --format json)
     $trivyVersionExitCode = $LASTEXITCODE
     if ($trivyVersionExitCode -ne 0) { throw "Unable to inspect Trivy database metadata" }

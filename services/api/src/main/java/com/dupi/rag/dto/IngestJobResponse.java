@@ -13,6 +13,7 @@ import java.util.UUID;
 @Builder
 public class IngestJobResponse {
     private UUID id;
+    private UUID executionId;
     private UUID kbId;
     private UUID docId;
     private String documentFileName;
@@ -20,7 +21,9 @@ public class IngestJobResponse {
     private IngestJobStatus status;
     private IngestStage stage;
     private Integer retryCount;
+    private Long callbackSequence;
     private String errorMessage;
+    private Instant cancelRequestedAt;
     private IngestDiagnosisResponse diagnosis;
     private Instant createdAt;
     private Instant updatedAt;

@@ -1,0 +1,140 @@
+{
+  "release": "v1.4.1",
+  "issuedAt": "2026-07-18T00:00:00Z",
+  "expiresAt": "2026-08-15T00:00:00Z",
+  "owner": "dupi-rag maintainers",
+  "findings": [
+    {
+      "source": "trivy",
+      "package": "bsdutils",
+      "id": "CVE-2026-53615",
+      "reason": "Debian 13.6 has no fixed package. The non-root worker does not invoke util-linux tooling; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "gzip",
+      "id": "CVE-2026-41992",
+      "reason": "Debian 13.6 defers the fix. The non-root worker does not invoke gzip on tenant-controlled archives; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "libacl1",
+      "id": "CVE-2026-54369",
+      "reason": "Debian 13.6 defers the fix. The worker runs non-root without ACL administration; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "libblkid1",
+      "id": "CVE-2026-53615",
+      "reason": "Debian 13.6 has no fixed package. The non-root worker does not inspect block devices; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "liblastlog2-2",
+      "id": "CVE-2026-53615",
+      "reason": "Debian 13.6 has no fixed package. The worker does not manage login records; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "libmount1",
+      "id": "CVE-2026-53615",
+      "reason": "Debian 13.6 has no fixed package. The non-root worker cannot mount filesystems; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "libncursesw6",
+      "id": "CVE-2025-69720",
+      "reason": "Debian 13.6 has no fixed package. The worker has no interactive terminal path; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "libsmartcols1",
+      "id": "CVE-2026-53615",
+      "reason": "Debian 13.6 has no fixed package. The non-root worker does not invoke util-linux formatting tools; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "libtinfo6",
+      "id": "CVE-2025-69720",
+      "reason": "Debian 13.6 has no fixed package. The worker has no interactive terminal path; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "libuuid1",
+      "id": "CVE-2026-53615",
+      "reason": "Debian 13.6 has no fixed package. The worker does not invoke util-linux UUID tooling; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "login",
+      "id": "CVE-2026-53615",
+      "reason": "Debian 13.6 has no fixed package. The container has no login service and runs as uid 65534; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "mount",
+      "id": "CVE-2026-53615",
+      "reason": "Debian 13.6 has no fixed package. The non-root worker cannot mount filesystems; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "ncurses-base",
+      "id": "CVE-2025-69720",
+      "reason": "Debian 13.6 has no fixed package. The worker has no interactive terminal path; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "ncurses-bin",
+      "id": "CVE-2025-69720",
+      "reason": "Debian 13.6 has no fixed package. The worker has no interactive terminal path; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "perl-base",
+      "id": "CVE-2026-13221",
+      "reason": "Debian 13.6 has no fixed package. The application does not execute Perl and runs non-root; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "perl-base",
+      "id": "CVE-2026-42496",
+      "reason": "Debian 13.6 defers the fix. The application does not execute Perl and runs non-root; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "perl-base",
+      "id": "CVE-2026-8376",
+      "reason": "Debian 13.6 has no fixed package. The application does not execute Perl and runs non-root; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "perl-base",
+      "id": "CVE-2026-42497",
+      "reason": "Debian 13.6 defers the fix. The application does not execute Perl and runs non-root; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "perl-base",
+      "id": "CVE-2026-48962",
+      "reason": "Debian 13.6 has no fixed package. The application does not execute Perl and runs non-root; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "perl-base",
+      "id": "CVE-2026-57432",
+      "reason": "Debian 13.6 has no fixed package. The application does not execute Perl and runs non-root; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "perl-base",
+      "id": "CVE-2026-9538",
+      "reason": "Debian 13.6 defers the fix. The application does not execute Perl and runs non-root; re-scan before expiry."
+    },
+    {
+      "source": "trivy",
+      "package": "util-linux",
+      "id": "CVE-2026-53615",
+      "reason": "Debian 13.6 has no fixed package. The non-root worker does not invoke util-linux tooling; re-scan before expiry."
+    }
+  ]
+}

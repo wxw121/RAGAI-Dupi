@@ -15,6 +15,8 @@ import java.util.Map;
 public class IngestStatusUpdate {
     private String jobId;
     private String docId;
+    private String executionId;
+    private Long sequence;
     private String status;
     private String stage;
     private String errorMessage;

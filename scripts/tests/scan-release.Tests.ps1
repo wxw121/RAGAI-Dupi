@@ -3,6 +3,14 @@ Describe "Release scan policy" {
         $script:scriptPath = Join-Path $PSScriptRoot "..\scan-release.ps1"
     }
 
+    It "generates Syft formats in separate invocations on Windows" {
+        $source = Get-Content -LiteralPath $script:scriptPath -Raw
+
+        $source | Should -Not -Match '& syft \$Image -o "syft-json=\$SbomJson" -o'
+        $source | Should -Match '& syft \$Image -o "syft-json=\$SbomJson"'
+        $source | Should -Match '& syft \$Image -o "cyclonedx-json=\$cycloneDx"'
+    }
+
     It "blocks an unfixed critical vulnerability" {
         $fixture = Join-Path $TestDrive "critical.json"
         @{ Results = @(@{ Vulnerabilities = @(@{ VulnerabilityID = "CVE-1"; Severity = "CRITICAL"; FixedVersion = "" }) }) } |

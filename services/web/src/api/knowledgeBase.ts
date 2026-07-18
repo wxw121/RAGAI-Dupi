@@ -65,8 +65,9 @@ export function retrieveKnowledgeBase(kbId: string, request: RetrieveRequest): P
   return apiPost<RetrieveResponse>(`${BASE}/${kbId}/retrieve`, request)
 }
 
-export function listIngestJobs(kbId: string): Promise<IngestJob[]> {
-  return apiGet<IngestJob[]>(`${BASE}/${kbId}/ingest-jobs`)
+export function listIngestJobs(kbId: string, signal?: AbortSignal): Promise<IngestJob[]> {
+  const path = `${BASE}/${kbId}/ingest-jobs`
+  return signal ? apiGet<IngestJob[]>(path, { signal }) : apiGet<IngestJob[]>(path)
 }
 
 export function reindexKnowledgeBase(kbId: string): Promise<IngestJob[]> {
@@ -75,6 +76,10 @@ export function reindexKnowledgeBase(kbId: string): Promise<IngestJob[]> {
 
 export function retryIngestJob(kbId: string, jobId: string): Promise<IngestJob> {
   return apiPost<IngestJob>(`${BASE}/${kbId}/ingest-jobs/${jobId}/retry`)
+}
+
+export function cancelIngestJob(kbId: string, jobId: string): Promise<IngestJob> {
+  return apiPost<IngestJob>(`${BASE}/${kbId}/ingest-jobs/${jobId}/cancel`)
 }
 
 export function listRagEvalCases(kbId: string): Promise<RagEvalCase[]> {

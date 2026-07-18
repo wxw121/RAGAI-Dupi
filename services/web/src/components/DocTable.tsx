@@ -21,7 +21,10 @@ export function DocTable({
   onDelete,
   deletingId,
 }: DocTableProps) {
-  const jobsByDocId = new Map(ingestJobs.map((job) => [job.docId, job]))
+  const jobsByDocId = new Map<string, IngestJob>()
+  ingestJobs.forEach((job) => {
+    if (!jobsByDocId.has(job.docId)) jobsByDocId.set(job.docId, job)
+  })
 
   if (documents.length === 0) {
     return (
@@ -46,7 +49,7 @@ export function DocTable({
         </thead>
         <tbody>
           {documents.map((doc) => {
-            const job = jobsByDocId.get(doc.id)
+            const job = doc.currentJob ?? jobsByDocId.get(doc.id)
             const diagnosis = job?.diagnosis
             return (
               <tr key={doc.id} className="border-b transition-colors last:border-0 hover:bg-muted/40">

@@ -4,8 +4,11 @@ import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.entity.UploadQuotaReservation;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
+import com.dupi.rag.domain.enums.IngestStage;
+import com.dupi.rag.domain.enums.UploadQuotaReservationStatus;
 import com.dupi.rag.dto.BatchDocumentUploadResult;
 import com.dupi.rag.dto.DocumentResponse;
 import com.dupi.rag.repository.ChunkRepository;
@@ -46,6 +49,7 @@ class DocumentServiceTest {
     @Mock AuditLogService auditLogService;
     @Mock RetrievalProfileRepository retrievalProfileRepository;
     @Mock KnowledgeBaseMaintenanceService maintenanceService;
+    @Mock UploadQuotaService uploadQuotaService;
 
     DocumentService service() {
         return new DocumentService(
@@ -61,8 +65,45 @@ class DocumentServiceTest {
                 vectorCleanupTaskService,
                 auditLogService,
                 retrievalProfileRepository,
-                maintenanceService
+                maintenanceService,
+                uploadQuotaService
         );
+    }
+
+    @Test
+    void fileFingerprintIncludesFileBytes() {
+        MockMultipartFile first = new MockMultipartFile(
+                "file", "same.md", "text/markdown", "abc".getBytes());
+        MockMultipartFile second = new MockMultipartFile(
+                "file", "same.md", "text/markdown", "xyz".getBytes());
+
+        String firstFingerprint = service().fileFingerprint(first);
+        String secondFingerprint = service().fileFingerprint(second);
+
+        assertThat(firstFingerprint).startsWith("sha256:");
+        assertThat(secondFingerprint).startsWith("sha256:");
+        assertThat(firstFingerprint).isNotEqualTo(secondFingerprint);
+    }
+
+    @Test
+    void uploadPassesContentFingerprintToQuotaReservation() {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).name("KB").build();
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "a.md", "text/markdown", "hello".getBytes());
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(uploadQuotaService.reserveForUpload(
+                eq(kbId), any(UUID.class), eq("key-1"), eq("a.md"),
+                eq("text/markdown"), eq(5L), anyString()))
+                .thenAnswer(invocation -> reservation(kbId, invocation.getArgument(1), "key-1", 5L));
+
+        service().upload(kbId, file, "key-1");
+
+        ArgumentCaptor<String> fingerprint = ArgumentCaptor.forClass(String.class);
+        verify(uploadQuotaService).reserveForUpload(
+                eq(kbId), any(UUID.class), eq("key-1"), eq("a.md"),
+                eq("text/markdown"), eq(5L), fingerprint.capture());
+        assertThat(fingerprint.getValue()).isEqualTo(service().fileFingerprint(file));
     }
 
     @Test
@@ -70,16 +111,151 @@ class DocumentServiceTest {
         UUID kbId = UUID.randomUUID();
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).name("KB").build();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(uploadQuotaService.reserveForUpload(eq(kbId), any(UUID.class), isNull(), eq("a.md"), eq("text/markdown"), eq(5L), anyString()))
+                .thenAnswer(invocation -> reservation(kbId, invocation.getArgument(1), null, 5L));
         MockMultipartFile file = new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes());
 
         var response = service().upload(kbId, file);
 
         assertThat(response.getStatus()).isEqualTo(DocumentStatus.PENDING);
+        assertThat(response.getCurrentJob()).isNotNull();
+        assertThat(response.getCurrentJob().getStatus()).isEqualTo(IngestJobStatus.PENDING);
         verify(minioStorageService).upload(contains(kbId.toString()), any(), eq(5L), eq("text/markdown"));
         verify(ingestJobRepository).save(any(IngestJob.class));
         verify(ingestOutboxService).record(any(IngestJob.class), eq(kb), contains("a.md"), eq("a.md"), eq("text/markdown"));
+        verify(uploadQuotaService).commit(any(UploadQuotaReservation.class), any(Document.class));
         verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
         verify(documentRepository, atLeast(2)).save(any(Document.class));
+        var publishOrder = inOrder(ingestOutboxService, uploadQuotaService, documentRepository);
+        publishOrder.verify(ingestOutboxService)
+                .record(any(IngestJob.class), eq(kb), contains("a.md"), eq("a.md"), eq("text/markdown"));
+        publishOrder.verify(uploadQuotaService).commit(any(UploadQuotaReservation.class), any(Document.class));
+        publishOrder.verify(documentRepository).save(any(Document.class));
+    }
+
+    @Test
+    void uploadReplaysCommittedIdempotencyKeyWithoutStorageOrOutbox() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        String idempotencyKey = "upload-key-1";
+        Document doc = doc(kbId, docId);
+        IngestJob job = job(kbId, docId, jobId);
+        UploadQuotaReservation committed = reservation(kbId, docId, idempotencyKey, doc.getFileSize());
+        committed.setDocId(docId);
+        committed.setAttemptId(null);
+        committed.setStatus(UploadQuotaReservationStatus.COMMITTED);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).name("KB").build());
+        when(uploadQuotaService.reserveForUpload(eq(kbId), any(UUID.class), eq(idempotencyKey), eq("a.md"), eq("text/markdown"), eq(1L), anyString()))
+                .thenReturn(committed);
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(docId)).thenReturn(Optional.of(job));
+
+        var response = service().upload(kbId, new MockMultipartFile("file", "a.md", "text/markdown", "x".getBytes()), idempotencyKey);
+
+        assertThat(response.getId()).isEqualTo(docId);
+        assertThat(response.getCurrentJob().getId()).isEqualTo(jobId);
+        verifyNoInteractions(minioStorageService);
+        verify(ingestJobRepository, never()).save(any());
+        verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
+        verify(uploadQuotaService, never()).commit(any(), any());
+    }
+
+    @Test
+    void uploadReleasesQuotaReservationWhenMinioUploadFails() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UploadQuotaReservation reservation = reservation(kbId, docId, "key", 5L);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(uploadQuotaService.reserveForUpload(eq(kbId), any(UUID.class), eq("key"), eq("a.md"), eq("text/markdown"), eq(5L), anyString()))
+                .thenReturn(reservation);
+        doThrow(new IllegalStateException("minio down"))
+                .when(minioStorageService).upload(any(), any(), anyLong(), any());
+
+        assertThatThrownBy(() -> service().upload(kbId, new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes()), "key"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Upload failed");
+
+        verify(uploadQuotaService).release(reservation, "Upload failed");
+        verify(uploadQuotaService, never()).commit(any(), any());
+        ArgumentCaptor<Document> savedDocument = ArgumentCaptor.forClass(Document.class);
+        verify(documentRepository, atLeast(2)).save(savedDocument.capture());
+        assertThat(savedDocument.getAllValues().get(savedDocument.getAllValues().size() - 1)
+                .getQuotaReservationId()).isNull();
+    }
+
+    @Test
+    void uploadReleasesQuotaReservationWhenInitialDocumentSaveFails() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId))
+                .thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(uploadQuotaService.reserveForUpload(
+                eq(kbId), any(UUID.class), eq("key"), eq("a.md"),
+                eq("text/markdown"), eq(5L), anyString()))
+                .thenAnswer(invocation -> reservation(
+                        kbId, invocation.getArgument(1), "key", 5L));
+        doThrow(new IllegalStateException("document database down"))
+                .when(documentRepository).save(any(Document.class));
+
+        assertThatThrownBy(() -> service().upload(
+                kbId,
+                new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes()),
+                "key"))
+                .isInstanceOf(IllegalStateException.class);
+
+        verify(uploadQuotaService).release(any(UploadQuotaReservation.class), eq("Upload failed"));
+        verifyNoInteractions(minioStorageService);
+    }
+
+    @Test
+    void uploadDeletesStoredObjectWhenLaterPersistenceFails() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId))
+                .thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(uploadQuotaService.reserveForUpload(
+                eq(kbId), any(UUID.class), eq("key"), eq("a.md"),
+                eq("text/markdown"), eq(5L), anyString()))
+                .thenAnswer(invocation -> reservation(
+                        kbId, invocation.getArgument(1), "key", 5L));
+        doThrow(new IllegalStateException("job database down"))
+                .when(ingestJobRepository).save(any(IngestJob.class));
+
+        assertThatThrownBy(() -> service().upload(
+                kbId,
+                new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes()),
+                "key"))
+                .isInstanceOf(IllegalStateException.class);
+
+        verify(minioStorageService).upload(contains("a.md"), any(), eq(5L), eq("text/markdown"));
+        verify(minioStorageService).delete(contains("a.md"));
+        verify(uploadQuotaService).release(any(UploadQuotaReservation.class), eq("Upload failed"));
+        verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void uploadStillReleasesQuotaWhenStoredObjectCleanupFails() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId))
+                .thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(uploadQuotaService.reserveForUpload(
+                eq(kbId), any(UUID.class), eq("key"), eq("a.md"),
+                eq("text/markdown"), eq(5L), anyString()))
+                .thenAnswer(invocation -> reservation(
+                        kbId, invocation.getArgument(1), "key", 5L));
+        doThrow(new IllegalStateException("job database down"))
+                .when(ingestJobRepository).save(any(IngestJob.class));
+        doThrow(new IllegalStateException("object cleanup down"))
+                .when(minioStorageService).delete(anyString());
+
+        assertThatThrownBy(() -> service().upload(
+                kbId,
+                new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes()),
+                "key"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("database down");
+
+        verify(minioStorageService).delete(contains("a.md"));
+        verify(uploadQuotaService).release(any(UploadQuotaReservation.class), eq("Upload failed"));
     }
 
     @Test
@@ -87,6 +263,8 @@ class DocumentServiceTest {
         UUID kbId = UUID.randomUUID();
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).name("KB").build();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(uploadQuotaService.reserveForUpload(eq(kbId), any(UUID.class), isNull(), anyString(), eq("text/markdown"), eq(5L), anyString()))
+                .thenAnswer(invocation -> reservation(kbId, invocation.getArgument(1), null, 5L));
         MockMultipartFile first = new MockMultipartFile("files", "a.md", "text/markdown", "hello".getBytes());
         MockMultipartFile second = new MockMultipartFile("files", "b.md", "text/markdown", "world".getBytes());
 
@@ -123,6 +301,8 @@ class DocumentServiceTest {
         UUID kbId = UUID.randomUUID();
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).name("KB").build();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(uploadQuotaService.reserveForUpload(eq(kbId), any(UUID.class), isNull(), eq("ok.md"), eq("text/markdown"), eq(5L), anyString()))
+                .thenAnswer(invocation -> reservation(kbId, invocation.getArgument(1), null, 5L));
         MockMultipartFile valid = new MockMultipartFile("files", "ok.md", "text/markdown", "hello".getBytes());
         MockMultipartFile empty = new MockMultipartFile("files", "empty.md", "text/markdown", new byte[0]);
 
@@ -145,6 +325,8 @@ class DocumentServiceTest {
     void uploadMarksDocumentFailedWhenMinioUploadFails() {
         UUID kbId = UUID.randomUUID();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(uploadQuotaService.reserveForUpload(eq(kbId), any(UUID.class), isNull(), eq("a.md"), eq("text/markdown"), eq(5L), anyString()))
+                .thenAnswer(invocation -> reservation(kbId, invocation.getArgument(1), null, 5L));
         doThrow(new IllegalStateException("minio down"))
                 .when(minioStorageService).upload(any(), any(), anyLong(), any());
 
@@ -164,6 +346,8 @@ class DocumentServiceTest {
     void uploadFailsBeforeReturningWhenOutboxRecordFails() {
         UUID kbId = UUID.randomUUID();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(uploadQuotaService.reserveForUpload(eq(kbId), any(UUID.class), isNull(), eq("a.md"), eq("text/markdown"), eq(5L), anyString()))
+                .thenAnswer(invocation -> reservation(kbId, invocation.getArgument(1), null, 5L));
         doThrow(new IllegalStateException("database down"))
                 .when(ingestOutboxService).record(any(), any(), any(), any(), any());
         MockMultipartFile file = new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes());
@@ -206,14 +390,19 @@ class DocumentServiceTest {
     void listAndGetValidateKnowledgeBaseAndDocumentOwnership() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
         Document doc = doc(kbId, docId);
+        IngestJob job = job(kbId, docId, jobId);
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc));
         when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(docId)).thenReturn(Optional.of(job));
 
         DocumentService service = service();
 
-        assertThat(service.listByKb(kbId)).hasSize(1);
-        assertThat(service.get(kbId, docId).getId()).isEqualTo(docId);
+        assertThat(service.listByKb(kbId)).singleElement()
+                .extracting(response -> response.getCurrentJob().getId())
+                .isEqualTo(jobId);
+        assertThat(service.get(kbId, docId).getCurrentJob().getId()).isEqualTo(jobId);
         verify(knowledgeBaseService).findOrThrow(kbId);
     }
 
@@ -249,6 +438,36 @@ class DocumentServiceTest {
                 .objectKey("k/a.md")
                 .fileSize(1L)
                 .status(DocumentStatus.PENDING)
+                .createdAt(Instant.now())
+                .updatedAt(Instant.now())
+                .build();
+    }
+
+    private static IngestJob job(UUID kbId, UUID docId, UUID jobId) {
+        return IngestJob.builder()
+                .id(jobId)
+                .kbId(kbId)
+                .docId(docId)
+                .status(IngestJobStatus.PENDING)
+                .stage(IngestStage.QUEUED)
+                .retryCount(0)
+                .createdAt(Instant.now())
+                .updatedAt(Instant.now())
+                .build();
+    }
+
+    private static UploadQuotaReservation reservation(UUID kbId, UUID docId, String idempotencyKey, long bytes) {
+        return UploadQuotaReservation.builder()
+                .id(UUID.randomUUID())
+                .tenantId("default")
+                .userId("anonymous")
+                .kbId(kbId)
+                .docId(null)
+                .attemptId(docId)
+                .idempotencyKey(idempotencyKey)
+                .fileFingerprint("a.md:" + bytes + ":text/markdown")
+                .reservedBytes(bytes)
+                .status(UploadQuotaReservationStatus.PENDING)
                 .createdAt(Instant.now())
                 .updatedAt(Instant.now())
                 .build();

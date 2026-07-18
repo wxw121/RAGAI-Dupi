@@ -20,6 +20,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.UUID;
 
 @Service
 @Slf4j
@@ -46,6 +47,12 @@ public class IngestOutboxService {
                 .attemptCount(0)
                 .nextAttemptAt(Instant.now())
                 .build());
+    }
+
+    @Transactional
+    public void cancelPendingForJob(UUID jobId, String reason) {
+        outboxRepository.findByJobIdAndStatusIn(jobId, List.of(IngestOutboxStatus.PENDING, IngestOutboxStatus.FAILED))
+                .forEach(event -> cancel(event, reason));
     }
 
     @Scheduled(cron = "${dupi.ingest.outbox-dispatch-cron:*/10 * * * * *}")

@@ -1,3 +1,5 @@
+import json
+
 from pymilvus import (
     Collection, CollectionSchema, DataType, FieldSchema, Function, FunctionType,
     connections, utility,
@@ -6,6 +8,7 @@ from pymilvus import (
 from app.config import settings
 
 MILVUS_OPERATION_TIMEOUT_SECONDS = 10
+DELETE_BATCH_SIZE = 256
 
 
 class SparseMilvusAdapter:
@@ -68,6 +71,15 @@ class SparseMilvusAdapter:
 
     def delete_by_doc(self, doc_id: str):
         self.collection.delete(expr=f'doc_id == "{doc_id}"', timeout=MILVUS_OPERATION_TIMEOUT_SECONDS)
+
+    def delete_by_ids(self, chunk_ids: list[str]):
+        owned_ids = list(dict.fromkeys(chunk_ids))
+        for offset in range(0, len(owned_ids), DELETE_BATCH_SIZE):
+            batch = owned_ids[offset:offset + DELETE_BATCH_SIZE]
+            self.collection.delete(
+                expr=f"chunk_id in {json.dumps(batch, ensure_ascii=True)}",
+                timeout=MILVUS_OPERATION_TIMEOUT_SECONDS,
+            )
 
     def count(self, kb_id: str) -> int:
         self.collection.load(timeout=MILVUS_OPERATION_TIMEOUT_SECONDS)

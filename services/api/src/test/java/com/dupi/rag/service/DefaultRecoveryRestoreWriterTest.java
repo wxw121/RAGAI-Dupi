@@ -7,6 +7,7 @@ import com.dupi.rag.dto.recovery.*;
 import com.dupi.rag.repository.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
@@ -42,20 +43,30 @@ class DefaultRecoveryRestoreWriterTest {
         assertThat(fixture.target.getLifecycleStatus()).isEqualTo(KnowledgeBaseLifecycleStatus.READY);
         assertThat(fixture.target.getName()).isEqualTo("Source KB (restored)");
         verify(fixture.documentStorage).upload(contains(fixture.target.getId().toString()), any(), eq(5L), eq("text/markdown"));
-        verify(fixture.documents).saveAll(argThat(values -> values.iterator().next().getKbId().equals(fixture.target.getId())));
+        verify(fixture.documents, atLeastOnce()).saveAll(argThat(values -> values.iterator().next().getKbId().equals(fixture.target.getId())));
+        verify(fixture.uploadQuotaService).createCommittedReservation(
+                eq("tenant-a"), eq("admin"), eq(fixture.target.getId()),
+                argThat(document -> fixture.target.getId().equals(document.getKbId())),
+                eq("Recovery restore"));
         verify(fixture.chunks).saveAll(argThat(values -> values.iterator().next().getKbId().equals(fixture.target.getId())));
         verify(fixture.recoveryVectors).upsert(eq("chunks"), any(), argThat(rows -> rows.size() == 1
                 && rows.get(0).knowledgeBaseId().equals(fixture.target.getId().toString())));
         verify(fixture.provisioner).ensure(fixture.target.getId(), 2, 1, Map.of());
         verify(fixture.recoveryVectors).upsert(eq("sparse-target"), any(), anyList());
+        ArgumentCaptor<Document> restoredDocument = ArgumentCaptor.forClass(Document.class);
+        verify(fixture.uploadQuotaService).createCommittedReservation(
+                eq("tenant-a"), eq("admin"), eq(fixture.target.getId()), restoredDocument.capture(), eq("Recovery restore"));
+        assertThat(restoredDocument.getValue().getKbId()).isEqualTo(fixture.target.getId());
         verify(fixture.jobs, atLeast(4)).save(fixture.job);
     }
 
     @Test
     void abandonRemovesExternalAndRelationalTargetData() {
         Fixture fixture = fixture();
+        UUID targetReservationId = UUID.randomUUID();
         Document targetDocument = Document.builder().id(UUID.randomUUID()).kbId(fixture.target.getId())
-                .fileName("a.md").objectKey("target/a.md").mimeType("text/markdown").build();
+                .fileName("a.md").objectKey("target/a.md").mimeType("text/markdown")
+                .quotaReservationId(targetReservationId).build();
         RetrievalProfile targetProfile = RetrievalProfile.builder().id(UUID.randomUUID())
                 .kbId(fixture.target.getId()).name("p").version(3).vectorCandidateCount(10)
                 .sparseCandidateCount(10).rrfConstant(60).rerankCandidateLimit(5).finalTopK(3).build();
@@ -66,6 +77,7 @@ class DefaultRecoveryRestoreWriterTest {
 
         fixture.writer.abandon(fixture.job);
 
+        verify(fixture.uploadQuotaService).releaseCommitted(targetReservationId, "Recovery restore abandoned");
         verify(fixture.documentStorage).delete("target/a.md");
         verify(fixture.onlineVectors).deleteByKbId(fixture.target.getId());
         verify(fixture.onlineVectors).deleteSparseByKbId(fixture.target.getId(), List.of(3));
@@ -140,6 +152,7 @@ class DefaultRecoveryRestoreWriterTest {
         MilvusRecoveryService recoveryVectors = mock(MilvusRecoveryService.class);
         MilvusVectorService onlineVectors = mock(MilvusVectorService.class);
         SparseRecoveryProvisioner provisioner = mock(SparseRecoveryProvisioner.class);
+        UploadQuotaService uploadQuotaService = mock(UploadQuotaService.class);
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         RecoveryManifestService manifests = new RecoveryManifestService(mapper);
 
@@ -157,7 +170,18 @@ class DefaultRecoveryRestoreWriterTest {
                 .lifecycleStatus(KnowledgeBaseLifecycleStatus.RESTORING).build();
         Document sourceDocument = Document.builder().id(sourceDocId).kbId(sourceKbId).fileName("guide.md")
                 .objectKey("source/guide.md").mimeType("text/markdown").fileSize(5L)
+                .quotaReservationId(UUID.randomUUID())
                 .status(DocumentStatus.COMPLETED).build();
+        UploadQuotaReservation restoredReservation = UploadQuotaReservation.builder()
+                .id(UUID.randomUUID())
+                .tenantId("tenant-a")
+                .userId("admin")
+                .kbId(targetKbId)
+                .docId(DefaultRecoveryRestoreWriter.remap(jobId, sourceDocId))
+                .status(UploadQuotaReservationStatus.COMMITTED)
+                .reservedBytes(5L)
+                .fileFingerprint("guide.md:5:text/markdown")
+                .build();
         Chunk sourceChunk = Chunk.builder().id(sourceChunkId).kbId(sourceKbId).docId(sourceDocId)
                 .chunkIndex(0).content("hello").tokenCount(1).metadata(Map.of()).build();
         RagEvalCase sourceCase = RagEvalCase.builder().id(UUID.randomUUID()).kbId(sourceKbId)
@@ -217,13 +241,15 @@ class DefaultRecoveryRestoreWriterTest {
         when(recoveryVectors.readDense(eq(targetKbId), any(), anyInt()))
                 .thenReturn(new VectorSnapshotPage(List.of(targetVector), null, "sum"));
         when(recoveryVectors.checksum(anyList())).thenReturn("same");
+        when(uploadQuotaService.createCommittedReservation(anyString(), anyString(), any(), any(), anyString()))
+                .thenReturn(restoredReservation);
 
         DefaultRecoveryRestoreWriter writer = new DefaultRecoveryRestoreWriter(
                 archives, archiveItems, restoreItems, jobs, knowledgeBases, documents, chunks, evalCases,
                 policies, profiles, storage, documentStorage, recoveryVectors, onlineVectors, provisioner,
-                manifests, mapper);
+                manifests, uploadQuotaService, mapper);
         return new Fixture(writer, job, target, jobs, knowledgeBases, documents, chunks, profiles,
-                documentStorage, recoveryVectors, onlineVectors, provisioner);
+                documentStorage, recoveryVectors, onlineVectors, provisioner, uploadQuotaService);
     }
 
     private void add(List<RecoveryArchiveItem> items, Map<String, byte[]> payloads, UUID archiveId,
@@ -249,8 +275,9 @@ class DefaultRecoveryRestoreWriterTest {
     }
 
     private record Fixture(DefaultRecoveryRestoreWriter writer, RecoveryRestoreJob job, KnowledgeBase target,
-                           RecoveryRestoreJobRepository jobs, KnowledgeBaseRepository knowledgeBases,
-                           DocumentRepository documents, ChunkRepository chunks, RetrievalProfileRepository profiles,
-                           MinioStorageService documentStorage, MilvusRecoveryService recoveryVectors,
-                           MilvusVectorService onlineVectors, SparseRecoveryProvisioner provisioner) { }
+                            RecoveryRestoreJobRepository jobs, KnowledgeBaseRepository knowledgeBases,
+                            DocumentRepository documents, ChunkRepository chunks, RetrievalProfileRepository profiles,
+                            MinioStorageService documentStorage, MilvusRecoveryService recoveryVectors,
+                            MilvusVectorService onlineVectors, SparseRecoveryProvisioner provisioner,
+                            UploadQuotaService uploadQuotaService) { }
 }

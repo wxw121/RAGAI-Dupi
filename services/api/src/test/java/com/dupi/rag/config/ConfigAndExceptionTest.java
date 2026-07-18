@@ -1,13 +1,19 @@
 package com.dupi.rag.config;
 
 import com.dupi.rag.exception.GlobalExceptionHandler;
+import com.dupi.rag.exception.KnowledgeBaseMaintenanceException;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.exception.UploadIdempotencyConflictException;
+import com.dupi.rag.exception.UploadPayloadTooLargeException;
+import com.dupi.rag.exception.UploadQuotaExceededException;
 import com.dupi.rag.repository.UserAccountRepository;
 import io.milvus.client.MilvusServiceClient;
 import io.minio.MinioClient;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import org.junit.jupiter.api.Test;
+import org.slf4j.MDC;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
@@ -497,6 +503,55 @@ class ConfigAndExceptionTest {
     }
 
     @Test
+    void apiKeyFilterProtectsUploadQuotaAndIngestCancellation() throws Exception {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        properties.setAuthSecret("test-secret");
+        ApiSecurityProperties.UserAccount uploader = user("uploader", "pw", "tenant-a", "USER");
+        uploader.setPermissions("KB_READ,DOCUMENT_UPLOAD");
+        ApiSecurityProperties.UserAccount reader = user("reader-only", "pw", "tenant-a", "USER");
+        reader.setPermissions("KB_READ");
+        properties.getUsers().add(uploader);
+        properties.getUsers().add(reader);
+        ApiTokenService tokenService = new ApiTokenService(
+                properties,
+                Clock.fixed(Instant.parse("2026-07-06T00:00:00Z"), ZoneOffset.UTC)
+        );
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(properties, tokenService);
+
+        assertAllowed(filter, tokenService, "uploader", "GET", "/api/v1/upload-quota");
+        assertAllowed(
+                filter,
+                tokenService,
+                "uploader",
+                "POST",
+                "/api/v1/knowledge-bases/kb/ingest-jobs/job/cancel"
+        );
+
+        MockHttpServletRequest quota = bearerRequest(
+                tokenService,
+                "reader-only",
+                "GET",
+                "/api/v1/upload-quota"
+        );
+        MockHttpServletResponse quotaResponse = new MockHttpServletResponse();
+        filter.doFilter(quota, quotaResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest cancel = bearerRequest(
+                tokenService,
+                "reader-only",
+                "POST",
+                "/api/v1/knowledge-bases/kb/ingest-jobs/job/cancel"
+        );
+        MockHttpServletResponse cancelResponse = new MockHttpServletResponse();
+        filter.doFilter(cancel, cancelResponse, mock(FilterChain.class));
+
+        assertThat(quotaResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(cancelResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(quotaResponse.getContentAsString()).contains("permission required: DOCUMENT_UPLOAD");
+        assertThat(cancelResponse.getContentAsString()).contains("permission required: DOCUMENT_UPLOAD");
+    }
+
+    @Test
     void auditWebhookNotificationRequiresDedicatedDispatchPermission() throws Exception {
         ApiSecurityProperties properties = new ApiSecurityProperties();
         properties.setAuthSecret("test-secret");
@@ -874,5 +929,39 @@ class ConfigAndExceptionTest {
         var generic = handler.handleGeneric(new RuntimeException());
         assertThat(generic.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
         assertThat(generic.getBody().getMessage()).isEqualTo("Unexpected error");
+    }
+
+    @Test
+    void globalExceptionHandlerMapsUploadGovernanceErrorsAndRetryAfter() {
+        GlobalExceptionHandler handler = new GlobalExceptionHandler();
+        MDC.put("traceId", "trace-upload");
+        try {
+            var maintenance = handler.handleMaintenance(new KnowledgeBaseMaintenanceException("archive running"));
+            assertThat(maintenance.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+            assertThat(maintenance.getBody().getError()).isEqualTo("knowledge_base_maintenance");
+
+            var conflict = handler.handleUploadIdempotencyConflict(
+                    new UploadIdempotencyConflictException("key reused"));
+            assertThat(conflict.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+            assertThat(conflict.getBody().getError()).isEqualTo("upload_idempotency_conflict");
+
+            var tooLarge = handler.handleUploadPayloadTooLarge(
+                    new UploadPayloadTooLargeException("file too large"));
+            assertThat(tooLarge.getStatusCode()).isEqualTo(HttpStatus.PAYLOAD_TOO_LARGE);
+            assertThat(tooLarge.getBody().getError()).isEqualTo("upload_payload_too_large");
+
+            var throttled = handler.handleUploadQuotaExceeded(
+                    new UploadQuotaExceededException("window exhausted", 30L));
+            assertThat(throttled.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+            assertThat(throttled.getHeaders().getFirst(HttpHeaders.RETRY_AFTER)).isEqualTo("30");
+            assertThat(throttled.getBody().getRequestId()).isEqualTo("trace-upload");
+
+            var retained = handler.handleUploadQuotaExceeded(
+                    new UploadQuotaExceededException("retained exhausted"));
+            assertThat(retained.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+            assertThat(retained.getHeaders()).doesNotContainKey(HttpHeaders.RETRY_AFTER);
+        } finally {
+            MDC.remove("traceId");
+        }
     }
 }

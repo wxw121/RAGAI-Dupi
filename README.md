@@ -1,5 +1,57 @@
 # dupi-RAG
 
+> V1.4.1 adds persisted tenant/user upload quotas, idempotent per-file uploads, cancellable and leased ingest executions, stale callback protection, and deduplicated terminal-failure events with optional webhook delivery. API version: `1.4.1-SNAPSHOT`; Web version: `1.4.1`.
+
+## V1.4.1 Upload Governance
+
+The Web uploads each file independently with bounded concurrency and an `Idempotency-Key`. It shows retained and rolling-window quota, keeps failures isolated per file, supports transport abort/retry, and calls the ingest cancellation API after a job exists. Polling is serialized and aborted on unmount so an older response cannot overwrite newer state.
+
+PostgreSQL is authoritative for upload reservations and ingest execution. Upload reservations move through `PENDING -> COMMITTED -> RELEASED`; retained quota counts active `PENDING` + `COMMITTED` reservations, while `RELEASED` reservations no longer consume retained bytes/documents. `attemptId` / `attemptExpiresAt` lease in-flight uploads so the stale-upload reconciler can either commit durable doc/job/outbox attempts or clean partial objects/jobs/docs before release. A retry of the same released idempotency key rechecks retained quota but does not double-charge rolling-window bytes. Ingest retries rotate `executionId`; Worker callbacks carry a monotonic `sequence`; stale, duplicate, or terminal-state callbacks are acknowledged as ignored. Redis uses ready and processing lists, a bounded reaper moves `requeueEligible` processing payloads back to ready, and a processing item is acknowledged only after terminal handling.
+
+Terminal `FAILED`/`DEAD_LETTER` notifications are persisted once per job execution/status. With a webhook configured, due `PENDING`/`FAILED` rows are delivered with bounded backoff; 2xx responses become `DELIVERED`, and rows that reach the attempt limit become `EXHAUSTED`. Webhook delivery requires HTTPS by default, blocks local/metadata hosts unless explicitly allowed, can include `X-Dupi-Webhook-Secret`, and truncates sanitized error text.
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `UPLOAD_QUOTA_ENABLED` | `true` | Enable persistent upload quota accounting |
+| `UPLOAD_QUOTA_RETAINED_BYTES_LIMIT` | `1073741824` | Retained bytes per tenant/user |
+| `UPLOAD_QUOTA_RETAINED_DOCUMENTS_LIMIT` | `1000` | Retained documents per tenant/user |
+| `UPLOAD_QUOTA_WINDOW_BYTES_LIMIT` | `268435456` | Accepted bytes per rolling window |
+| `UPLOAD_QUOTA_WINDOW_SECONDS` | `3600` | Rolling upload window |
+| `UPLOAD_QUOTA_ATTEMPT_LEASE_SECONDS` | `300` | In-flight upload attempt lease before stale reconciliation |
+| `UPLOAD_QUOTA_RECONCILIATION_BATCH_SIZE` | `50` | Max stale upload reservations claimed per reconciler pass |
+| `UPLOAD_QUOTA_RECONCILIATION_CRON` | `0 */5 * * * *` | Stale upload reservation reconciler cadence |
+| `INGEST_PROCESSING_QUEUE` | `dupi:ingest:jobs:processing` | Worker in-flight Redis list |
+| `INGEST_LEASE_SECONDS` | `60` | PostgreSQL ingest claim lease |
+| `INGEST_HEARTBEAT_INTERVAL_SECONDS` | `15` | Worker lease heartbeat during long operations |
+| `INGEST_PROCESSING_REAP_INTERVAL_SECONDS` | `60` | Worker processing-list reaper cadence |
+| `INGEST_PROCESSING_REAP_BATCH_SIZE` | `100` | Oldest-tail processing payloads inspected per reaper pass |
+| `REDIS_RETRY_DELAY_SECONDS` | `1` | Worker Redis transient failure backoff |
+| `WORKER_ID` | host/process derived | Stable claim owner identifier |
+| `INGEST_FAILURE_NOTIFICATION_WEBHOOK_URL` | empty | Optional POST target for FAILED/DEAD_LETTER ingest events |
+| `INGEST_FAILURE_NOTIFICATION_TIMEOUT_SECONDS` | `10` | Webhook delivery timeout |
+| `INGEST_FAILURE_NOTIFICATION_MAX_ATTEMPTS` | `5` | Bounded webhook retry attempts before `EXHAUSTED` |
+| `INGEST_FAILURE_NOTIFICATION_WEBHOOK_SECRET` | empty | Optional `X-Dupi-Webhook-Secret` header value |
+| `INGEST_FAILURE_NOTIFICATION_MAX_ERROR_MESSAGE_LENGTH` | `512` | Sanitized webhook error-text cap |
+| `INGEST_FAILURE_NOTIFICATION_ALLOW_INSECURE_WEBHOOK` | `false` | Permit non-HTTPS/local webhook targets for trusted local testing only |
+| `INGEST_FAILURE_NOTIFICATION_DISPATCH_CRON` | `*/30 * * * * *` | Failure-notification dispatch cadence |
+
+Key routes:
+
+```bash
+# User-visible quota; requires DOCUMENT_UPLOAD
+curl http://localhost:8080/api/v1/upload-quota
+
+# Idempotent single-file upload
+curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/documents \
+  -H "Idempotency-Key: upload-20260718-001" \
+  -F "file=@sample.pdf"
+
+# Cancel queued/running ingest
+curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs/{jobId}/cancel
+```
+
+See [the V1.4.1 release runbook](docs/v1.4.1-release-runbook.md) and the [design](docs/superpowers/specs/2026-07-18-v1.4.1-upload-governance-design.md). The latest local V1.4.1 release scan records image digest `sha256:eec613fab9cdd1d873b95172f98d42ade5989238e2b0f76761b6b4f63b86515a`, image size 640,389,450 bytes, no Python findings, and 22 accepted upstream-unfixed OS findings expiring 2026-08-15.
+
 > V1.4.0 adds tenant-scoped, checksum-verified knowledge-base archives and idempotent restore into a new hidden knowledge base. It is an application recovery layer, not a replacement for PostgreSQL, MinIO, etcd, or Milvus infrastructure backups.
 
 ## V1.4 Verifiable Recovery

@@ -139,6 +139,11 @@ public class KnowledgeBaseController {
         return ingestJobService.retryForKnowledgeBase(kbId, jobId);
     }
 
+    @PostMapping("/{kbId}/ingest-jobs/{jobId}/cancel")
+    public IngestJobResponse cancelJob(@PathVariable UUID kbId, @PathVariable UUID jobId) {
+        return ingestJobService.cancelForKnowledgeBase(kbId, jobId);
+    }
+
     @PostMapping("/{kbId}/reindex")
     public java.util.List<IngestJobResponse> reindex(@PathVariable UUID kbId) {
         return ingestJobService.reindexKnowledgeBase(kbId);

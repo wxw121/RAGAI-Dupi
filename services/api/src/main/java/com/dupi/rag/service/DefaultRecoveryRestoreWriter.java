@@ -41,6 +41,7 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
     private final MilvusVectorService onlineVectors;
     private final SparseRecoveryProvisioner sparseProvisioner;
     private final RecoveryManifestService manifests;
+    private final UploadQuotaService uploadQuotaService;
     private final ObjectMapper mapper;
 
     @Override
@@ -87,6 +88,8 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
         UUID targetId = job.getTargetKnowledgeBaseId();
         if (targetId == null) return;
         List<Document> targetDocuments = documents.findByKbIdOrderByCreatedAtDesc(targetId);
+        targetDocuments.forEach(document -> uploadQuotaService.releaseCommitted(
+                document.getQuotaReservationId(), "Recovery restore abandoned"));
         targetDocuments.forEach(document -> documentStorage.delete(document.getObjectKey()));
         List<RetrievalProfile> targetProfiles = profiles.findByKbIdOrderByVersionDesc(targetId);
         onlineVectors.deleteByKbId(targetId);
@@ -152,6 +155,19 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
             source.setKbId(job.getTargetKnowledgeBaseId());
             source.setObjectKey(job.getTenantId() + "/" + job.getTargetKnowledgeBaseId()
                     + "/" + targetId + "/" + safeFilename(source.getFileName()));
+            source.setQuotaReservationId(null);
+        }
+        documents.saveAll(sourceDocuments);
+        for (Document restored : sourceDocuments) {
+            UploadQuotaReservation reservation = uploadQuotaService.createCommittedReservation(
+                    job.getTenantId(),
+                    job.getCreatedBy(),
+                    job.getTargetKnowledgeBaseId(),
+                    restored,
+                    "Recovery restore");
+            if (reservation != null) {
+                restored.setQuotaReservationId(reservation.getId());
+            }
         }
         documents.saveAll(sourceDocuments);
 

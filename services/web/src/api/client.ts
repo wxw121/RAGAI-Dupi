@@ -16,11 +16,13 @@ export interface LoginResponse {
 export class HttpError extends Error {
   status: number
   body: ApiError | null
+  retryAfter: string | null
 
-  constructor(status: number, message: string, body: ApiError | null = null) {
+  constructor(status: number, message: string, body: ApiError | null = null, retryAfter: string | null = null) {
     super(message)
     this.status = status
     this.body = body
+    this.retryAfter = retryAfter
   }
 }
 
@@ -32,7 +34,7 @@ async function parseError(res: Response): Promise<HttpError> {
     /* 响应体不是 JSON 时忽略解析失败，继续使用 HTTP 状态文本作为错误信息。 */
   }
   const message = body?.message ?? res.statusText ?? 'Request failed'
-  return new HttpError(res.status, message, body)
+  return new HttpError(res.status, message, body, res.headers?.get?.('Retry-After') ?? null)
 }
 
 export function getAuthToken(): string | null {
@@ -75,8 +77,10 @@ export async function login(username: string, password: string): Promise<LoginRe
   return body
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(path, { credentials: 'include' })
+export async function apiGet<T>(path: string, options: { signal?: AbortSignal } = {}): Promise<T> {
+  const init: RequestInit = { credentials: 'include' }
+  if (options.signal) init.signal = options.signal
+  const res = await fetch(path, init)
   if (!res.ok) throw await parseError(res)
   if (res.status === 204) return undefined as T
   return res.json()
@@ -117,10 +121,25 @@ export async function apiDelete(path: string): Promise<void> {
   if (!res.ok) throw await parseError(res)
 }
 
-export async function apiUpload<T>(path: string, file: File): Promise<T> {
+export interface UploadRequestOptions {
+  headers?: Record<string, string>
+  signal?: AbortSignal
+}
+
+export async function apiUpload<T>(
+  path: string,
+  file: File,
+  options: UploadRequestOptions = {},
+): Promise<T> {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch(path, { method: 'POST', credentials: 'include', headers: csrfHeaders(), body: form })
+  const res = await fetch(path, {
+    method: 'POST',
+    credentials: 'include',
+    headers: csrfHeaders(options.headers),
+    body: form,
+    signal: options.signal,
+  })
   if (!res.ok) throw await parseError(res)
   return res.json()
 }
