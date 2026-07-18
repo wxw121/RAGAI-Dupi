@@ -2,6 +2,7 @@ package com.dupi.rag.controller;
 
 import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;
+import com.dupi.rag.domain.enums.IngestJobStatus;
 import com.dupi.rag.config.ApiSecurityProperties;
 import com.dupi.rag.config.ApiTokenService;
 import com.dupi.rag.config.AuditProperties;
@@ -18,6 +19,7 @@ import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.util.unit.DataSize;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 
@@ -29,6 +31,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;
 
@@ -123,7 +126,7 @@ class ControllerLayerTest {
                 .document(docResponse)
                 .objectKey("key")
                 .build();
-        when(documentService.upload(kbId, file)).thenReturn(docResponse);
+        when(documentService.upload(kbId, file, null)).thenReturn(docResponse);
         when(documentService.uploadBatch(kbId, List.of(batchFile))).thenReturn(batchUploadResponse);
         when(documentService.listByKb(kbId)).thenReturn(List.of(docResponse));
         when(documentService.get(kbId, docId)).thenReturn(docResponse);
@@ -147,13 +150,51 @@ class ControllerLayerTest {
         IngestJobService service = mock(IngestJobService.class);
         IngestCallbackController controller = new IngestCallbackController(service);
         UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
         IngestStatusUpdate update = IngestStatusUpdate.builder().jobId(jobId.toString()).build();
         IngestJobResponse response = IngestJobResponse.builder().id(jobId).build();
+        when(service.handleStatusUpdate(update)).thenReturn(IngestCallbackAckResponse.ok());
+        when(service.claim(jobId, executionId, "worker-a", java.time.Duration.ofSeconds(45))).thenReturn(response);
+        when(service.refreshLease(jobId, executionId, "worker-a", java.time.Duration.ofSeconds(30))).thenReturn(response);
+        when(service.isCancellationRequested(jobId, executionId)).thenReturn(true);
+        Map<String, Object> executionState = Map.of(
+                "status", IngestJobStatus.PROCESSING,
+                "executionCurrent", true,
+                "terminal", false,
+                "leaseExpired", false,
+                "requeueEligible", false
+        );
+        when(service.getExecutionState(jobId, executionId)).thenReturn(executionState);
         when(service.retry(jobId)).thenReturn(response);
 
         assertThat(controller.updateStatus(update)).containsEntry("status", "ok");
+        assertThat(controller.claim(jobId, Map.of(
+                "executionId", executionId.toString(),
+                "workerId", "worker-a",
+                "leaseSeconds", 45
+        ))).isSameAs(response);
+        assertThat(controller.refreshLease(jobId, Map.of(
+                "executionId", executionId.toString(),
+                "workerId", "worker-a",
+                "leaseSeconds", 30
+        ))).isSameAs(response);
+        assertThat(controller.cancelled(jobId, executionId)).containsEntry("cancelled", true);
+        assertThat(controller.executionState(jobId, executionId)).isSameAs(executionState);
         assertThat(controller.retry(jobId)).isSameAs(response);
         verify(service).handleStatusUpdate(update);
+        verify(service).getExecutionState(jobId, executionId);
+    }
+
+    @Test
+    void ingestCallbackControllerExposesExecutionStateContract() {
+        assertThatCode(() -> {
+            var method = IngestCallbackController.class.getMethod(
+                    "executionState", UUID.class, UUID.class);
+            var mapping = method.getAnnotation(GetMapping.class);
+            assertThat(mapping).isNotNull();
+            assertThat(mapping.value())
+                    .containsExactly("/jobs/{jobId}/executions/{executionId}/state");
+        }).doesNotThrowAnyException();
     }
 
     @Test
@@ -191,6 +232,11 @@ class ControllerLayerTest {
         RetrieveResponse retrieveResponse = RetrieveResponse.builder().query("q").hits(List.of()).build();
         IngestJobResponse jobResponse = IngestJobResponse.builder().kbId(kbId).build();
         IngestJobResponse retryResponse = IngestJobResponse.builder().id(UUID.randomUUID()).kbId(kbId).build();
+        IngestJobResponse cancelResponse = IngestJobResponse.builder()
+                .id(UUID.randomUUID())
+                .kbId(kbId)
+                .status(com.dupi.rag.domain.enums.IngestJobStatus.CANCEL_REQUESTED)
+                .build();
         RagEvalRunResponse ragEvalRun = RagEvalRunResponse.builder()
                 .id(UUID.randomUUID())
                 .kbId(kbId)
@@ -256,6 +302,7 @@ class ControllerLayerTest {
         when(chatService.chat(kbId, syncChat)).thenReturn("answer");
         when(ingestJobService.listByKb(kbId)).thenReturn(List.of(jobResponse));
         when(ingestJobService.retryForKnowledgeBase(kbId, retryResponse.getId())).thenReturn(retryResponse);
+        when(ingestJobService.cancelForKnowledgeBase(kbId, cancelResponse.getId())).thenReturn(cancelResponse);
         when(chatSessionService.list(kbId)).thenReturn(List.of(sessionResponse));
         when(chatSessionService.create(kbId, createSession)).thenReturn(sessionResponse);
         when(chatSessionService.getDetail(kbId, sessionId)).thenReturn(sessionDetail);
@@ -297,6 +344,7 @@ class ControllerLayerTest {
         assertThat(controller.cancelChat(Map.of())).containsEntry("status", "cancel_requested");
         assertThat(controller.listJobs(kbId)).containsExactly(jobResponse);
         assertThat(controller.retryJob(kbId, retryResponse.getId())).isSameAs(retryResponse);
+        assertThat(controller.cancelJob(kbId, cancelResponse.getId())).isSameAs(cancelResponse);
         assertThat(controller.reindex(kbId)).containsExactly(jobResponse);
         assertThat(controller.exportKnowledgeBase(kbId)).isSameAs(exportResponse);
         assertThat(controller.importKnowledgeBase(importRequest)).isSameAs(kbResponse);

@@ -1,19 +1,40 @@
 import { useCallback, useState } from 'react'
 import { useDropzone } from '@/hooks/useDropzone'
-import { Upload } from 'lucide-react'
+import { RotateCcw, Upload, X } from 'lucide-react'
 import { cn, formatBytes } from '@/lib/utils'
-import type { OpsGuardrails } from '@/types'
+import type { OpsGuardrails, UploadQuota } from '@/types'
 
-export type UploadProgressFn = (current: number, total: number, fileName: string) => void
+export type UploadProgressFn = (
+  current: number,
+  total: number,
+  file: File,
+  status?: 'uploading' | 'uploaded' | 'failed',
+  errorMessage?: string,
+) => void
 
 interface UploadZoneProps {
-  onUpload: (files: File[], onProgress?: UploadProgressFn) => Promise<void>
+  onUpload: (
+    files: File[],
+    onProgress?: UploadProgressFn,
+    signal?: AbortSignal,
+    batchId?: string,
+  ) => Promise<void>
   disabled?: boolean
   guardrails?: OpsGuardrails | null
+  quota?: UploadQuota | null
 }
 
-export function UploadZone({ onUpload, disabled, guardrails }: UploadZoneProps) {
+interface UploadItem {
+  file: File
+  batchId: string
+  status: 'queued' | 'uploading' | 'uploaded' | 'failed'
+  errorMessage?: string
+}
+
+export function UploadZone({ onUpload, disabled, guardrails, quota }: UploadZoneProps) {
   const [uploading, setUploading] = useState(false)
+  const [controller, setController] = useState<AbortController | null>(null)
+  const [items, setItems] = useState<UploadItem[]>([])
   const [progress, setProgress] = useState<{
     current: number
     total: number
@@ -21,16 +42,26 @@ export function UploadZone({ onUpload, disabled, guardrails }: UploadZoneProps) 
   } | null>(null)
 
   const onDrop = useCallback(
-    async (files: File[]) => {
+    async (files: File[], retryBatchId?: string) => {
       if (!files.length || disabled || uploading) return
+      const batchId = retryBatchId ?? createUploadBatchId()
+      const uploadController = new AbortController()
+      setController(uploadController)
+      setItems(files.map((file) => ({ file, batchId, status: 'queued' })))
       setUploading(true)
       try {
-        await onUpload(files, (current, total, fileName) => {
-          setProgress({ current, total, fileName })
-        })
+        await onUpload(files, (current, total, file, status = 'uploading', errorMessage) => {
+          setProgress({ current, total, fileName: file.name })
+          setItems((currentItems) => currentItems.map((item) => (
+            item.file === file
+              ? { ...item, status, errorMessage }
+              : item
+          )))
+        }, uploadController.signal, batchId)
       } finally {
         setUploading(false)
         setProgress(null)
+        setController(null)
       }
     },
     [disabled, onUpload, uploading],
@@ -100,6 +131,65 @@ export function UploadZone({ onUpload, disabled, guardrails }: UploadZoneProps) 
           {guardrails.ingestQueue.maxPendingJobs} · max {formatBytes(guardrails.multipart.maxFileSizeBytes)}
         </p>
       )}
+      {quota && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          retained {formatBytes(quota.retainedBytesUsed)}/{formatBytes(quota.retainedBytesLimit)}
+          {' · '}documents {quota.retainedDocumentsUsed}/{quota.retainedDocumentsLimit}
+          {' · '}window {formatBytes(quota.windowBytesUsed)}/{formatBytes(quota.windowBytesLimit)}
+        </p>
+      )}
+      {uploading && controller && (
+        <button
+          type="button"
+          className="mt-3 inline-flex h-8 w-8 items-center justify-center rounded-md border border-border bg-background text-muted-foreground hover:text-foreground"
+          aria-label="Cancel upload"
+          title="Cancel active upload transport"
+          onClick={(event) => {
+            event.stopPropagation()
+            controller.abort()
+          }}
+        >
+          <X className="h-4 w-4" />
+        </button>
+      )}
+      {items.length > 0 && (
+        <ul className="mt-3 w-full max-w-xl space-y-1 text-left text-xs">
+          {items.slice(0, 8).map((item, index) => (
+            <li
+              key={`${item.file.name}-${item.file.lastModified}-${index}`}
+              className="flex min-h-8 items-center gap-2 border-t border-border/60 pt-1"
+            >
+              <span className="min-w-0 flex-1 truncate">{item.file.name}</span>
+              <span className={cn(
+                'shrink-0 text-muted-foreground',
+                item.status === 'failed' && 'text-destructive',
+              )}>
+                {item.errorMessage ?? item.status}
+              </span>
+              {item.status === 'failed' && !uploading && (
+                <button
+                  type="button"
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md hover:bg-muted"
+                  aria-label={`Retry ${item.file.name}`}
+                  title="Retry upload"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    void onDrop([item.file], item.batchId)
+                  }}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
+}
+
+function createUploadBatchId(): string {
+  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`
 }

@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir \
     --default-timeout=300 \
     --retries=20 \
     --index-url ${TORCH_INDEX_URL} \
-    torch==2.10.0+cpu \
+    torch==2.13.0+cpu \
     && pip install --no-cache-dir \
     --default-timeout=300 \
     -i ${PIP_INDEX_URL} \

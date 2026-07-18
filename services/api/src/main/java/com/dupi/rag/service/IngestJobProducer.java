@@ -10,6 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import java.util.List;
+import java.util.UUID;
 import com.dupi.rag.domain.enums.SparseMigrationState;
 import com.dupi.rag.repository.RetrievalProfileRepository;
 import com.dupi.rag.repository.SparseMigrationRepository;
@@ -42,6 +43,7 @@ public class IngestJobProducer {
             }
             IngestJobMessage message = IngestJobMessage.builder()
                     .jobId(job.getId().toString())
+                    .executionId(ensureExecutionId(job).toString())
                     .kbId(job.getKbId().toString())
                     .docId(job.getDocId().toString())
                     .objectKey(objectKey)
@@ -60,6 +62,13 @@ public class IngestJobProducer {
         } catch (Exception e) {
             throw new IllegalStateException("Failed to enqueue ingest job", e);
         }
+    }
+
+    private UUID ensureExecutionId(IngestJob job) {
+        if (job.getExecutionId() == null) {
+            job.setExecutionId(UUID.randomUUID());
+        }
+        return job.getExecutionId();
     }
 
     public void assertQueueAccepting() {

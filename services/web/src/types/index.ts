@@ -31,8 +31,9 @@ export interface Document {
   fileName: string
   mimeType: string
   fileSize: number
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED'
+  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
   errorMessage: string | null
+  currentJob?: IngestJob | null
   createdAt: string
   updatedAt: string
 }
@@ -53,11 +54,12 @@ export interface BatchDocumentUploadResponse {
 
 export interface IngestJob {
   id: string
+  executionId?: string | null
   kbId: string
   docId: string
   documentFileName?: string | null
   documentStatus?: Document['status'] | null
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'DEAD_LETTER'
+  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'DEAD_LETTER' | 'CANCEL_REQUESTED' | 'CANCELLED'
   stage: string | null
   retryCount: number
   errorMessage: string | null
@@ -301,6 +303,19 @@ export interface RagEvalRun {
   gateStatus?: 'PASS' | 'WARN' | 'BLOCKED' | 'UNBASELINED'
   metrics?: Record<string, number>
   baselineRunId?: string | null
+}
+
+export interface UploadQuota {
+  tenantId: string
+  userId: string
+  retainedBytesUsed: number
+  retainedBytesLimit: number
+  retainedDocumentsUsed: number
+  retainedDocumentsLimit: number
+  windowBytesUsed: number
+  windowBytesLimit: number
+  windowSeconds: number
+  retryAfter: string | null
 }
 
 export interface RagEvalRunRequest {

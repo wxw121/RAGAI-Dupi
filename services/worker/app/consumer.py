@@ -1,21 +1,217 @@
+import hashlib
 import json
 import logging
 import tempfile
+import threading
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
-from app.callback import download_object, post_status
+import redis
+from redis.exceptions import LockError
+
+from app.callback import (
+    claim_job,
+    download_object,
+    get_job_state,
+    post_status,
+    refresh_lease,
+)
 from app.canonical import canonicalize
 from app.chunker.recursive_chunker import chunk_nodes
 from app.embedder import Embedder
-from app.indexer import MilvusIndexer
+from app.indexer import MilvusIndexer, scope_chunk_ids
 from app.models import DocumentNode
 from app.parser.document_parser import parse_document
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 
+class StatusCallbackError(RuntimeError):
+    pass
+
+
+class VectorLockUnavailable(StatusCallbackError):
+    pass
+
+
+class VectorLockLost(StatusCallbackError):
+    pass
+
+
+class StatusIgnored(RuntimeError):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class IngestCancelled(RuntimeError):
+    pass
+
+
+class IngestSuperseded(RuntimeError):
+    pass
+
+
+class IngestTerminal(RuntimeError):
+    pass
+
+
+class _VectorLockLease:
+    def __init__(self, lock, lost: list[Exception]):
+        self.lock = lock
+        self.lost = lost
+
+    def held(self) -> bool:
+        if self.lost:
+            return False
+        try:
+            return bool(self.lock.owned())
+        except Exception:
+            return False
+
+
+@contextmanager
+def _document_vector_lock(kb_id: str, doc_id: str):
+    client = redis.Redis(
+        host=settings.redis_host,
+        port=settings.redis_port,
+        decode_responses=True,
+    )
+    lock_timeout = max(30.0, float(settings.ingest_lease_seconds) * 2)
+    lock_key = hashlib.sha256(f"{kb_id}\0{doc_id}".encode("utf-8")).hexdigest()
+    lock = client.lock(
+        f"dupi:ingest:vector-lock:{lock_key}",
+        timeout=lock_timeout,
+        blocking_timeout=lock_timeout,
+        thread_local=False,
+    )
+    try:
+        if not lock.acquire(blocking=True):
+            raise VectorLockUnavailable(f"Timed out acquiring vector lock for document {doc_id}")
+
+        stopped = threading.Event()
+        lost: list[Exception] = []
+
+        def renew_lock():
+            while not stopped.wait(max(1.0, lock_timeout / 3)):
+                try:
+                    if not lock.extend(lock_timeout, replace_ttl=True):
+                        lost.append(VectorLockLost(f"Lost vector lock for document {doc_id}"))
+                        return
+                except Exception as exc:
+                    lost.append(exc)
+                    return
+
+        renewal = threading.Thread(target=renew_lock, daemon=True)
+        renewal.start()
+        lease = _VectorLockLease(lock, lost)
+        try:
+            yield lease
+            if not lease.held():
+                raise VectorLockLost(f"Lost vector lock for document {doc_id}") from (
+                    lost[0] if lost else None
+                )
+        finally:
+            stopped.set()
+            renewal.join()
+            if lease.held():
+                with suppress(LockError):
+                    lock.release()
+    finally:
+        with suppress(Exception):
+            client.close()
+
+
+def _mutate_document_vectors(
+    indexer,
+    kb_id: str,
+    doc_id: str,
+    chunks,
+    vectors,
+    sparse_profile_version: int,
+    execution_id: str,
+    ensure_active,
+    owned_ids: list[str] | None = None,
+):
+    owned_ids = owned_ids or scope_chunk_ids(chunks, execution_id, doc_id)
+    with _document_vector_lock(kb_id, doc_id) as lock_lease:
+        ensure_active()
+        try:
+            indexer.delete_by_doc(
+                doc_id,
+                kb_id=kb_id,
+                sparse_profile_version=sparse_profile_version,
+                strict=True,
+            )
+            ensure_active()
+            indexer.index_chunks(
+                kb_id,
+                doc_id,
+                chunks,
+                vectors,
+                sparse_profile_version=sparse_profile_version,
+            )
+            ensure_active()
+        except Exception as exc:
+            if lock_lease is not None and not lock_lease.held():
+                raise VectorLockLost(f"Lost vector lock for document {doc_id}") from exc
+            indexer.delete_by_ids(
+                owned_ids,
+                kb_id=kb_id,
+                sparse_profile_version=sparse_profile_version,
+                strict=True,
+            )
+            raise
+    return owned_ids
+
+
+def _run_with_heartbeat(operation, heartbeat, interval_seconds: float):
+    heartbeat()
+    stopped = threading.Event()
+    failures = []
+
+    def heartbeat_loop():
+        while not stopped.wait(interval_seconds):
+            try:
+                heartbeat()
+            except Exception as exc:
+                failures.append(exc)
+                stopped.set()
+                return
+
+    thread = threading.Thread(target=heartbeat_loop, daemon=True)
+    thread.start()
+    operation_failure = None
+    try:
+        result = operation()
+    except Exception as exc:
+        operation_failure = exc
+    finally:
+        stopped.set()
+        thread.join()
+
+    control_failure = next(
+        (
+            failure
+            for failure in failures
+            if isinstance(failure, (IngestCancelled, IngestSuperseded, IngestTerminal))
+        ),
+        None,
+    )
+    if control_failure is not None:
+        raise control_failure from operation_failure
+    if operation_failure is not None:
+        raise operation_failure
+    if failures:
+        raise failures[0]
+    heartbeat()
+    return result
+
+
 def process_ingest_job(job: dict):
     job_id = job["jobId"]
+    execution_id = job.get("executionId")
     kb_id = job["kbId"]
     doc_id = job["docId"]
     object_key = job["objectKey"]
@@ -26,11 +222,33 @@ def process_ingest_job(job: dict):
     chunk_strategy = job.get("chunkStrategy", "recursive")
     embedding_model = job.get("embeddingModel")
     embedding_dimension = int(job.get("embeddingDimension", 1536))
+    sparse_profile_version = int(
+        job.get("sparseProfileVersion") or job.get("sparse_profile_version") or 0
+    )
+    sequence = 0
+    indexer = None
+    index_started = False
+    index_committed = False
+    owned_vector_ids = []
+
+    if execution_id:
+        claim_response = claim_job(
+            job_id,
+            execution_id,
+            settings.worker_id,
+            settings.ingest_lease_seconds,
+        )
+        if isinstance(claim_response, dict):
+            sequence = int(claim_response.get("callbackSequence") or 0)
 
     def update(status: str, stage: str, error: str | None = None, chunks=None):
+        nonlocal sequence
+        sequence += 1
         payload = {
             "jobId": job_id,
             "docId": doc_id,
+            "executionId": execution_id,
+            "sequence": sequence,
             "status": status,
             "stage": stage,
             "errorMessage": error,
@@ -47,44 +265,101 @@ def process_ingest_job(job: dict):
                 }
                 for c in chunks
             ]
-        post_status(payload)
+        try:
+            ack = post_status(payload)
+        except Exception as exc:
+            raise StatusCallbackError("Failed to acknowledge ingest status callback") from exc
+        if isinstance(ack, dict) and ack.get("ignored"):
+            raise StatusIgnored(str(ack.get("reason") or "ignored"))
+        return ack
+
+    def ensure_job_active():
+        if not execution_id:
+            return
+        state = get_job_state(job_id, execution_id)
+        if state.get("missing") or state.get("executionCurrent") is False:
+            raise IngestSuperseded()
+        status = str(state.get("status") or "").upper()
+        if status in {"CANCEL_REQUESTED", "CANCELLED"}:
+            raise IngestCancelled()
+        if state.get("terminal") is True:
+            raise IngestTerminal(status)
+        if state.get("leaseExpired") is True or state.get("requeueEligible") is True:
+            raise IngestSuperseded()
+        refresh_lease(
+            job_id,
+            execution_id,
+            settings.worker_id,
+            settings.ingest_lease_seconds,
+        )
+
+    heartbeat_interval = min(
+        max(0.01, float(settings.ingest_heartbeat_interval_seconds)),
+        max(0.01, float(settings.ingest_lease_seconds) / 3),
+    )
+
+    def run_guarded(operation):
+        if not execution_id:
+            return operation()
+        return _run_with_heartbeat(operation, ensure_job_active, heartbeat_interval)
+
+    def cleanup_vectors():
+        if indexer is None or not owned_vector_ids:
+            return
+        indexer.delete_by_ids(
+            owned_vector_ids,
+            kb_id=kb_id,
+            sparse_profile_version=sparse_profile_version,
+            strict=True,
+        )
 
     try:
         update("processing", "parsing")
-        suffix = Path(file_name).suffix or ".bin"
-        with tempfile.TemporaryDirectory() as tmp:
-            local_path = Path(tmp) / f"doc{suffix}"
-            download_object(object_key, str(local_path))
-            try:
-                md_text = canonicalize(local_path, mime_type, file_name)
-                nodes = [
-                    DocumentNode(
-                        text=md_text,
-                        metadata={"source": file_name, "format": "canonical_md"},
+
+        def parse_source():
+            suffix = Path(file_name).suffix or ".bin"
+            with tempfile.TemporaryDirectory() as tmp:
+                local_path = Path(tmp) / f"doc{suffix}"
+                download_object(object_key, str(local_path))
+                try:
+                    md_text = canonicalize(local_path, mime_type, file_name)
+                    return [
+                        DocumentNode(
+                            text=md_text,
+                            metadata={"source": file_name, "format": "canonical_md"},
+                        )
+                    ]
+                except ValueError:
+                    logger.warning(
+                        "canonicalize unsupported for %s, falling back to parse_document",
+                        file_name,
                     )
-                ]
-            except ValueError:
-                logger.warning(
-                    "canonicalize unsupported for %s, falling back to parse_document",
-                    file_name,
-                )
-                nodes = parse_document(local_path, mime_type, file_name)
+                    return parse_document(local_path, mime_type, file_name)
+
+        nodes = run_guarded(parse_source)
 
         update("processing", "chunking")
         embedder = Embedder(model=embedding_model)
-        chunks = chunk_nodes(
-            nodes,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            strategy=chunk_strategy,
-            embed_fn=embedder.embed if chunk_strategy == "semantic" else None,
+        chunks = run_guarded(
+            lambda: chunk_nodes(
+                nodes,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                strategy=chunk_strategy,
+                embed_fn=embedder.embed if chunk_strategy == "semantic" else None,
+            )
         )
 
         if not chunks:
             raise ValueError("No chunks produced from document")
 
         update("processing", "embedding")
-        vectors = embedder.embed_batch([c.content for c in chunks])
+        vectors = []
+        batch_size = max(1, settings.embedding_batch_size)
+        contents = [c.content for c in chunks]
+        for offset in range(0, len(contents), batch_size):
+            batch = contents[offset:offset + batch_size]
+            vectors.extend(run_guarded(lambda batch=batch: embedder.embed_batch(batch)))
         if len(vectors) != len(chunks):
             raise ValueError(f"Embedding count mismatch: chunks={len(chunks)} vectors={len(vectors)}")
 
@@ -95,17 +370,89 @@ def process_ingest_job(job: dict):
             )
 
         update("processing", "indexing")
-        indexer = MilvusIndexer(dimension=embedding_dimension)
-        sparse_profile_version = int(job.get("sparseProfileVersion") or job.get("sparse_profile_version") or 0)
-        indexer.delete_by_doc(doc_id, kb_id=kb_id, sparse_profile_version=sparse_profile_version)
-        indexer.index_chunks(
-            kb_id, doc_id, chunks, vectors,
-            sparse_profile_version=sparse_profile_version,
-        )
+        indexer = run_guarded(lambda: MilvusIndexer(dimension=embedding_dimension))
+        index_started = True
+        owned_vector_ids = scope_chunk_ids(chunks, execution_id, doc_id)
+
+        if execution_id:
+            def mutate_vectors():
+                nonlocal index_committed
+                _mutate_document_vectors(
+                    indexer,
+                    kb_id,
+                    doc_id,
+                    chunks,
+                    vectors,
+                    sparse_profile_version,
+                    execution_id,
+                    ensure_job_active,
+                    owned_ids=owned_vector_ids,
+                )
+                index_committed = True
+
+            run_guarded(mutate_vectors)
+        else:
+            indexer.delete_by_doc(
+                doc_id,
+                kb_id=kb_id,
+                sparse_profile_version=sparse_profile_version,
+            )
+            indexer.index_chunks(
+                kb_id,
+                doc_id,
+                chunks,
+                vectors,
+                sparse_profile_version=sparse_profile_version,
+            )
+            index_committed = True
 
         update("completed", "completed", chunks=chunks)
         logger.info("Ingest job %s completed with %d chunks", job_id, len(chunks))
 
+    except IngestCancelled:
+        if index_committed:
+            cleanup_vectors()
+        try:
+            update("cancelled", "cancelled")
+        except StatusIgnored as ignored:
+            logger.info(
+                "Cancellation callback for ingest job %s was ignored: %s",
+                job_id,
+                ignored.reason,
+            )
+        logger.info("Ingest job %s cancelled", job_id)
+    except IngestSuperseded:
+        if index_committed:
+            cleanup_vectors()
+        logger.info("Stopped superseded ingest execution %s for job %s", execution_id, job_id)
+    except IngestTerminal as terminal:
+        logger.info("Stopped ingest job %s already in terminal state %s", job_id, terminal)
+    except StatusIgnored as ignored:
+        if ignored.reason == "cancel_requested":
+            if index_committed:
+                cleanup_vectors()
+            try:
+                update("cancelled", "cancelled")
+            except StatusIgnored as terminal_ignored:
+                logger.info(
+                    "Cancellation callback for ingest job %s was ignored: %s",
+                    job_id,
+                    terminal_ignored.reason,
+                )
+        elif ignored.reason in {"document_tombstoned", "stale_execution"} and index_committed:
+            cleanup_vectors()
+        logger.info("Stopped ingest job %s after ignored callback: %s", job_id, ignored.reason)
+    except StatusCallbackError:
+        raise
     except Exception as exc:
         logger.exception("Ingest job %s failed", job_id)
-        update("failed", "failed", error=str(exc))
+        if index_committed:
+            cleanup_vectors()
+        try:
+            update("failed", "failed", error=str(exc))
+        except StatusIgnored as ignored:
+            logger.info(
+                "Failure callback for ingest job %s was ignored: %s",
+                job_id,
+                ignored.reason,
+            )

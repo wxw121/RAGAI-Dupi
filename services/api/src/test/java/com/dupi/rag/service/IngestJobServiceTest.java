@@ -20,12 +20,15 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.Instant;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
@@ -43,6 +46,7 @@ class IngestJobServiceTest {
     @Mock MilvusVectorService milvusVectorService;
     @Mock VectorCleanupTaskService vectorCleanupTaskService;
     @Mock AuditLogService auditLogService;
+    @Mock IngestFailureNotificationService failureNotificationService;
 
     IngestJobService service() {
         RedisQueueProperties redisQueueProperties = new RedisQueueProperties();
@@ -62,7 +66,8 @@ class IngestJobServiceTest {
                 llmProperties,
                 milvusVectorService,
                 vectorCleanupTaskService,
-                auditLogService
+                auditLogService,
+                failureNotificationService
         );
     }
 
@@ -73,6 +78,7 @@ class IngestJobServiceTest {
         UUID jobId = UUID.randomUUID();
         UUID chunkId = UUID.randomUUID();
         IngestJob job = job(kbId, docId, jobId);
+        job.setStatus(IngestJobStatus.PROCESSING);
         Document doc = doc(kbId, docId);
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
         when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
@@ -100,6 +106,7 @@ class IngestJobServiceTest {
         UUID docId = UUID.randomUUID();
         UUID jobId = UUID.randomUUID();
         IngestJob job = job(kbId, docId, jobId);
+        job.setStatus(IngestJobStatus.PROCESSING);
         Document doc = doc(kbId, docId);
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
         when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
@@ -114,6 +121,7 @@ class IngestJobServiceTest {
         assertThat(doc.getStatus()).isEqualTo(DocumentStatus.FAILED);
         assertThat(doc.getErrorMessage()).isEqualTo("bad pdf");
         assertThat(job.getStage()).isEqualTo(IngestStage.FAILED);
+        verify(failureNotificationService).recordTerminalFailure(job, doc);
     }
 
     @Test
@@ -135,11 +143,34 @@ class IngestJobServiceTest {
     }
 
     @Test
+    void handleStatusUpdateLocksJobBeforeCheckingCallbackSequence() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setStatus(IngestJobStatus.PROCESSING);
+        Document doc = doc(kbId, docId);
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        service().handleStatusUpdate(IngestStatusUpdate.builder()
+                .jobId(jobId.toString())
+                .docId(docId.toString())
+                .status("processing")
+                .stage("parsing")
+                .build());
+
+        verify(ingestJobRepository).findByIdForUpdate(jobId);
+        verify(ingestJobRepository, never()).findById(jobId);
+    }
+
+    @Test
     void retryResetsJobAndEnqueuesAgainUntilRetryLimit() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         UUID jobId = UUID.randomUUID();
         IngestJob job = job(kbId, docId, jobId);
+        job.setStatus(IngestJobStatus.FAILED);
         job.setRetryCount(2);
         Document doc = doc(kbId, docId);
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
@@ -160,11 +191,528 @@ class IngestJobServiceTest {
     }
 
     @Test
+    void retryRotatesExecutionIdAndResetsCallbackSequence() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID firstExecution = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setStatus(IngestJobStatus.FAILED);
+        job.setExecutionId(firstExecution);
+        job.setCallbackSequence(7L);
+        job.setClaimedBy("worker-a");
+        job.setLeaseExpiresAt(Instant.now().plusSeconds(30));
+        job.setCancelRequestedAt(Instant.now());
+        Document doc = doc(kbId, docId);
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
+
+        var response = service().retry(jobId);
+
+        assertThat(response.getStatus()).isEqualTo(IngestJobStatus.PENDING);
+        assertThat(job.getExecutionId()).isNotEqualTo(firstExecution);
+        assertThat(job.getCallbackSequence()).isZero();
+        assertThat(job.getClaimedBy()).isNull();
+        assertThat(job.getLeaseExpiresAt()).isNull();
+        assertThat(job.getCancelRequestedAt()).isNull();
+    }
+
+    @Test
+    void claimValidExecutionMovesQueuedJobToProcessingWithLease() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setExecutionId(executionId);
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+
+        var response = service().claim(jobId, executionId, "worker-a", Duration.ofSeconds(45));
+
+        assertThat(response.getStatus()).isEqualTo(IngestJobStatus.PROCESSING);
+        assertThat(job.getStage()).isEqualTo(IngestStage.PARSING);
+        assertThat(job.getClaimedBy()).isEqualTo("worker-a");
+        assertThat(job.getStartedAt()).isNotNull();
+        assertThat(job.getLeaseExpiresAt()).isAfter(Instant.now());
+        verify(ingestJobRepository).save(job);
+
+        assertThatThrownBy(() -> service().claim(jobId, UUID.randomUUID(), "worker-b", Duration.ofSeconds(45)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("execution");
+    }
+
+    @Test
+    void claimRejectsGeneratedExecutionMismatchAndNonQueuedJob() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setExecutionId(null);
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+
+        assertThatThrownBy(() -> service().claim(
+                jobId, UUID.randomUUID(), "worker-a", Duration.ofSeconds(30)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("execution");
+        assertThat(job.getExecutionId()).isNotNull();
+
+        job.setStatus(IngestJobStatus.PROCESSING);
+        job.setStage(IngestStage.PARSING);
+        assertThatThrownBy(() -> service().claim(
+                jobId, job.getExecutionId(), "worker-a", Duration.ofSeconds(30)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not claimable");
+    }
+
+    @Test
+    void refreshLeaseUpdatesRunningJobAndRejectsMismatchOrTerminalState() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setExecutionId(executionId);
+        job.setStatus(IngestJobStatus.PROCESSING);
+        job.setStage(IngestStage.EMBEDDING);
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc(kbId, docId)));
+
+        var response = service().refreshLease(jobId, executionId, "worker-b", null);
+
+        assertThat(response.getStatus()).isEqualTo(IngestJobStatus.PROCESSING);
+        assertThat(job.getClaimedBy()).isEqualTo("worker-b");
+        assertThat(job.getLeaseExpiresAt()).isAfter(Instant.now());
+        verify(ingestJobRepository).save(job);
+
+        assertThatThrownBy(() -> service().refreshLease(
+                jobId, UUID.randomUUID(), "worker-c", Duration.ofSeconds(10)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("execution");
+
+        assertThatThrownBy(() -> service().refreshLease(
+                jobId, executionId, "worker-c", Duration.ofSeconds(10)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("claimed by another worker");
+
+        job.setStatus(IngestJobStatus.COMPLETED);
+        assertThatThrownBy(() -> service().refreshLease(
+                jobId, executionId, "worker-b", Duration.ofSeconds(10)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not running");
+
+        job.setStatus(IngestJobStatus.CANCEL_REQUESTED);
+        assertThat(service().refreshLease(
+                jobId, executionId, "worker-b", Duration.ofSeconds(10)).getStatus())
+                .isEqualTo(IngestJobStatus.CANCEL_REQUESTED);
+    }
+
+    @Test
+    void cancellationCheckStopsCancelledTerminalAndStaleExecutions() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setExecutionId(executionId);
+        job.setStatus(IngestJobStatus.PROCESSING);
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+
+        assertThat(service().isCancellationRequested(jobId, executionId)).isFalse();
+        assertThat(service().isCancellationRequested(jobId, UUID.randomUUID())).isTrue();
+
+        job.setStatus(IngestJobStatus.CANCEL_REQUESTED);
+        assertThat(service().isCancellationRequested(jobId, executionId)).isTrue();
+
+        job.setStatus(IngestJobStatus.COMPLETED);
+        assertThat(service().isCancellationRequested(jobId, executionId)).isTrue();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void executionStateReportsCurrentTerminalAndExpiredLeaseSignals() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setExecutionId(executionId);
+        job.setStatus(IngestJobStatus.PROCESSING);
+        job.setLeaseExpiresAt(Instant.now().minusSeconds(1));
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        AtomicReference<Map<String, Object>> result = new AtomicReference<>();
+
+        assertThatCode(() -> {
+            var method = IngestJobService.class.getMethod("getExecutionState", UUID.class, UUID.class);
+            result.set((Map<String, Object>) method.invoke(service(), jobId, executionId));
+        }).doesNotThrowAnyException();
+
+        assertThat(result.get())
+                .containsEntry("status", IngestJobStatus.PROCESSING)
+                .containsEntry("executionCurrent", true)
+                .containsEntry("terminal", false)
+                .containsEntry("leaseExpired", true);
+    }
+
+    @Test
+    void executionStateMarksOnlyCurrentQueuedExecutionEligibleForRequeue() {
+        UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
+        IngestJob job = job(UUID.randomUUID(), UUID.randomUUID(), jobId);
+        job.setExecutionId(executionId);
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+
+        Map<String, Object> current = service().getExecutionState(jobId, executionId);
+        Map<String, Object> stale = service().getExecutionState(jobId, UUID.randomUUID());
+
+        assertThat(current).containsEntry("requeueEligible", true);
+        assertThat(stale).containsEntry("requeueEligible", false);
+    }
+
+    @Test
+    void cancelQueuedJobTerminatesAndCancelsPendingOutbox() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        Document doc = doc(kbId, docId);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        var response = service().cancelForKnowledgeBase(kbId, jobId);
+
+        assertThat(response.getStatus()).isEqualTo(IngestJobStatus.CANCELLED);
+        assertThat(job.getStage()).isEqualTo(IngestStage.CANCELLED);
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.CANCELLED);
+        verify(ingestOutboxService).cancelPendingForJob(jobId, "ingest cancelled by user");
+        verify(failureNotificationService, never()).recordTerminalFailure(any(), any());
+        verify(ingestJobRepository).save(job);
+        verify(documentRepository).save(doc);
+    }
+
+    @Test
+    void cancelRunningJobPersistsCancelRequestedState() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setStatus(IngestJobStatus.PROCESSING);
+        job.setStage(IngestStage.EMBEDDING);
+        Document doc = doc(kbId, docId);
+        doc.setStatus(DocumentStatus.PROCESSING);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        var response = service().cancelForKnowledgeBase(kbId, jobId);
+
+        assertThat(response.getStatus()).isEqualTo(IngestJobStatus.CANCEL_REQUESTED);
+        assertThat(job.getStage()).isEqualTo(IngestStage.EMBEDDING);
+        assertThat(job.getCancelRequestedAt()).isNotNull();
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PROCESSING);
+    }
+
+    @Test
+    void cancelForKnowledgeBaseLocksJobBeforeTransition() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        Document doc = doc(kbId, docId);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        service().cancelForKnowledgeBase(kbId, jobId);
+
+        verify(ingestJobRepository).findByIdForUpdate(jobId);
+        verify(ingestJobRepository, never()).findById(jobId);
+    }
+
+    @Test
+    void retryLocksJobAndRejectsNonTerminalExecution() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setStatus(IngestJobStatus.PROCESSING);
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+
+        assertThatThrownBy(() -> service().retry(jobId))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("failed or dead-letter");
+
+        verify(ingestJobRepository).findByIdForUpdate(jobId);
+        verify(ingestJobRepository, never()).findById(jobId);
+        verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void handleStatusUpdateIgnoresStaleExecutionAndDuplicateSequence() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setExecutionId(executionId);
+        job.setStatus(IngestJobStatus.PROCESSING);
+        job.setCallbackSequence(5L);
+        Document doc = doc(kbId, docId);
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        var staleExecution = service().handleStatusUpdate(IngestStatusUpdate.builder()
+                .jobId(jobId.toString())
+                .docId(docId.toString())
+                .executionId(UUID.randomUUID().toString())
+                .sequence(6L)
+                .status("completed")
+                .build());
+        var duplicate = service().handleStatusUpdate(IngestStatusUpdate.builder()
+                .jobId(jobId.toString())
+                .docId(docId.toString())
+                .executionId(executionId.toString())
+                .sequence(5L)
+                .status("completed")
+                .build());
+
+        assertThat(staleExecution.isIgnored()).isTrue();
+        assertThat(duplicate.isIgnored()).isTrue();
+        assertThat(job.getStatus()).isEqualTo(IngestJobStatus.PROCESSING);
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PENDING);
+        verify(chunkRepository, never()).deleteByDocId(any());
+    }
+
+    @Test
+    void handleStatusUpdateIgnoresCallbacksMissingExecutionOrSequenceForExecutedJobs() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setExecutionId(executionId);
+        job.setStatus(IngestJobStatus.PROCESSING);
+        Document doc = doc(kbId, docId);
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        var missingExecution = service().handleStatusUpdate(IngestStatusUpdate.builder()
+                .jobId(jobId.toString())
+                .docId(docId.toString())
+                .sequence(1L)
+                .status("completed")
+                .build());
+        var missingSequence = service().handleStatusUpdate(IngestStatusUpdate.builder()
+                .jobId(jobId.toString())
+                .docId(docId.toString())
+                .executionId(executionId.toString())
+                .status("completed")
+                .build());
+
+        assertThat(missingExecution.isIgnored()).isTrue();
+        assertThat(missingExecution.getReason()).isEqualTo("missing_execution");
+        assertThat(missingSequence.isIgnored()).isTrue();
+        assertThat(missingSequence.getReason()).isEqualTo("missing_sequence");
+        assertThat(job.getStatus()).isEqualTo(IngestJobStatus.PROCESSING);
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PENDING);
+    }
+
+    @Test
+    void handleStatusUpdateDoesNotResurrectTerminalJob() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setExecutionId(executionId);
+        job.setStatus(IngestJobStatus.COMPLETED);
+        job.setStage(IngestStage.COMPLETED);
+        Document doc = doc(kbId, docId);
+        doc.setStatus(DocumentStatus.COMPLETED);
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        var ignored = service().handleStatusUpdate(IngestStatusUpdate.builder()
+                .jobId(jobId.toString())
+                .docId(docId.toString())
+                .executionId(executionId.toString())
+                .sequence(1L)
+                .status("failed")
+                .errorMessage("late failure")
+                .build());
+
+        assertThat(ignored.isIgnored()).isTrue();
+        assertThat(job.getStatus()).isEqualTo(IngestJobStatus.COMPLETED);
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.COMPLETED);
+        assertThat(doc.getErrorMessage()).isNull();
+    }
+
+    @Test
+    void handleStatusUpdateRejectsIllegalForwardTransitions() {
+        UUID kbId = UUID.randomUUID();
+        UUID pendingDocId = UUID.randomUUID();
+        UUID pendingJobId = UUID.randomUUID();
+        IngestJob pending = job(kbId, pendingDocId, pendingJobId);
+        Document pendingDoc = doc(kbId, pendingDocId);
+        when(ingestJobRepository.findByIdForUpdate(pendingJobId)).thenReturn(Optional.of(pending));
+        when(documentRepository.findById(pendingDocId)).thenReturn(Optional.of(pendingDoc));
+
+        var unclaimedTerminal = service().handleStatusUpdate(IngestStatusUpdate.builder()
+                .jobId(pendingJobId.toString())
+                .docId(pendingDocId.toString())
+                .status("completed")
+                .build());
+
+        UUID processingDocId = UUID.randomUUID();
+        UUID processingJobId = UUID.randomUUID();
+        IngestJob processing = job(kbId, processingDocId, processingJobId);
+        processing.setStatus(IngestJobStatus.PROCESSING);
+        Document processingDoc = doc(kbId, processingDocId);
+        processingDoc.setStatus(DocumentStatus.PROCESSING);
+        when(ingestJobRepository.findByIdForUpdate(processingJobId)).thenReturn(Optional.of(processing));
+        when(documentRepository.findById(processingDocId)).thenReturn(Optional.of(processingDoc));
+
+        var backwards = service().handleStatusUpdate(IngestStatusUpdate.builder()
+                .jobId(processingJobId.toString())
+                .docId(processingDocId.toString())
+                .status("pending")
+                .build());
+
+        assertThat(unclaimedTerminal.isIgnored()).isTrue();
+        assertThat(unclaimedTerminal.getReason()).isEqualTo("illegal_transition");
+        assertThat(pending.getStatus()).isEqualTo(IngestJobStatus.PENDING);
+        assertThat(pendingDoc.getStatus()).isEqualTo(DocumentStatus.PENDING);
+        assertThat(backwards.isIgnored()).isTrue();
+        assertThat(backwards.getReason()).isEqualTo("illegal_transition");
+        assertThat(processing.getStatus()).isEqualTo(IngestJobStatus.PROCESSING);
+        verify(ingestJobRepository, never()).save(pending);
+        verify(ingestJobRepository, never()).save(processing);
+    }
+
+    @Test
+    void handleStatusUpdateKeepsTerminalJobImmutableForRepeatedTerminalCallback() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setExecutionId(executionId);
+        job.setCallbackSequence(4L);
+        job.setStatus(IngestJobStatus.COMPLETED);
+        job.setStage(IngestStage.COMPLETED);
+        Document doc = doc(kbId, docId);
+        doc.setStatus(DocumentStatus.COMPLETED);
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        var ignored = service().handleStatusUpdate(IngestStatusUpdate.builder()
+                .jobId(jobId.toString())
+                .docId(docId.toString())
+                .executionId(executionId.toString())
+                .sequence(5L)
+                .status("completed")
+                .stage("completed")
+                .chunks(List.of(new IngestStatusUpdate.ChunkPayload(
+                        UUID.randomUUID().toString(), 0, "duplicate", 1, Map.of(), "milvus-1")))
+                .build());
+
+        assertThat(ignored.isIgnored()).isTrue();
+        assertThat(ignored.getReason()).isEqualTo("terminal_state");
+        assertThat(job.getCallbackSequence()).isEqualTo(4L);
+        verify(chunkRepository, never()).deleteByDocId(docId);
+        verify(ingestJobRepository, never()).save(job);
+        verify(documentRepository, never()).save(doc);
+    }
+
+    @Test
+    void handleStatusUpdateTracksSequenceAndAllowsOnlyCancelledAfterCancelRequest() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setExecutionId(executionId);
+        job.setStatus(IngestJobStatus.PROCESSING);
+        job.setCallbackSequence(0L);
+        Document doc = doc(kbId, docId);
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        var processing = service().handleStatusUpdate(IngestStatusUpdate.builder()
+                .jobId(jobId.toString())
+                .docId(docId.toString())
+                .executionId(executionId.toString())
+                .sequence(1L)
+                .status("processing")
+                .build());
+
+        assertThat(processing.isIgnored()).isFalse();
+        assertThat(job.getCallbackSequence()).isEqualTo(1L);
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PROCESSING);
+
+        job.setStatus(IngestJobStatus.CANCEL_REQUESTED);
+        var rejected = service().handleStatusUpdate(IngestStatusUpdate.builder()
+                .jobId(jobId.toString())
+                .docId(docId.toString())
+                .executionId(executionId.toString())
+                .sequence(2L)
+                .status("processing")
+                .build());
+        assertThat(rejected.isIgnored()).isTrue();
+        assertThat(rejected.getReason()).isEqualTo("cancel_requested");
+
+        var cancelled = service().handleStatusUpdate(IngestStatusUpdate.builder()
+                .jobId(jobId.toString())
+                .docId(docId.toString())
+                .executionId(executionId.toString())
+                .sequence(2L)
+                .status("cancelled")
+                .build());
+        assertThat(cancelled.isIgnored()).isFalse();
+        assertThat(job.getStatus()).isEqualTo(IngestJobStatus.CANCELLED);
+        assertThat(job.getStage()).isEqualTo(IngestStage.CANCELLED);
+        assertThat(job.getCompletedAt()).isNotNull();
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.CANCELLED);
+    }
+
+    @Test
+    void cancelForKnowledgeBaseRejectsWrongOwnerAndKeepsExistingRequest() {
+        UUID kbId = UUID.randomUUID();
+        UUID otherKbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID wrongJobId = UUID.randomUUID();
+        IngestJob wrongJob = job(otherKbId, docId, wrongJobId);
+        when(ingestJobRepository.findById(wrongJobId)).thenReturn(Optional.of(wrongJob));
+
+        assertThatThrownBy(() -> service().cancelForKnowledgeBase(kbId, wrongJobId))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("does not belong");
+
+        UUID requestedJobId = UUID.randomUUID();
+        IngestJob requested = job(kbId, docId, requestedJobId);
+        requested.setStatus(IngestJobStatus.CANCEL_REQUESTED);
+        Document doc = doc(kbId, docId);
+        when(ingestJobRepository.findById(requestedJobId)).thenReturn(Optional.of(requested));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        var response = service().cancelForKnowledgeBase(kbId, requestedJobId);
+
+        assertThat(response.getStatus()).isEqualTo(IngestJobStatus.CANCEL_REQUESTED);
+        assertThat(requested.getCancelRequestedAt()).isNotNull();
+        verify(ingestJobRepository).save(requested);
+        verify(documentRepository).save(doc);
+    }
+
+    @Test
     void retryForKnowledgeBaseValidatesTenantScopedKbAndJobOwnership() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         UUID jobId = UUID.randomUUID();
         IngestJob job = job(kbId, docId, jobId);
+        job.setStatus(IngestJobStatus.FAILED);
         Document doc = doc(kbId, docId);
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
@@ -216,6 +764,82 @@ class IngestJobServiceTest {
     }
 
     @Test
+    void recoverQueuedJobsRotatesExpiredProcessingLeaseThroughCommittedOutbox() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID staleExecution = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setExecutionId(staleExecution);
+        job.setStatus(IngestJobStatus.PROCESSING);
+        job.setStage(IngestStage.EMBEDDING);
+        job.setClaimedBy("worker-a");
+        job.setLeaseExpiresAt(Instant.now().minusSeconds(30));
+        job.setCallbackSequence(4L);
+        Document doc = doc(kbId, docId);
+        doc.setStatus(DocumentStatus.PROCESSING);
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
+        when(ingestJobRepository.findTop20ByStatusAndLeaseExpiresAtBeforeOrderByUpdatedAtAsc(
+                eq(IngestJobStatus.PROCESSING), any(Instant.class))).thenReturn(List.of(job));
+        when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
+                IngestJobStatus.PENDING, IngestStage.QUEUED)).thenAnswer(ignored ->
+                job.getStatus() == IngestJobStatus.PENDING ? List.of(job) : List.of());
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
+
+        int recovered = service().recoverQueuedJobs();
+
+        assertThat(recovered).isEqualTo(1);
+        assertThat(job.getExecutionId()).isNotEqualTo(staleExecution);
+        assertThat(job.getCallbackSequence()).isZero();
+        assertThat(job.getStatus()).isEqualTo(IngestJobStatus.PENDING);
+        assertThat(job.getStage()).isEqualTo(IngestStage.QUEUED);
+        assertThat(job.getClaimedBy()).isNull();
+        assertThat(job.getLeaseExpiresAt()).isNull();
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PENDING);
+        verify(ingestOutboxService).record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void recoverQueuedJobsFinalizesExpiredCancellationAndSchedulesVectorCleanup() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setExecutionId(UUID.randomUUID());
+        job.setStatus(IngestJobStatus.CANCEL_REQUESTED);
+        job.setStage(IngestStage.INDEXING);
+        job.setClaimedBy("worker-a");
+        job.setLeaseExpiresAt(Instant.now().minusSeconds(30));
+        job.setCancelRequestedAt(Instant.now().minusSeconds(60));
+        Document doc = doc(kbId, docId);
+        doc.setStatus(DocumentStatus.PROCESSING);
+        when(ingestJobRepository.findTop20ByStatusAndLeaseExpiresAtBeforeOrderByUpdatedAtAsc(
+                eq(IngestJobStatus.PROCESSING), any(Instant.class))).thenReturn(List.of());
+        when(ingestJobRepository.findTop20ByStatusAndLeaseExpiresAtBeforeOrderByUpdatedAtAsc(
+                eq(IngestJobStatus.CANCEL_REQUESTED), any(Instant.class))).thenReturn(List.of(job));
+        when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
+                IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of());
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        int recovered = service().recoverQueuedJobs();
+
+        assertThat(recovered).isEqualTo(1);
+        assertThat(job.getStatus()).isEqualTo(IngestJobStatus.CANCELLED);
+        assertThat(job.getStage()).isEqualTo(IngestStage.CANCELLED);
+        assertThat(job.getCompletedAt()).isNotNull();
+        assertThat(job.getClaimedBy()).isNull();
+        assertThat(job.getLeaseExpiresAt()).isNull();
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.CANCELLED);
+        verify(vectorCleanupTaskService).enqueueDocument(docId);
+        verify(ingestJobRepository).save(job);
+        verify(documentRepository).save(doc);
+        verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
+        verify(failureNotificationService, never()).recordTerminalFailure(any(), any());
+    }
+
+    @Test
     void recoverQueuedJobsSkipsMissingOrAlreadyProcessingDocuments() {
         UUID missingDocId = UUID.randomUUID();
         UUID processingDocId = UUID.randomUUID();
@@ -246,6 +870,42 @@ class IngestJobServiceTest {
 
         verify(ingestJobRepository).findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED);
+    }
+
+    @Test
+    void recoverQueuedJobsOnScheduleLogsSuccessfulRecoveryPath() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, UUID.randomUUID());
+        Document doc = doc(kbId, docId);
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
+        when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
+                IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
+
+        service().recoverQueuedJobsOnSchedule();
+
+        verify(ingestJobProducer).enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+    }
+
+    @Test
+    void recoverQueuedJobsUsesExceptionTypeWhenQueueErrorHasNoMessage() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, UUID.randomUUID());
+        Document doc = doc(kbId, docId);
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
+        when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
+                IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
+        doThrow(new IllegalStateException())
+                .when(ingestJobProducer).enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+
+        assertThat(service().recoverQueuedJobs()).isZero();
+
+        assertThat(job.getErrorMessage()).contains("IllegalStateException");
     }
 
     @Test

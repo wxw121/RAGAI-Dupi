@@ -1,5 +1,17 @@
 # 进展记录
 
+## V1.4.1 upload governance (2026-07-18)
+
+- Version metadata is aligned to API `1.4.1-SNAPSHOT` and Web `1.4.1`; Flyway advances to V17.
+- Added persisted retained-byte/document and rolling-window upload accounting, explicit quota reservations, per-file idempotency replay/conflict handling, `GET /api/v1/upload-quota`, and 409/413/429 mappings with Retry-After.
+- Added ingest execution IDs, claims, leases, monotonic callback sequences, queued/running cancellation states, stale callback acknowledgement, and terminal-state protection.
+- Added a separate deduplicated terminal-failure notification table/service with optional webhook delivery, bounded backoff retry, and explicit `EXHAUSTED`; cancellation does not create failure events.
+- Worker uses a ready-to-processing Redis move, acknowledges processing payloads only after terminal handling, claims executions before work, refreshes leases, checks cancellation, and cleans vectors when cancellation arrives after indexing starts. The release image uses CPU-only torch `2.13.0+cpu`, removing the fixable `PYSEC-2025-194` finding.
+- Web uses bounded per-file uploads with stable idempotency keys, quota display, Retry-After messages, transport abort/retry, ingest cancel, explicit `currentJob`, failure-notice dedupe, and serialized polling.
+- Focused verification passed: ingest failure notification webhook delivery/retry 5/5, API document/current-job and ingest endpoint suites, Web governed upload suites, and Worker reliable queue suites.
+- Final local gates passed: API `mvn clean verify` 430/430 with JaCoCo 95.1306%, Worker pytest 75/75, Web Vitest 78/78, Web production build (1,794 modules), Pester release policy 14/14, Compose config exit 0, and `git diff --check` exit 0.
+- The final release scan passed with no Python findings, a 640,389,450-byte non-root CPU Worker image, digest `sha256:eec613fab9cdd1d873b95172f98d42ade5989238e2b0f76761b6b4f63b86515a`, and 22 exact upstream-unfixed OS exceptions (19 HIGH, 3 CRITICAL) expiring 2026-08-15. Evidence: `artifacts/v1.4.1-release-scan/summary.md`, dependency lock, both SBOM formats, pip-audit JSON, and Trivy JSON.
+
 ## V1.3 RAG quality and Sparse migration (2026-07-15)
 
 ## V1.4.0 verifiable recovery (2026-07-16)

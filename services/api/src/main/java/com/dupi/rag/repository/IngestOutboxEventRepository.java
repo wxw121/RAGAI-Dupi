@@ -13,4 +13,10 @@ public interface IngestOutboxEventRepository extends JpaRepository<IngestOutboxE
             List<IngestOutboxStatus> statuses,
             Instant nextAttemptAt
     );
+
+    List<IngestOutboxEvent> findByJobIdAndStatusIn(UUID jobId, List<IngestOutboxStatus> statuses);
+
+    List<IngestOutboxEvent> findByJobId(UUID jobId);
+
+    void deleteByJobId(UUID jobId);
 }

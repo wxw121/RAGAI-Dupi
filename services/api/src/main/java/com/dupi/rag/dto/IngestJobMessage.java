@@ -15,6 +15,7 @@ import java.util.List;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class IngestJobMessage {
     private String jobId;
+    private String executionId;
     private String kbId;
     private String docId;
     private String objectKey;

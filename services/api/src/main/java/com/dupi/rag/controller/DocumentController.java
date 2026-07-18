@@ -25,8 +25,16 @@ public class DocumentController {
     private final DocumentIndexInspectionService documentIndexInspectionService;
 
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public DocumentResponse upload(@PathVariable UUID kbId, @RequestParam("file") MultipartFile file) {
-        return documentService.upload(kbId, file);
+    public DocumentResponse upload(
+            @PathVariable UUID kbId,
+            @RequestParam("file") MultipartFile file,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey
+    ) {
+        return documentService.upload(kbId, file, idempotencyKey);
+    }
+
+    public DocumentResponse upload(UUID kbId, MultipartFile file) {
+        return upload(kbId, file, null);
     }
 
     @PostMapping(value = "/batch", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)

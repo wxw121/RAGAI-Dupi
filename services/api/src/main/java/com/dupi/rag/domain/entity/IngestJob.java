@@ -43,6 +43,28 @@ public class IngestJob {
     @Column(name = "error_message")
     private String errorMessage;
 
+    @Column(name = "execution_id", nullable = false)
+    private UUID executionId;
+
+    @Column(name = "callback_sequence", nullable = false)
+    @Builder.Default
+    private Long callbackSequence = 0L;
+
+    @Column(name = "claimed_by")
+    private String claimedBy;
+
+    @Column(name = "lease_expires_at")
+    private Instant leaseExpiresAt;
+
+    @Column(name = "started_at")
+    private Instant startedAt;
+
+    @Column(name = "completed_at")
+    private Instant completedAt;
+
+    @Column(name = "cancel_requested_at")
+    private Instant cancelRequestedAt;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
@@ -53,6 +75,12 @@ public class IngestJob {
     void onCreate() {
         if (id == null) {
             id = UUID.randomUUID();
+        }
+        if (executionId == null) {
+            executionId = UUID.randomUUID();
+        }
+        if (callbackSequence == null) {
+            callbackSequence = 0L;
         }
         Instant now = Instant.now();
         createdAt = now;

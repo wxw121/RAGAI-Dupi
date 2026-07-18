@@ -1,5 +1,16 @@
 # 待办清单
 
+## V1.4.1 upload governance
+
+- [x] Persist tenant/user retained byte, document, and rolling-window upload quota.
+- [x] Add per-file idempotency reservations, replay, conflict, quota, and payload-size responses.
+- [x] Add execution IDs, claim/lease state, cancellation, callback sequence guards, and terminal immutability.
+- [x] Move Worker consumption through a processing list and add cancellation cleanup checkpoints.
+- [x] Persist deduplicated FAILED/DEAD_LETTER notification events with webhook dispatch/retry/exhaustion and without notifying on cancellation.
+- [x] Replace the Web batch workflow with bounded per-file upload, quota, abort/retry, ingest cancel, and serialized polling.
+- [x] Align API/Web versions and synchronize the release documentation.
+- [x] Pass the complete API/Worker/Web/Pester/Compose/release-scan gate, then create the local V1.4.1 release commit and tag.
+
 ## V1.3 release closure
 
 ## V1.4.0 verifiable recovery
@@ -13,7 +24,7 @@
 - [x] Run the credentialed Playwright gate against the full Compose stack (`1 passed`).
 - [x] Inject canonical-object corruption and retain a rehearsal artifact with `corruptionBlocked=true` before closing V1.4.0.
 - [x] Pass the dependency/SBOM/license/CVE/image-size scan with the non-root CPU Worker image and dated structured exceptions.
-- [ ] Start V1.4.1 upload quotas, cancellation, and notification after V1.4.0 closes.
+- [x] Start V1.4.1 upload quotas, cancellation, and notification after V1.4.0 closes.
 
 - [x] Milvus Sparse 回填、双写、Shadow、Cutover、Rollback 和删除同步。
 - [x] 质量策略、baseline 和 Retrieval Profile 控制台。
@@ -29,7 +40,7 @@
 ## 待办
 
 - [ ] 生产级鉴权增强：SSO/OIDC、外部身份源同步、密钥轮换审批流
-- [ ] 上传保护升级：按租户/用户配额、上传取消与告警
+- [x] 上传保护升级：按租户/用户配额、上传取消与告警
 - [ ] 运维面板增强：任务高级筛选、邮件/IM 等更多通知渠道与审计归档对接
 - [ ] 完整灾备恢复：MinIO 原始二进制、文档主记录与 Milvus 向量的一致性导入/校验
 - [ ] Milvus BM25 sparse 字段生产调优与索引参数压测

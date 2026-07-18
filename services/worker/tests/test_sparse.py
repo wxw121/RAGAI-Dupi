@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from app.retrieval.sparse import SparseMilvusAdapter
+from app.retrieval.sparse import MILVUS_OPERATION_TIMEOUT_SECONDS, SparseMilvusAdapter
 
 
 class FakeCollection:
@@ -30,3 +30,19 @@ def test_sparse_adapter_returns_stage_rank_without_vector_payload():
     assert adapter.collection.search_args["data"] == ["hello"]
     assert adapter.collection.search_args["param"]["metric_type"] == "BM25"
     assert adapter.collection.search_args["expr"] == 'kb_id == "kb-1"'
+
+
+def test_sparse_adapter_deletes_only_execution_owned_ids():
+    calls = []
+    adapter = SparseMilvusAdapter.__new__(SparseMilvusAdapter)
+    adapter.collection = SimpleNamespace(delete=lambda **kwargs: calls.append(kwargs))
+
+    assert hasattr(adapter, "delete_by_ids"), (
+        "sparse cleanup must support execution-owned vector IDs"
+    )
+    adapter.delete_by_ids(["owned-a", "owned-b"])
+
+    assert calls == [{
+        "expr": 'chunk_id in ["owned-a", "owned-b"]',
+        "timeout": MILVUS_OPERATION_TIMEOUT_SECONDS,
+    }]

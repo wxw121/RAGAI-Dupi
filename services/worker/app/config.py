@@ -1,4 +1,5 @@
 import os
+import socket
 from dataclasses import dataclass
 
 
@@ -11,6 +12,22 @@ class Settings:
     redis_host: str = os.getenv("REDIS_HOST", "localhost")
     redis_port: int = int(os.getenv("REDIS_PORT", "6379"))
     ingest_queue: str = os.getenv("INGEST_QUEUE", "dupi:ingest:jobs")
+    ingest_processing_queue: str = os.getenv(
+        "INGEST_PROCESSING_QUEUE",
+        f"{os.getenv('INGEST_QUEUE', 'dupi:ingest:jobs')}:processing",
+    )
+    ingest_lease_seconds: int = int(os.getenv("INGEST_LEASE_SECONDS", "60"))
+    ingest_heartbeat_interval_seconds: float = float(
+        os.getenv("INGEST_HEARTBEAT_INTERVAL_SECONDS", "15")
+    )
+    ingest_processing_reap_interval_seconds: float = float(
+        os.getenv("INGEST_PROCESSING_REAP_INTERVAL_SECONDS", "60")
+    )
+    ingest_processing_reap_batch_size: int = int(
+        os.getenv("INGEST_PROCESSING_REAP_BATCH_SIZE", "100")
+    )
+    redis_retry_delay_seconds: float = float(os.getenv("REDIS_RETRY_DELAY_SECONDS", "1"))
+    worker_id: str = os.getenv("WORKER_ID", f"{socket.gethostname()}-{os.getpid()}")
 
     minio_endpoint: str = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
     minio_access_key: str = os.getenv("MINIO_ACCESS_KEY", "minioadmin")

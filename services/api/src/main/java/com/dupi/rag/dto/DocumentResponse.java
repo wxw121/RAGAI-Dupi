@@ -17,6 +17,7 @@ public class DocumentResponse {
     private Long fileSize;
     private DocumentStatus status;
     private String errorMessage;
+    private IngestJobResponse currentJob;
     private Instant createdAt;
     private Instant updatedAt;
 }

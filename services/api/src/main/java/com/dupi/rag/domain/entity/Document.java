@@ -35,6 +35,9 @@ public class Document {
     @Builder.Default
     private Long fileSize = 0L;
 
+    @Column(name = "quota_reservation_id")
+    private UUID quotaReservationId;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     @Builder.Default

@@ -2,6 +2,7 @@ package com.dupi.rag.exception;
 
 import com.dupi.rag.dto.ApiErrorResponse;
 import org.slf4j.MDC;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -53,6 +54,37 @@ public class GlobalExceptionHandler {
                 ex.getMessage(),
                 "recovery",
                 "Wait for the active recovery archive to finish, then retry the mutation."));
+    }
+
+    @ExceptionHandler(UploadIdempotencyConflictException.class)
+    public ResponseEntity<ApiErrorResponse> handleUploadIdempotencyConflict(UploadIdempotencyConflictException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(error(
+                "upload_idempotency_conflict",
+                ex.getMessage(),
+                "upload",
+                "Use a new Idempotency-Key when uploading a different file."));
+    }
+
+    @ExceptionHandler(UploadPayloadTooLargeException.class)
+    public ResponseEntity<ApiErrorResponse> handleUploadPayloadTooLarge(UploadPayloadTooLargeException ex) {
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(error(
+                "upload_payload_too_large",
+                ex.getMessage(),
+                "upload",
+                "Choose a smaller file or increase the configured upload quota."));
+    }
+
+    @ExceptionHandler(UploadQuotaExceededException.class)
+    public ResponseEntity<ApiErrorResponse> handleUploadQuotaExceeded(UploadQuotaExceededException ex) {
+        ResponseEntity.BodyBuilder builder = ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS);
+        if (ex.getRetryAfterSeconds() != null) {
+            builder.header(HttpHeaders.RETRY_AFTER, String.valueOf(ex.getRetryAfterSeconds()));
+        }
+        return builder.body(error(
+                "upload_quota_exceeded",
+                ex.getMessage(),
+                "upload",
+                "Wait for quota to free up or delete retained documents before retrying."));
     }
 
     @ExceptionHandler(Exception.class)
