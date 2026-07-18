@@ -46,11 +46,25 @@ public interface UploadQuotaReservationRepository extends JpaRepository<UploadQu
                           @Param("userId") String userId,
                           @Param("status") UploadQuotaReservationStatus status);
 
+    @Query("select coalesce(sum(r.reservedBytes), 0) from UploadQuotaReservation r where r.status = :status")
+    long sumReservedBytesByStatus(@Param("status") UploadQuotaReservationStatus status);
+
     @Query("select count(r) from UploadQuotaReservation r " +
             "where r.tenantId = :tenantId and r.userId = :userId and r.status = :status")
     long countByStatus(@Param("tenantId") String tenantId,
                        @Param("userId") String userId,
                        @Param("status") UploadQuotaReservationStatus status);
+
+    long countByStatus(UploadQuotaReservationStatus status);
+
+    @Query("""
+            select count(r) from UploadQuotaReservation r
+            where r.status = com.dupi.rag.domain.enums.UploadQuotaReservationStatus.PENDING
+              and r.attemptId is not null
+              and r.attemptExpiresAt is not null
+              and r.attemptExpiresAt <= :now
+            """)
+    long countStalePendingAttempts(@Param("now") Instant now);
 
     @Query("select coalesce(sum(r.reservedBytes), 0) from UploadQuotaReservation r " +
             "where r.tenantId = :tenantId and r.userId = :userId and r.status in :statuses")

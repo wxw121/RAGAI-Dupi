@@ -1,5 +1,17 @@
 # dupi-RAG
 
+> V1.4.2 is in development as a governance ops stabilization slice. It adds a read-only GET /api/v1/ops/governance-summary endpoint for OPS_ADMIN operators plus a smoke script and Pester check for the V1.4.1 upload, ingest, outbox, notification, and vector cleanup state. It is not yet documented here as merged, tagged, or released.
+
+## V1.4.2 Governance Ops
+
+GET /api/v1/ops/governance-summary returns a compact read-only snapshot with generatedAt, uploadQuota, ingestJobs, ingestOutbox, failureNotifications, vectorCleanup, and alerts.
+
+Smoke check: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-governance-summary.ps1 -BaseUrl http://localhost:8080 -ApiKey $env:DUPI_API_KEY -OutFile evidence/governance-summary-smoke.json
+
+Focused Pester coverage currently passes 4 of 4: powershell -NoProfile -ExecutionPolicy Bypass -Command Import-Module Pester; Invoke-Pester -Path scripts/tests/smoke-governance-summary.Tests.ps1 -CI
+
+Local Web validation on this workstation must use project npm scripts so services/web/scripts/node16-webcrypto.cjs loads the Node 16 WebCrypto shim. Do not invoke raw vite or vitest directly on Node 16.
+
 > V1.4.1 adds persisted tenant/user upload quotas, idempotent per-file uploads, cancellable and leased ingest executions, stale callback protection, and deduplicated terminal-failure events with optional webhook delivery. API version: `1.4.1-SNAPSHOT`; Web version: `1.4.1`.
 
 ## V1.4.1 Upload Governance

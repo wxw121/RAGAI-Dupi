@@ -15,6 +15,8 @@ public interface IngestFailureNotificationRepository extends JpaRepository<Inges
     boolean existsByEventKey(String eventKey);
     Optional<IngestFailureNotification> findByEventKey(String eventKey);
 
+    long countByDeliveryStatus(IngestFailureNotificationStatus deliveryStatus);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     List<IngestFailureNotification> findTop50ByDeliveryStatusInAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
             List<IngestFailureNotificationStatus> statuses, Instant now);

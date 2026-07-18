@@ -1,5 +1,14 @@
 # 待办清单
 
+## V1.4.2 governance ops stabilization
+
+- [x] Add read-only GET /api/v1/ops/governance-summary for OPS_ADMIN operators.
+- [x] Aggregate upload quota, ingest jobs, ingest outbox, failure notifications, vector cleanup, and existing alerts.
+- [x] Add smoke script scripts/smoke-governance-summary.ps1 and Pester test coverage.
+- [x] Ignore local .npm-cache artifacts.
+- [x] Document the Node 16 local Web validation constraint: use npm scripts so services/web/scripts/node16-webcrypto.cjs loads; do not run raw vite or vitest.
+- [ ] Run the full V1.4.2 gate before any merge, tag, or release claim.
+
 ## V1.4.1 upload governance
 
 - [x] Persist tenant/user retained byte, document, and rolling-window upload quota.

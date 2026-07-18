@@ -9,6 +9,8 @@ import java.util.List;
 import java.util.UUID;
 
 public interface IngestOutboxEventRepository extends JpaRepository<IngestOutboxEvent, UUID> {
+    long countByStatus(IngestOutboxStatus status);
+
     List<IngestOutboxEvent> findTop50ByStatusInAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
             List<IngestOutboxStatus> statuses,
             Instant nextAttemptAt

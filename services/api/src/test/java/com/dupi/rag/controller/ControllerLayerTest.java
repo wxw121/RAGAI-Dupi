@@ -411,6 +411,7 @@ class ControllerLayerTest {
         MultipartProperties multipartProperties = new MultipartProperties();
         multipartProperties.setMaxFileSize(DataSize.ofMegabytes(32));
         OpsNotificationService opsNotificationService = mock(OpsNotificationService.class);
+        GovernanceOpsService governanceOpsService = mock(GovernanceOpsService.class);
         OpsController controller = new OpsController(
                 service,
                 auditLogService,
@@ -421,7 +422,8 @@ class ControllerLayerTest {
                 redisQueueProperties,
                 auditProperties,
                 multipartProperties,
-                opsNotificationService
+                opsNotificationService,
+                governanceOpsService
         );
         UUID taskId = UUID.randomUUID();
         VectorCleanupTaskResponse response = VectorCleanupTaskResponse.builder()
@@ -465,6 +467,33 @@ class ControllerLayerTest {
                 .count(1)
                 .threshold(0)
                 .build()));
+        GovernanceSummaryResponse governanceSummary = GovernanceSummaryResponse.builder()
+                .generatedAt(Instant.parse("2026-07-18T10:15:30Z"))
+                .uploadQuota(GovernanceSummaryResponse.UploadQuota.builder()
+                        .pendingReservations(1)
+                        .committedReservations(2)
+                        .activeReservedBytes(300)
+                        .build())
+                .ingestJobs(GovernanceSummaryResponse.IngestJobs.builder()
+                        .pendingJobs(3)
+                        .processingJobs(4)
+                        .build())
+                .ingestOutbox(GovernanceSummaryResponse.IngestOutbox.builder()
+                        .pendingEvents(5)
+                        .failedEvents(6)
+                        .build())
+                .failureNotifications(GovernanceSummaryResponse.FailureNotifications.builder()
+                        .pending(7)
+                        .exhausted(8)
+                        .build())
+                .vectorCleanup(GovernanceSummaryResponse.VectorCleanup.builder()
+                        .pendingTasks(9)
+                        .failedTasks(10)
+                        .openTasks(19)
+                        .build())
+                .alerts(List.of())
+                .build();
+        when(governanceOpsService.summarize()).thenReturn(governanceSummary);
         when(accountService.listUsers()).thenReturn(List.of(AccountResponse.builder()
                 .username("admin")
                 .tenantId("ops")
@@ -522,6 +551,7 @@ class ControllerLayerTest {
                 .contains("createdAt,tenantId");
         assertThat(controller.listAuditAlerts()).extracting(AuditAlertResponse::getCode)
                 .containsExactly("AUDIT_FAILED_SPIKE", "INGEST_FAILURES_OPEN", "VECTOR_CLEANUP_FAILURES_OPEN");
+        assertThat(controller.governanceSummary()).isSameAs(governanceSummary);
         assertThat(controller.notifyAuditAlerts()).isSameAs(notification);
         assertThat(controller.listAccounts()).extracting(AccountResponse::getUsername)
                 .containsExactly("admin");
@@ -580,6 +610,7 @@ class ControllerLayerTest {
         verify(auditLogService, times(2)).summarizeAlerts();
         verify(ingestJobService, times(2)).summarizeAlerts();
         verify(service, times(2)).summarizeAlerts();
+        verify(governanceOpsService).summarize();
         verify(opsNotificationService).notifyAlerts(any());
         verify(auditLogService).recordSuccess(eq("AUDIT_ALERT_NOTIFY"), eq("AUDIT_ALERT"), isNull(), anyString());
         verify(accountService).listUsers();

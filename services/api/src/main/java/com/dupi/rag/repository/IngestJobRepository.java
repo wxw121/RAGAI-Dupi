@@ -37,5 +37,16 @@ public interface IngestJobRepository extends JpaRepository<IngestJob, UUID> {
     );
 
     long countByStatusIn(List<IngestJobStatus> statuses);
+
+    long countByStatus(IngestJobStatus status);
+
+    @Query("""
+            select count(job) from IngestJob job
+            where job.status = com.dupi.rag.domain.enums.IngestJobStatus.PROCESSING
+              and job.leaseExpiresAt is not null
+              and job.leaseExpiresAt < :now
+            """)
+    long countExpiredProcessingLeases(@Param("now") java.time.Instant now);
+
     boolean existsByKbIdAndStatusIn(UUID kbId, List<IngestJobStatus> statuses);
 }

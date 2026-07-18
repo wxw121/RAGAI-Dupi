@@ -1,5 +1,13 @@
 # 架构概览
 
+## V1.4.2 Governance Ops Summary
+
+V1.4.2 adds GovernanceOpsService and GET /api/v1/ops/governance-summary as a read-only OPS_ADMIN summary of the V1.4.1 governance state. It aggregates upload quota reservations, ingest jobs, ingest outbox events, ingest failure notifications, vector cleanup tasks, and existing audit, ingest, and vector alert summaries without mutating any of those records.
+
+The response sections are generatedAt, uploadQuota, ingestJobs, ingestOutbox, failureNotifications, vectorCleanup, and alerts. V1.4.2 can append open-condition alert codes for stale upload attempts, expired processing leases, failed outbox rows, and exhausted failure notifications while preserving the existing AuditAlertResponse shape.
+
+The smoke layer is outside the app runtime. scripts/smoke-governance-summary.ps1 calls the endpoint, validates the JSON shape, and writes redacted evidence. Its Pester test currently passes 4 of 4. Local Web verification on Node 16 must go through npm scripts so services/web/scripts/node16-webcrypto.cjs loads the shim; raw vite and vitest are not the supported local path.
+
 ## V1.4.1 Upload and Ingest Governance
 
 PostgreSQL owns both upload capacity and ingest execution state. `upload_quota_reservations` provides durable retained-byte/document reservations with `PENDING`, `COMMITTED`, and `RELEASED` states; active retained usage is `PENDING` + `COMMITTED`, and `RELEASED` reservations are excluded. In-flight attempts are leased with `attempt_id` and `attempt_expires_at`; the stale-upload reconciler uses `FOR UPDATE SKIP LOCKED` to either promote durable doc/job/outbox attempts to `COMMITTED` or clean partial MinIO/job/outbox/document work before `RELEASED`. `upload_window_events` records accepted bytes for the rolling window; retrying a released idempotency key rechecks retained quota but does not double-charge those rolling-window bytes. The optional `Idempotency-Key` is unique within tenant, user, and knowledge base; a matching replay returns the original document/current job, while a different file fingerprint returns 409.

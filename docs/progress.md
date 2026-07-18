@@ -1,5 +1,15 @@
 # 进展记录
 
+## V1.4.2 governance ops stabilization (2026-07-18)
+
+- Added a read-only GET /api/v1/ops/governance-summary surface for OPS_ADMIN operators.
+- The summary includes generatedAt, uploadQuota, ingestJobs, ingestOutbox, failureNotifications, vectorCleanup, and alerts.
+- Added scripts/smoke-governance-summary.ps1 and Pester coverage for endpoint path, safe parameters, schema validation, sample mode, and redacted evidence.
+- Focused validation so far: API GovernanceOpsServiceTest and ControllerLayerTest passed; Pester smoke test passed 4 of 4.
+- .npm-cache is ignored for local Web dependency setup.
+- Local Web validation must use npm scripts so services/web/scripts/node16-webcrypto.cjs loads the Node 16 WebCrypto shim; do not run raw vite or vitest directly on this workstation.
+- This entry records in-progress V1.4.2 development only; it is not a merge, tag, or release record.
+
 ## V1.4.1 upload governance (2026-07-18)
 
 - Version metadata is aligned to API `1.4.1-SNAPSHOT` and Web `1.4.1`; Flyway advances to V17.
