@@ -11,7 +11,7 @@ import { useToast } from '@/components/Toast'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import type { RagEvalCase, RagEvalCaseRequest, RagEvalRun, RetrievalProfile } from '@/types'
+import type { RagEvalCase, RagEvalCaseRequest, RagEvalGateDecision, RagEvalRun, RetrievalProfile } from '@/types'
 import { CheckCircle2, Loader2, Pencil, Play, Save, Trash2, X, XCircle } from 'lucide-react'
 
 interface RagEvalPanelProps {
@@ -24,6 +24,9 @@ const RETRIEVAL_PROFILE_OPTIONS: Array<{ value: RetrievalProfile; label: string 
   { value: 'QA_ASSISTED', label: 'qa-assisted' },
   { value: 'COMBINED', label: 'combined' },
 ]
+
+const formatPercent = (value: number | null | undefined) => `${(((value ?? 0) * 100)).toFixed(1)}%`
+const formatDelta = (value: number | null | undefined) => `${(value ?? 0) >= 0 ? '+' : ''}${formatPercent(value)}`
 
 const EMPTY_FORM: RagEvalCaseRequest = {
   caseKey: '',
@@ -68,6 +71,8 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
 
   const latestRun = runs[0]
   const latestResults = latestRun?.results ?? []
+  const latestGateDecisions = Object.entries(latestRun?.gateSummary ?? {})
+    .filter((entry): entry is [string, RagEvalGateDecision] => Boolean(entry[1]))
   const canSave = form.caseKey.trim().length > 0 && form.query.trim().length > 0
   const runSummary = useMemo(
     () => runs.map((run) => ({
@@ -354,6 +359,34 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
           </div>
         )}
       </section>
+
+
+      {latestGateDecisions.length > 0 && (
+        <section className="rounded-lg border border-border bg-background p-3">
+          <h3 className="text-sm font-semibold">Profile gate comparison</h3>
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            {latestGateDecisions.map(([profile, decision]) => (
+              <div key={profile} className="rounded-lg border border-border px-3 py-2 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono font-semibold">{profile} {decision.status}</span>
+                  <Badge variant={decision.status === 'PASSED' ? 'success' : decision.status === 'BLOCKED' ? 'error' : 'warning'}>
+                    {decision.reason}
+                  </Badge>
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-2 text-muted-foreground">
+                  <span>Hit {formatPercent(decision.metrics?.hitRate)}</span>
+                  <span>? {formatDelta(decision.hitRateDelta)}</span>
+                  <span>Citation {formatPercent(decision.metrics?.citationPassRate)}</span>
+                  <span>? {formatDelta(decision.citationPassRateDelta)}</span>
+                  <span>Pass {formatPercent(decision.metrics?.passRate)}</span>
+                  <span>Classic {formatPercent(decision.classicMetrics?.passRate)}</span>
+                </div>
+                <p className="mt-2 text-muted-foreground">{decision.reason}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <div className="overflow-x-auto rounded-lg border border-border bg-background">
         <table className="w-full text-sm">

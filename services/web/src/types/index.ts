@@ -1,5 +1,39 @@
 export type RetrievalProfile = 'CLASSIC' | 'PARENT_CHILD' | 'QA_ASSISTED' | 'COMBINED'
 
+export type RagEvalGateStatus =
+  | 'PASSED'
+  | 'BLOCKED'
+  | 'INSUFFICIENT_DATA'
+  | 'STALE'
+  | 'INDEX_NOT_READY'
+  | 'NOT_EVALUATED'
+
+export interface RagEvalProfileMetrics {
+  profile: RetrievalProfile
+  totalCases: number
+  passedCount: number
+  hitPassedCount: number
+  citationEligibleCount: number
+  citationPassedCount: number
+  passRate: number
+  hitRate: number
+  citationPassRate: number
+}
+
+export interface RagEvalGateDecision {
+  candidate: RetrievalProfile
+  baseline?: RetrievalProfile
+  status: RagEvalGateStatus
+  reason: string
+  metrics?: RagEvalProfileMetrics
+  classicMetrics?: RagEvalProfileMetrics
+  hitRateDelta?: number
+  citationPassRateDelta?: number
+  runRevision?: number | null
+  currentRevision?: number | null
+  indexReady?: boolean
+}
+
 export interface KnowledgeBase {
   id: string
   tenantId: string
@@ -15,6 +49,10 @@ export interface KnowledgeBase {
   chunkStrategy: string
   retrievalMode: string
   retrievalProfile: RetrievalProfile
+  indexSchemaVersion?: number
+  profileIndexReady?: boolean
+  indexRevision?: number
+  retrievalProfileGateDecisions?: Partial<Record<RetrievalProfile, RagEvalGateDecision>>
   createdAt: string
   updatedAt: string
 }
@@ -282,6 +320,9 @@ export interface RagEvalResult {
   query: string
   passed: boolean
   failureReasons: string[]
+  hitPassed?: boolean
+  citationEligible?: boolean
+  citationPassed?: boolean
   hitCount: number
   expectedFileName: string | null
   matchedFileName: string | null
@@ -299,6 +340,8 @@ export interface RagEvalRun {
   kbId: string
   useRerank: boolean
   profileSet?: RetrievalProfile[]
+  indexRevision?: number | null
+  gateSummary?: Partial<Record<RetrievalProfile, RagEvalGateDecision>>
   passedCount: number
   totalCount: number
   status: 'RUNNING' | 'COMPLETED' | 'FAILED'

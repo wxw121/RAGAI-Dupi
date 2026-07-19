@@ -57,6 +57,13 @@ describe('KbDetailPage', () => {
       name: 'Quality KB',
       description: null,
       retrievalProfile: 'CLASSIC',
+      indexSchemaVersion: 2,
+      profileIndexReady: true,
+      indexRevision: 3,
+      retrievalProfileGateDecisions: {
+        PARENT_CHILD: { candidate: 'PARENT_CHILD', status: 'PASSED', reason: 'passed' },
+        QA_ASSISTED: { candidate: 'QA_ASSISTED', status: 'BLOCKED', reason: 'hit_rate_regressed' },
+      },
       embeddingConfigCurrent: true,
       embeddingConfigWarning: null,
     }
@@ -83,6 +90,11 @@ describe('KbDetailPage', () => {
     const profileSelect = container.querySelector<HTMLSelectElement>('select[name="retrievalProfile"]')
     expect(profileSelect).not.toBeNull()
     expect(profileSelect?.value).toBe('CLASSIC')
+    expect(container.textContent).toContain('Profile index: Ready')
+    expect(container.textContent).toContain('Revision 3')
+    expect(container.textContent).toContain('Parent-child PASSED')
+    expect(container.textContent).toContain('QA-assisted BLOCKED')
+    expect(Array.from(profileSelect?.options ?? []).find((option) => option.value === 'QA_ASSISTED')?.disabled).toBe(true)
 
     await act(async () => {
       setNativeValue(profileSelect!, 'PARENT_CHILD')

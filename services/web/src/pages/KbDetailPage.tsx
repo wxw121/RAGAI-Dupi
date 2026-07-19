@@ -44,6 +44,13 @@ import {
 
 type Tab = 'documents' | 'chat' | 'eval'
 
+const RETRIEVAL_PROFILE_OPTIONS: Array<{ value: RetrievalProfile; label: string }> = [
+  { value: 'CLASSIC', label: 'Classic' },
+  { value: 'PARENT_CHILD', label: 'Parent-child' },
+  { value: 'QA_ASSISTED', label: 'QA-assisted' },
+  { value: 'COMBINED', label: 'Combined' },
+]
+
 export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const { kbId } = useParams<{ kbId: string }>()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -69,6 +76,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const { showError, showSuccess } = useToast()
 
   const completedCount = documents.filter((d) => d.status === 'COMPLETED').length
+  const gateDecisions = kb?.retrievalProfileGateDecisions ?? {}
 
   const loadKb = useCallback(async () => {
     if (!kbId) return
@@ -427,11 +435,33 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
                   onChange={(event) => setRetrievalProfile(event.target.value as RetrievalProfile)}
                   className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
                 >
-                  <option value="CLASSIC">Classic</option>
-                  <option value="PARENT_CHILD">Parent-child</option>
-                  <option value="QA_ASSISTED">QA-assisted</option>
-                  <option value="COMBINED">Combined</option>
+                  {RETRIEVAL_PROFILE_OPTIONS.map((option) => {
+                    const decision = gateDecisions[option.value]
+                    const blocked = option.value !== 'CLASSIC'
+                      && option.value !== kb.retrievalProfile
+                      && decision?.status !== 'PASSED'
+                    return (
+                      <option key={option.value} value={option.value} disabled={blocked}>
+                        {option.label}
+                      </option>
+                    )
+                  })}
                 </select>
+                <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                  <span>Profile index: {kb.profileIndexReady ? 'Ready' : 'Not ready'}</span>
+                  <span>Revision {kb.indexRevision ?? 0}</span>
+                  <span>Schema v{kb.indexSchemaVersion ?? 1}</span>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                  {RETRIEVAL_PROFILE_OPTIONS.filter((option) => option.value !== 'CLASSIC').map((option) => {
+                    const decision = gateDecisions[option.value]
+                    return (
+                      <span key={option.value} className="rounded-full border border-border px-2 py-1">
+                        {option.label} {decision?.status ?? 'NOT_EVALUATED'}
+                      </span>
+                    )
+                  })}
+                </div>
               </div>
               <Button
                 variant="outline"
