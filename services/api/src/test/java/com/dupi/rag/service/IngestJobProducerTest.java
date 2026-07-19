@@ -28,8 +28,10 @@ class IngestJobProducerTest {
         RedisQueueProperties props = new RedisQueueProperties();
         props.setIngestQueue("jobs");
         ObjectMapper mapper = new ObjectMapper();
-        IngestJobProducer producer = new IngestJobProducer(redis, props, mapper);
+        ProfileIndexStateService profileIndexStateService = mock(ProfileIndexStateService.class);
+        IngestJobProducer producer = new IngestJobProducer(redis, props, mapper, profileIndexStateService);
         IngestJob job = IngestJob.builder().id(UUID.randomUUID()).kbId(UUID.randomUUID()).docId(UUID.randomUUID()).build();
+        when(profileIndexStateService.isV2Ready(job.getKbId())).thenReturn(false);
         KnowledgeBase kb = KnowledgeBase.builder()
                 .chunkSize(300)
                 .chunkOverlap(30)
@@ -48,7 +50,9 @@ class IngestJobProducerTest {
                         && msg.getChunkSize() == 300
                         && msg.getChunkStrategy().equals("markdown")
                         && msg.getRetrievalProfile().equals("combined")
-                        && msg.getEmbeddingDimension() == 99;
+                        && msg.getEmbeddingDimension() == 99
+                        && msg.getLegacyWriteRequired()
+                        && msg.getIndexSchemaVersion() == 2;
             } catch (Exception e) {
                 return false;
             }
@@ -64,7 +68,12 @@ class IngestJobProducerTest {
         RedisQueueProperties props = new RedisQueueProperties();
         props.setIngestQueue("jobs");
         props.setMaxPendingJobs(10);
-        IngestJobProducer producer = new IngestJobProducer(redis, props, new ObjectMapper());
+        IngestJobProducer producer = new IngestJobProducer(
+                redis,
+                props,
+                new ObjectMapper(),
+                mock(ProfileIndexStateService.class)
+        );
         IngestJob job = IngestJob.builder().id(UUID.randomUUID()).kbId(UUID.randomUUID()).docId(UUID.randomUUID()).build();
         KnowledgeBase kb = KnowledgeBase.builder()
                 .chunkSize(300)

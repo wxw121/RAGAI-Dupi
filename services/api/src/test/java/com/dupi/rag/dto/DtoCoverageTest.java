@@ -139,7 +139,7 @@ class DtoCoverageTest {
 
         VectorCleanupTaskResponse cleanupTask = VectorCleanupTaskResponse.builder()
                 .id(id)
-                .targetType(VectorCleanupTargetType.KNOWLEDGE_BASE)
+                .targetType(VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE)
                 .targetId(id)
                 .status(VectorCleanupStatus.FAILED)
                 .attemptCount(3)
@@ -149,7 +149,7 @@ class DtoCoverageTest {
                 .updatedAt(now)
                 .build();
         assertThat(cleanupTask.getId()).isEqualTo(id);
-        assertThat(cleanupTask.getTargetType()).isEqualTo(VectorCleanupTargetType.KNOWLEDGE_BASE);
+        assertThat(cleanupTask.getTargetType()).isEqualTo(VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE);
         assertThat(cleanupTask.getTargetId()).isEqualTo(id);
         assertThat(cleanupTask.getStatus()).isEqualTo(VectorCleanupStatus.FAILED);
         assertThat(cleanupTask.getAttemptCount()).isEqualTo(3);
@@ -302,7 +302,7 @@ class DtoCoverageTest {
         Instant now = Instant.now();
         VectorCleanupTask task = VectorCleanupTask.builder()
                 .id(UUID.randomUUID())
-                .targetType(VectorCleanupTargetType.DOCUMENT)
+                .targetType(VectorCleanupTargetType.PROFILE_DOCUMENT)
                 .targetId(targetId)
                 .status(VectorCleanupStatus.PENDING)
                 .attemptCount(2)
@@ -312,7 +312,7 @@ class DtoCoverageTest {
                 .updatedAt(now)
                 .build();
 
-        assertThat(task.getTargetType()).isEqualTo(VectorCleanupTargetType.DOCUMENT);
+        assertThat(task.getTargetType()).isEqualTo(VectorCleanupTargetType.PROFILE_DOCUMENT);
         assertThat(task.getTargetId()).isEqualTo(targetId);
         assertThat(task.getStatus()).isEqualTo(VectorCleanupStatus.PENDING);
         assertThat(task.getAttemptCount()).isEqualTo(2);
@@ -321,7 +321,7 @@ class DtoCoverageTest {
         assertThat(task.getNextAttemptAt()).isEqualTo(now);
         assertThat(task.getCreatedAt()).isEqualTo(now);
         assertThat(task.getUpdatedAt()).isEqualTo(now);
-        assertThat(VectorCleanupTargetType.KNOWLEDGE_BASE).isNotNull();
+        assertThat(VectorCleanupTargetType.PROFILE_KNOWLEDGE_BASE).isNotNull();
         assertThat(VectorCleanupStatus.COMPLETED).isNotNull();
         assertThat(VectorCleanupStatus.FAILED).isNotNull();
     }

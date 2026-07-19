@@ -43,6 +43,7 @@ class DocumentServiceTest {
     @Mock DocumentTombstoneService documentTombstoneService;
     @Mock VectorCleanupTaskService vectorCleanupTaskService;
     @Mock AuditLogService auditLogService;
+    @Mock ProfileIndexStateService profileIndexStateService;
 
     DocumentService service() {
         return new DocumentService(
@@ -56,7 +57,8 @@ class DocumentServiceTest {
                 ingestOutboxService,
                 documentTombstoneService,
                 vectorCleanupTaskService,
-                auditLogService
+                auditLogService,
+                profileIndexStateService
         );
     }
 
@@ -75,6 +77,7 @@ class DocumentServiceTest {
         verify(ingestOutboxService).record(any(IngestJob.class), eq(kb), contains("a.md"), eq("a.md"), eq("text/markdown"));
         verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
         verify(documentRepository, atLeast(2)).save(any(Document.class));
+        verify(profileIndexStateService).bumpRevision(kb);
     }
 
     @Test
@@ -217,14 +220,19 @@ class DocumentServiceTest {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         Document doc = doc(kbId, docId);
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         doThrow(new IllegalStateException("milvus")).when(milvusVectorService).deleteByDocId(docId);
         doThrow(new IllegalStateException("minio")).when(minioStorageService).delete(doc.getObjectKey());
 
         service().delete(kbId, docId);
 
         verify(documentTombstoneService).recordDeleted(doc);
-        verify(vectorCleanupTaskService).enqueueDocument(docId);
+        verify(vectorCleanupTaskService).enqueueProfileDocument(docId);
+        verify(vectorCleanupTaskService).enqueueLegacyDocument(docId);
+        verify(profileIndexStateService).bumpRevision(kb);
+        verify(milvusVectorService).deleteProfileByDocId(docId);
         verify(chunkRepository).deleteByDocId(docId);
         verify(documentRepository).delete(doc);
         verify(auditLogService).recordSuccess(

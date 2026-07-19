@@ -202,7 +202,8 @@ class KnowledgeBaseServiceTest {
 
         service.delete(id);
 
-        verify(vectorCleanupTaskService).enqueueKnowledgeBase(id);
+        verify(vectorCleanupTaskService).enqueueProfileKnowledgeBase(id);
+        verify(vectorCleanupTaskService).enqueueLegacyKnowledgeBase(id);
         verify(milvusVectorService).deleteByKbId(id);
         verify(repository).deleteById(id);
         verify(auditLogService).recordSuccess(
@@ -221,7 +222,8 @@ class KnowledgeBaseServiceTest {
 
         service.delete(id);
 
-        verify(vectorCleanupTaskService).enqueueKnowledgeBase(id);
+        verify(vectorCleanupTaskService).enqueueProfileKnowledgeBase(id);
+        verify(vectorCleanupTaskService).enqueueLegacyKnowledgeBase(id);
         verify(repository).deleteById(id);
         verify(auditLogService).recordSuccess(
                 eq("KNOWLEDGE_BASE_DELETE"),

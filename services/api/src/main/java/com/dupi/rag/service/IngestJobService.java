@@ -48,6 +48,7 @@ public class IngestJobService {
     private final MilvusVectorService milvusVectorService;
     private final VectorCleanupTaskService vectorCleanupTaskService;
     private final AuditLogService auditLogService;
+    private final ProfileIndexStateService profileIndexStateService;
 
     public IngestJobResponse getLatestByDoc(UUID docId) {
         IngestJob job = ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(docId)
@@ -88,6 +89,7 @@ public class IngestJobService {
             log.info("Ignored ingest status update for tombstoned document {}, job {}", docId, jobId);
             return;
         }
+        boolean completedUpdate = "COMPLETED".equalsIgnoreCase(update.getStatus());
         IngestJob job = ingestJobRepository.findById(jobId)
                 .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
 
@@ -96,6 +98,7 @@ public class IngestJobService {
         if (!job.getDocId().equals(doc.getId()) || !job.getKbId().equals(doc.getKbId())) {
             throw new IllegalArgumentException("Ingest status update does not match job/document");
         }
+        boolean wasV2Ready = completedUpdate && profileIndexStateService.isV2Ready(doc.getKbId());
 
         if (update.getStage() != null) {
             job.setStage(IngestStage.valueOf(update.getStage().toUpperCase()));
@@ -122,9 +125,12 @@ public class IngestJobService {
             }
         }
 
-        if ("COMPLETED".equalsIgnoreCase(update.getStatus())) {
+        if (completedUpdate) {
             doc.setStatus(DocumentStatus.COMPLETED);
             doc.setErrorMessage(null);
+            if (update.getIndexSchemaVersion() != null) {
+                doc.setIndexSchemaVersion(update.getIndexSchemaVersion());
+            }
             job.setStage(IngestStage.COMPLETED);
         } else if ("FAILED".equalsIgnoreCase(update.getStatus())) {
             doc.setStatus(DocumentStatus.FAILED);
@@ -136,6 +142,13 @@ public class IngestJobService {
 
         documentRepository.save(doc);
         ingestJobRepository.save(job);
+        if (completedUpdate) {
+            KnowledgeBase kb = knowledgeBaseService.findSystemOrThrow(doc.getKbId());
+            profileIndexStateService.bumpRevision(kb);
+            if (!wasV2Ready && profileIndexStateService.isV2Ready(doc.getKbId())) {
+                vectorCleanupTaskService.enqueueLegacyKnowledgeBase(doc.getKbId());
+            }
+        }
     }
 
     @Transactional
@@ -197,10 +210,12 @@ public class IngestJobService {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
         kb.setEmbeddingModel(embeddingModel);
         kb.setEmbeddingDimension(embeddingDimension);
+        List<Document> documents = documentRepository.findByKbIdOrderByCreatedAtDesc(kbId);
+        profileIndexStateService.resetForReindex(kb, documents);
 
-        vectorCleanupTaskService.enqueueKnowledgeBase(kbId);
+        vectorCleanupTaskService.enqueueProfileKnowledgeBase(kbId);
         try {
-            milvusVectorService.deleteByKbId(kbId);
+            milvusVectorService.deleteProfileByKbId(kbId);
         } catch (Exception e) {
             log.warn("Failed to delete Milvus vectors before reindexing knowledge base {}", kbId, e);
             // 重建以数据库状态为主：向量库短暂不可用时，仍清理本地 chunks 并重建摄入任务；
@@ -208,7 +223,7 @@ public class IngestJobService {
         }
 
         chunkRepository.deleteByKbId(kbId);
-        List<IngestJobResponse> responses = documentRepository.findByKbIdOrderByCreatedAtDesc(kbId).stream()
+        List<IngestJobResponse> responses = documents.stream()
                 .map(doc -> requeueDocumentForReindex(kb, doc))
                 .toList();
         auditLogService.recordSuccess(

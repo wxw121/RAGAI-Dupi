@@ -243,35 +243,75 @@ public class MilvusVectorService {
     }
 
     public void deleteByDocId(UUID docId) {
-        DeleteParam param = DeleteParam.newBuilder()
-                .withCollectionName(properties.getCollection())
-                .withExpr("doc_id == \"" + docId + "\"")
-                .build();
-        deleteIgnoringUnloadedCollection(param, "doc", docId);
+        deleteLegacyByDocId(docId);
+    }
+
+    public void deleteLegacyByDocId(UUID docId) {
+        deleteByDocId(properties.getCollection(), docId, false);
+    }
+
+    public void deleteProfileByDocId(UUID docId) {
+        deleteByDocId(properties.getProfileCollection(), docId, false);
     }
 
     public void deleteByDocIdForCleanup(UUID docId) {
+        deleteLegacyByDocIdForCleanup(docId);
+    }
+
+    public void deleteLegacyByDocIdForCleanup(UUID docId) {
+        deleteByDocId(properties.getCollection(), docId, true);
+    }
+
+    public void deleteProfileByDocIdForCleanup(UUID docId) {
+        deleteByDocId(properties.getProfileCollection(), docId, true);
+    }
+
+    private void deleteByDocId(String collection, UUID docId, boolean strict) {
         DeleteParam param = DeleteParam.newBuilder()
-                .withCollectionName(properties.getCollection())
+                .withCollectionName(collection)
                 .withExpr("doc_id == \"" + docId + "\"")
                 .build();
-        deleteStrict(param);
+        if (strict) {
+            deleteStrict(param);
+        } else {
+            deleteIgnoringUnloadedCollection(param, collection, "doc", docId);
+        }
     }
 
     public void deleteByKbId(UUID kbId) {
-        DeleteParam param = DeleteParam.newBuilder()
-                .withCollectionName(properties.getCollection())
-                .withExpr("kb_id == \"" + kbId + "\"")
-                .build();
-        deleteIgnoringUnloadedCollection(param, "kb", kbId);
+        deleteLegacyByKbId(kbId);
+    }
+
+    public void deleteLegacyByKbId(UUID kbId) {
+        deleteByKbId(properties.getCollection(), kbId, false);
+    }
+
+    public void deleteProfileByKbId(UUID kbId) {
+        deleteByKbId(properties.getProfileCollection(), kbId, false);
     }
 
     public void deleteByKbIdForCleanup(UUID kbId) {
+        deleteLegacyByKbIdForCleanup(kbId);
+    }
+
+    public void deleteLegacyByKbIdForCleanup(UUID kbId) {
+        deleteByKbId(properties.getCollection(), kbId, true);
+    }
+
+    public void deleteProfileByKbIdForCleanup(UUID kbId) {
+        deleteByKbId(properties.getProfileCollection(), kbId, true);
+    }
+
+    private void deleteByKbId(String collection, UUID kbId, boolean strict) {
         DeleteParam param = DeleteParam.newBuilder()
-                .withCollectionName(properties.getCollection())
+                .withCollectionName(collection)
                 .withExpr("kb_id == \"" + kbId + "\"")
                 .build();
-        deleteStrict(param);
+        if (strict) {
+            deleteStrict(param);
+        } else {
+            deleteIgnoringUnloadedCollection(param, collection, "kb", kbId);
+        }
     }
 
     private void deleteStrict(DeleteParam param) {
@@ -282,8 +322,13 @@ public class MilvusVectorService {
         }
     }
 
-    private void deleteIgnoringUnloadedCollection(DeleteParam param, String scope, UUID id) {
-        if (!isCollectionLoadedForDelete(scope, id)) {
+    private void deleteIgnoringUnloadedCollection(
+            DeleteParam param,
+            String collection,
+            String scope,
+            UUID id
+    ) {
+        if (!isCollectionLoadedForDelete(collection, scope, id)) {
             return;
         }
         try {
@@ -308,10 +353,10 @@ public class MilvusVectorService {
         }
     }
 
-    private boolean isCollectionLoadedForDelete(String scope, UUID id) {
+    private boolean isCollectionLoadedForDelete(String collection, String scope, UUID id) {
         try {
             R<GetLoadStateResponse> loadState = client.getLoadState(GetLoadStateParam.newBuilder()
-                    .withCollectionName(properties.getCollection())
+                    .withCollectionName(collection)
                     .build());
             if (loadState == null || loadState.getStatus() != R.Status.Success.getCode() || loadState.getData() == null) {
                 // 删除入口不能依赖 Milvus 一定可用：状态查询失败时跳过向量清理，

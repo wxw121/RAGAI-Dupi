@@ -36,27 +36,33 @@ class VectorCleanupTaskServiceTest {
     }
 
     @Test
-    void enqueueDocumentCreatesPendingTaskOnlyWhenOneDoesNotAlreadyExist() {
+    void enqueueDocumentCreatesProfileAndLegacyTasksOnlyWhenMissing() {
         UUID docId = UUID.randomUUID();
         when(repository.findByTargetTypeAndTargetIdAndStatus(
-                VectorCleanupTargetType.DOCUMENT,
-                docId,
-                VectorCleanupStatus.PENDING
+                any(VectorCleanupTargetType.class),
+                eq(docId),
+                eq(VectorCleanupStatus.PENDING)
         )).thenReturn(Optional.empty());
 
         service().enqueueDocument(docId);
 
         ArgumentCaptor<VectorCleanupTask> captor = ArgumentCaptor.forClass(VectorCleanupTask.class);
-        verify(repository).save(captor.capture());
-        assertThat(captor.getValue().getTargetType()).isEqualTo(VectorCleanupTargetType.DOCUMENT);
-        assertThat(captor.getValue().getTargetId()).isEqualTo(docId);
-        assertThat(captor.getValue().getStatus()).isEqualTo(VectorCleanupStatus.PENDING);
+        verify(repository, times(2)).save(captor.capture());
+        assertThat(captor.getAllValues()).extracting(VectorCleanupTask::getTargetType)
+                .containsExactly(
+                        VectorCleanupTargetType.PROFILE_DOCUMENT,
+                        VectorCleanupTargetType.LEGACY_DOCUMENT
+                );
+        assertThat(captor.getAllValues()).allSatisfy(task -> {
+            assertThat(task.getTargetId()).isEqualTo(docId);
+            assertThat(task.getStatus()).isEqualTo(VectorCleanupStatus.PENDING);
+        });
 
         reset(repository);
         when(repository.findByTargetTypeAndTargetIdAndStatus(
-                VectorCleanupTargetType.DOCUMENT,
-                docId,
-                VectorCleanupStatus.PENDING
+                any(VectorCleanupTargetType.class),
+                eq(docId),
+                eq(VectorCleanupStatus.PENDING)
         )).thenReturn(Optional.of(VectorCleanupTask.builder().targetId(docId).build()));
 
         service().enqueueDocument(docId);
@@ -65,26 +71,25 @@ class VectorCleanupTaskServiceTest {
     }
 
     @Test
-    void enqueueKnowledgeBaseCreatesKnowledgeBaseTask() {
+    void enqueueKnowledgeBaseCreatesProfileAndLegacyTasks() {
         UUID kbId = UUID.randomUUID();
         when(repository.findByTargetTypeAndTargetIdAndStatus(
-                VectorCleanupTargetType.KNOWLEDGE_BASE,
-                kbId,
-                VectorCleanupStatus.PENDING
+                any(VectorCleanupTargetType.class),
+                eq(kbId),
+                eq(VectorCleanupStatus.PENDING)
         )).thenReturn(Optional.empty());
 
         service().enqueueKnowledgeBase(kbId);
 
-        verify(repository).save(argThat(task ->
-                task.getTargetType() == VectorCleanupTargetType.KNOWLEDGE_BASE
-                        && task.getTargetId().equals(kbId)
+        verify(repository, times(2)).save(argThat(task ->
+                task.getTargetId().equals(kbId)
                         && task.getStatus() == VectorCleanupStatus.PENDING));
     }
 
     @Test
     void processPendingTasksCompletesSuccessfulDocumentCleanup() {
         UUID docId = UUID.randomUUID();
-        VectorCleanupTask task = task(VectorCleanupTargetType.DOCUMENT, docId);
+        VectorCleanupTask task = task(VectorCleanupTargetType.PROFILE_DOCUMENT, docId);
         when(repository.findTop50ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
                 eq(VectorCleanupStatus.PENDING),
                 any(Instant.class)
@@ -92,7 +97,7 @@ class VectorCleanupTaskServiceTest {
 
         service().processPendingTasks();
 
-        verify(milvusVectorService).deleteByDocIdForCleanup(docId);
+        verify(milvusVectorService).deleteProfileByDocIdForCleanup(docId);
         assertThat(task.getStatus()).isEqualTo(VectorCleanupStatus.COMPLETED);
         assertThat(task.getLastError()).isNull();
     }
@@ -100,14 +105,14 @@ class VectorCleanupTaskServiceTest {
     @Test
     void processPendingTasksBacksOffFailedKnowledgeBaseCleanup() {
         UUID kbId = UUID.randomUUID();
-        VectorCleanupTask task = task(VectorCleanupTargetType.KNOWLEDGE_BASE, kbId);
+        VectorCleanupTask task = task(VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE, kbId);
         Instant before = Instant.now();
         when(repository.findTop50ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
                 eq(VectorCleanupStatus.PENDING),
                 any(Instant.class)
         )).thenReturn(List.of(task));
         doThrow(new IllegalStateException("milvus down"))
-                .when(milvusVectorService).deleteByKbIdForCleanup(kbId);
+                .when(milvusVectorService).deleteLegacyByKbIdForCleanup(kbId);
 
         service().processPendingTasks();
 
@@ -119,8 +124,8 @@ class VectorCleanupTaskServiceTest {
 
     @Test
     void listOpenTasksReturnsPendingAndFailedTasksFromRepositoryOrdering() {
-        VectorCleanupTask pending = task(VectorCleanupTargetType.DOCUMENT, UUID.randomUUID());
-        VectorCleanupTask failed = task(VectorCleanupTargetType.KNOWLEDGE_BASE, UUID.randomUUID());
+        VectorCleanupTask pending = task(VectorCleanupTargetType.PROFILE_DOCUMENT, UUID.randomUUID());
+        VectorCleanupTask failed = task(VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE, UUID.randomUUID());
         failed.setStatus(VectorCleanupStatus.FAILED);
         when(repository.findTop50ByStatusInOrderByUpdatedAtDesc(List.of(
                 VectorCleanupStatus.PENDING,
@@ -138,8 +143,8 @@ class VectorCleanupTaskServiceTest {
         UUID allowedKbId = UUID.randomUUID();
         UUID allowedDocId = UUID.randomUUID();
         UUID hiddenDocId = UUID.randomUUID();
-        VectorCleanupTask allowed = task(VectorCleanupTargetType.DOCUMENT, allowedDocId);
-        VectorCleanupTask hidden = task(VectorCleanupTargetType.DOCUMENT, hiddenDocId);
+        VectorCleanupTask allowed = task(VectorCleanupTargetType.PROFILE_DOCUMENT, allowedDocId);
+        VectorCleanupTask hidden = task(VectorCleanupTargetType.LEGACY_DOCUMENT, hiddenDocId);
         SecurityContext.set("maintainer", "USER", List.of("OPS_ADMIN"), List.of(allowedKbId.toString()));
         when(repository.findTop50ByStatusInOrderByUpdatedAtDesc(List.of(
                 VectorCleanupStatus.PENDING,
@@ -157,7 +162,7 @@ class VectorCleanupTaskServiceTest {
     void retryProcessesTaskImmediatelyAndRecordsSuccessAudit() {
         UUID taskId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
-        VectorCleanupTask task = task(VectorCleanupTargetType.DOCUMENT, docId);
+        VectorCleanupTask task = task(VectorCleanupTargetType.LEGACY_DOCUMENT, docId);
         task.setId(taskId);
         task.setAttemptCount(2);
         task.setLastError("previous failure");
@@ -165,7 +170,7 @@ class VectorCleanupTaskServiceTest {
 
         var response = service().retry(taskId);
 
-        verify(milvusVectorService).deleteByDocIdForCleanup(docId);
+        verify(milvusVectorService).deleteLegacyByDocIdForCleanup(docId);
         assertThat(task.getStatus()).isEqualTo(VectorCleanupStatus.COMPLETED);
         assertThat(task.getLastError()).isNull();
         assertThat(response.getId()).isEqualTo(taskId);
@@ -182,11 +187,11 @@ class VectorCleanupTaskServiceTest {
     void retryRecordsFailureAuditWhenImmediateCleanupStillFails() {
         UUID taskId = UUID.randomUUID();
         UUID kbId = UUID.randomUUID();
-        VectorCleanupTask task = task(VectorCleanupTargetType.KNOWLEDGE_BASE, kbId);
+        VectorCleanupTask task = task(VectorCleanupTargetType.PROFILE_KNOWLEDGE_BASE, kbId);
         task.setId(taskId);
         when(repository.findById(taskId)).thenReturn(Optional.of(task));
         doThrow(new IllegalStateException("milvus down"))
-                .when(milvusVectorService).deleteByKbIdForCleanup(kbId);
+                .when(milvusVectorService).deleteProfileByKbIdForCleanup(kbId);
 
         var response = service().retry(taskId);
 
@@ -206,7 +211,7 @@ class VectorCleanupTaskServiceTest {
         UUID taskId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         UUID allowedKbId = UUID.randomUUID();
-        VectorCleanupTask task = task(VectorCleanupTargetType.DOCUMENT, docId);
+        VectorCleanupTask task = task(VectorCleanupTargetType.PROFILE_DOCUMENT, docId);
         task.setId(taskId);
         SecurityContext.set("maintainer", "USER", List.of("OPS_ADMIN"), List.of(allowedKbId.toString()));
         when(repository.findById(taskId)).thenReturn(Optional.of(task));

@@ -26,4 +26,6 @@ public class IngestJobMessage {
     private String retrievalProfile;
     private String embeddingModel;
     private Integer embeddingDimension;
+    private Boolean legacyWriteRequired;
+    private Integer indexSchemaVersion;
 }

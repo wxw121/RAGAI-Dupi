@@ -40,6 +40,7 @@ public class DocumentService {
     private final DocumentTombstoneService documentTombstoneService;
     private final VectorCleanupTaskService vectorCleanupTaskService;
     private final AuditLogService auditLogService;
+    private final ProfileIndexStateService profileIndexStateService;
 
     @Transactional
     public DocumentResponse upload(UUID kbId, MultipartFile file) {
@@ -107,6 +108,7 @@ public class DocumentService {
                 .updatedAt(now)
                 .build();
         documentRepository.save(doc);
+        profileIndexStateService.bumpRevision(kb);
 
         try {
             minioStorageService.upload(objectKey, file.getInputStream(), file.getSize(), doc.getMimeType());
@@ -150,9 +152,16 @@ public class DocumentService {
 
     @Transactional
     public void delete(UUID kbId, UUID docId) {
+        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
         Document doc = findOrThrow(kbId, docId);
         documentTombstoneService.recordDeleted(doc);
-        vectorCleanupTaskService.enqueueDocument(docId);
+        vectorCleanupTaskService.enqueueProfileDocument(docId);
+        vectorCleanupTaskService.enqueueLegacyDocument(docId);
+        try {
+            milvusVectorService.deleteProfileByDocId(docId);
+        } catch (Exception e) {
+            log.warn("Failed to delete profile Milvus vectors for doc {}", docId, e);
+        }
         try {
             milvusVectorService.deleteByDocId(docId);
         } catch (Exception e) {
@@ -169,6 +178,7 @@ public class DocumentService {
             // 这样可以支持幂等重试，也避免 MinIO 短暂异常阻塞主记录删除。
         }
         documentRepository.delete(doc);
+        profileIndexStateService.bumpRevision(kb);
         auditLogService.recordSuccess(
                 "DOCUMENT_DELETE",
                 "DOCUMENT",

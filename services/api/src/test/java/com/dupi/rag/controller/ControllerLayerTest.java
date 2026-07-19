@@ -324,7 +324,7 @@ class ControllerLayerTest {
         UUID taskId = UUID.randomUUID();
         VectorCleanupTaskResponse response = VectorCleanupTaskResponse.builder()
                 .id(taskId)
-                .targetType(com.dupi.rag.domain.enums.VectorCleanupTargetType.DOCUMENT)
+                .targetType(com.dupi.rag.domain.enums.VectorCleanupTargetType.PROFILE_DOCUMENT)
                 .targetId(UUID.randomUUID())
                 .status(com.dupi.rag.domain.enums.VectorCleanupStatus.PENDING)
                 .attemptCount(1)

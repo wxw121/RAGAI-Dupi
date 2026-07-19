@@ -73,8 +73,15 @@ public class KnowledgeBaseService {
     @Transactional
     public void delete(UUID id) {
         findOrThrow(id);
-        vectorCleanupTaskService.enqueueKnowledgeBase(id);
+        vectorCleanupTaskService.enqueueProfileKnowledgeBase(id);
+        vectorCleanupTaskService.enqueueLegacyKnowledgeBase(id);
         boolean compensationRequired = false;
+        try {
+            milvusVectorService.deleteProfileByKbId(id);
+        } catch (Exception e) {
+            compensationRequired = true;
+            log.warn("Failed to delete profile Milvus vectors for knowledge base {}", id, e);
+        }
         try {
             milvusVectorService.deleteByKbId(id);
         } catch (Exception e) {

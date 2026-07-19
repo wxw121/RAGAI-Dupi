@@ -37,6 +37,7 @@ dupi:
     host: ${MILVUS_HOST:localhost}
     port: ${MILVUS_PORT:19530}
     collection: ${MILVUS_COLLECTION:dupi_chunks}
+    profile-collection: ${MILVUS_PROFILE_COLLECTION:}
   redis:
     ingest-queue: dupi:ingest:jobs
     cancel-channel: dupi:chat:cancel

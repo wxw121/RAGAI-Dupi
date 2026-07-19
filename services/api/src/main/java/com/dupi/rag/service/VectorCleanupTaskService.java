@@ -30,12 +30,34 @@ public class VectorCleanupTaskService {
 
     @Transactional
     public void enqueueKnowledgeBase(UUID kbId) {
-        enqueue(VectorCleanupTargetType.KNOWLEDGE_BASE, kbId);
+        enqueueProfileKnowledgeBase(kbId);
+        enqueueLegacyKnowledgeBase(kbId);
     }
 
     @Transactional
     public void enqueueDocument(UUID docId) {
-        enqueue(VectorCleanupTargetType.DOCUMENT, docId);
+        enqueueProfileDocument(docId);
+        enqueueLegacyDocument(docId);
+    }
+
+    @Transactional
+    public void enqueueProfileKnowledgeBase(UUID kbId) {
+        enqueue(VectorCleanupTargetType.PROFILE_KNOWLEDGE_BASE, kbId);
+    }
+
+    @Transactional
+    public void enqueueLegacyKnowledgeBase(UUID kbId) {
+        enqueue(VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE, kbId);
+    }
+
+    @Transactional
+    public void enqueueProfileDocument(UUID docId) {
+        enqueue(VectorCleanupTargetType.PROFILE_DOCUMENT, docId);
+    }
+
+    @Transactional
+    public void enqueueLegacyDocument(UUID docId) {
+        enqueue(VectorCleanupTargetType.LEGACY_DOCUMENT, docId);
     }
 
     @Scheduled(cron = "${dupi.cleanup.orphan-vectors-cron:0 30 3 * * *}")
@@ -109,10 +131,15 @@ public class VectorCleanupTaskService {
 
     private void process(VectorCleanupTask task, Instant now) {
         try {
-            if (task.getTargetType() == VectorCleanupTargetType.KNOWLEDGE_BASE) {
-                milvusVectorService.deleteByKbIdForCleanup(task.getTargetId());
-            } else {
-                milvusVectorService.deleteByDocIdForCleanup(task.getTargetId());
+            switch (task.getTargetType()) {
+                case PROFILE_KNOWLEDGE_BASE ->
+                        milvusVectorService.deleteProfileByKbIdForCleanup(task.getTargetId());
+                case PROFILE_DOCUMENT ->
+                        milvusVectorService.deleteProfileByDocIdForCleanup(task.getTargetId());
+                case LEGACY_KNOWLEDGE_BASE ->
+                        milvusVectorService.deleteLegacyByKbIdForCleanup(task.getTargetId());
+                case LEGACY_DOCUMENT ->
+                        milvusVectorService.deleteLegacyByDocIdForCleanup(task.getTargetId());
             }
             task.setStatus(VectorCleanupStatus.COMPLETED);
             task.setLastError(null);
@@ -139,7 +166,8 @@ public class VectorCleanupTaskService {
         if (SecurityContext.hasPermission("*") || SecurityContext.getPrincipal() == null) {
             return true;
         }
-        if (task.getTargetType() == VectorCleanupTargetType.KNOWLEDGE_BASE) {
+        if (task.getTargetType() == VectorCleanupTargetType.PROFILE_KNOWLEDGE_BASE
+                || task.getTargetType() == VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE) {
             return SecurityContext.canAccessKnowledgeBase(task.getTargetId().toString());
         }
         return repository.resolveKnowledgeBaseIdForDocumentTarget(task.getTargetId())

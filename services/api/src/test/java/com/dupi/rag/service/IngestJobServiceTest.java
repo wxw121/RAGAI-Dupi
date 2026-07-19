@@ -43,6 +43,7 @@ class IngestJobServiceTest {
     @Mock MilvusVectorService milvusVectorService;
     @Mock VectorCleanupTaskService vectorCleanupTaskService;
     @Mock AuditLogService auditLogService;
+    @Mock ProfileIndexStateService profileIndexStateService;
 
     IngestJobService service() {
         RedisQueueProperties redisQueueProperties = new RedisQueueProperties();
@@ -62,7 +63,8 @@ class IngestJobServiceTest {
                 llmProperties,
                 milvusVectorService,
                 vectorCleanupTaskService,
-                auditLogService
+                auditLogService,
+                profileIndexStateService
         );
     }
 
@@ -74,13 +76,17 @@ class IngestJobServiceTest {
         UUID chunkId = UUID.randomUUID();
         IngestJob job = job(kbId, docId, jobId);
         Document doc = doc(kbId, docId);
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
         when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(false, true);
         IngestStatusUpdate update = IngestStatusUpdate.builder()
                 .jobId(jobId.toString())
                 .docId(docId.toString())
                 .status("completed")
                 .stage("indexing")
+                .indexSchemaVersion(2)
                 .chunks(List.of(new IngestStatusUpdate.ChunkPayload(
                         chunkId.toString(), 0, "content", 3, Map.of("heading", "H"), "milvus-1")))
                 .build();
@@ -90,8 +96,11 @@ class IngestJobServiceTest {
         assertThat(doc.getStatus()).isEqualTo(DocumentStatus.COMPLETED);
         assertThat(job.getStatus()).isEqualTo(IngestJobStatus.COMPLETED);
         assertThat(job.getStage()).isEqualTo(IngestStage.COMPLETED);
+        assertThat(doc.getIndexSchemaVersion()).isEqualTo(2);
         verify(chunkRepository).deleteByDocId(docId);
         verify(chunkRepository).save(argThat(c -> c.getId().equals(chunkId) && c.getMetadata().get("heading").equals("H")));
+        verify(profileIndexStateService).bumpRevision(kb);
+        verify(vectorCleanupTaskService).enqueueLegacyKnowledgeBase(kbId);
     }
 
     @Test
@@ -327,6 +336,11 @@ class IngestJobServiceTest {
         assertThat(first.getErrorMessage()).isNull();
         assertThat(second.getStatus()).isEqualTo(DocumentStatus.PENDING);
         verify(chunkRepository).deleteByKbId(kbId);
+        verify(profileIndexStateService).resetForReindex(kb, List.of(first, second));
+        verify(vectorCleanupTaskService).enqueueProfileKnowledgeBase(kbId);
+        verify(vectorCleanupTaskService, never()).enqueueLegacyKnowledgeBase(kbId);
+        verify(milvusVectorService).deleteProfileByKbId(kbId);
+        verify(milvusVectorService, never()).deleteByKbId(kbId);
         verify(ingestJobRepository, times(2)).save(any(IngestJob.class));
         verify(ingestOutboxService).record(any(IngestJob.class), eq(kb), eq(first.getObjectKey()), eq(first.getFileName()), eq(first.getMimeType()));
         verify(ingestOutboxService).record(any(IngestJob.class), eq(kb), eq(second.getObjectKey()), eq(second.getFileName()), eq(second.getMimeType()));
@@ -357,8 +371,8 @@ class IngestJobServiceTest {
         assertThatThrownBy(() -> service().reindexKnowledgeBase(kbId))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("redis unavailable");
-        verify(vectorCleanupTaskService).enqueueKnowledgeBase(kbId);
-        verify(milvusVectorService).deleteByKbId(kbId);
+        verify(vectorCleanupTaskService).enqueueProfileKnowledgeBase(kbId);
+        verify(milvusVectorService).deleteProfileByKbId(kbId);
         verify(documentRepository, never()).save(doc);
         verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
     }
@@ -371,7 +385,7 @@ class IngestJobServiceTest {
         Document doc = doc(kbId, docId);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc));
-        doThrow(new IllegalStateException("milvus unavailable")).when(milvusVectorService).deleteByKbId(kbId);
+        doThrow(new IllegalStateException("milvus unavailable")).when(milvusVectorService).deleteProfileByKbId(kbId);
 
         var responses = service().reindexKnowledgeBase(kbId, "model", 256);
 

@@ -20,6 +20,7 @@ public class IngestStatusUpdate {
     private String errorMessage;
     private List<ChunkPayload> chunks;
     private List<String> milvusIds;
+    private Integer indexSchemaVersion;
 
     @Data
     @NoArgsConstructor
