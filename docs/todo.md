@@ -11,11 +11,12 @@
 - [ ] 运维面板增强：任务高级筛选、邮件/IM 等更多通知渠道与审计归档对接
 - [ ] 完整灾备恢复：MinIO 原始二进制、文档主记录与 Milvus 向量的一致性导入/校验
 - [ ] Milvus BM25 sparse 字段生产调优与索引参数压测
-- [ ] V1.5 P2：profile 隔离索引或可过滤统一超集、Combined 多路分数融合调优、默认启用质量门禁自动化、评估可视化增强
 - [ ] 可视化 Knowledge Pipeline DSL（V3）
 - [ ] K8s Helm Chart（V4）
 
 ## 已完成
+
+- [x] V1.5 P2: profile v2 filterable superset, Combined weighted RRF, revision-bound default quality gates, Web readiness/gate comparison -- 2026-07-19
 
 - [x] V1.5 P0/P1：Parent-Child / QA-assisted 索引、四种 retrieval profile、知识库设置、多 profile RAG 评估、QA source provenance 与失败降级 — 2026-07-19
 - [x] V1.2.1：真实浏览器门禁数据隔离到 `e2e` 租户；成功自动清理临时知识库和 `e2e_*` 账号，失败保留 Playwright 证据；新增仅 `OPS_ADMIN` 可调用且严格限于 `e2e` 租户 `e2e_*` 账号的删除接口，账号管理页面不提供通用删除 — 2026-07-14
