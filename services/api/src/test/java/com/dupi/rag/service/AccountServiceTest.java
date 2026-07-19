@@ -179,6 +179,128 @@ class AccountServiceTest {
     }
 
     @Test
+    void acceptsLegacyUserRoleAliasAndRotatesNonNumericTokenVersions() {
+        InMemoryStores stores = stores();
+        AccountService service = service(new ApiSecurityProperties(), stores);
+        service.bootstrapConfiguredUsers();
+        AccountUpsertRequest create = new AccountUpsertRequest();
+        create.setUsername("legacy");
+        create.setPassword("secret");
+        create.setRole("USER");
+
+        var created = service.create(create);
+
+        assertThat(created.getRole()).isEqualTo("ANALYST");
+        stores.users.stream()
+                .filter(user -> user.getUsername().equals("legacy"))
+                .findFirst()
+                .orElseThrow()
+                .setTokenVersion("legacy-token");
+
+        var rotated = service.rotateTokenVersion(" legacy ");
+
+        assertThat(rotated.getTokenVersion()).isNotBlank()
+                .isNotEqualTo("legacy-token");
+        assertThat(rotated.getTokenVersion()).contains("-");
+    }
+
+    @Test
+    void validatesRequiredCreateUpdateAndPasswordInputs() {
+        InMemoryStores stores = stores();
+        AccountService service = service(new ApiSecurityProperties(), stores);
+        service.bootstrapConfiguredUsers();
+
+        assertThatThrownBy(() -> service.create(null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("username is required");
+
+        AccountUpsertRequest missingPassword = new AccountUpsertRequest();
+        missingPassword.setUsername("missing-password");
+        assertThatThrownBy(() -> service.create(missingPassword))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("password is required");
+
+        assertThatThrownBy(() -> service.update(" ", new AccountUpsertRequest()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("username is required");
+
+        AccountUpsertRequest create = account("reset-target", "default");
+        service.create(create);
+        SecurityContext.set("admin", "ADMIN", List.of("*"));
+        assertThatThrownBy(() -> service.resetPassword("reset-target", " "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("password is required");
+    }
+
+    @Test
+    void updateNormalizesBlankTenantLegacyRoleScopeAndExplicitDisableState() {
+        InMemoryStores stores = stores();
+        AccountService service = service(new ApiSecurityProperties(), stores);
+        service.bootstrapConfiguredUsers();
+        service.create(account("analyst-update", "tenant-a"));
+        AccountUpsertRequest update = new AccountUpsertRequest();
+        update.setTenantId(" ");
+        update.setRole("USER");
+        update.setKnowledgeBaseIds(List.of(" kb-x ", "kb-x"));
+        update.setDisabled(true);
+
+        var response = service.update("analyst-update", update);
+
+        assertThat(response.getTenantId()).isEqualTo("default");
+        assertThat(response.getRole()).isEqualTo("ANALYST");
+        assertThat(response.getKnowledgeBaseIds()).containsExactly("kb-x");
+        assertThat(response.isDisabled()).isTrue();
+        assertThat(response.getTokenVersion()).isEqualTo("3");
+    }
+
+    @Test
+    void bootstrapSkipsBlankDuplicateAndPasswordlessConfiguredUsers() {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        ApiSecurityProperties.UserAccount blank = new ApiSecurityProperties.UserAccount();
+        blank.setUsername(" ");
+        ApiSecurityProperties.UserAccount passwordless = new ApiSecurityProperties.UserAccount();
+        passwordless.setUsername("passwordless");
+        passwordless.setRole("USER");
+        ApiSecurityProperties.UserAccount duplicate = new ApiSecurityProperties.UserAccount();
+        duplicate.setUsername("existing");
+        duplicate.setPassword("secret");
+        properties.getUsers().addAll(List.of(blank, passwordless, duplicate));
+        InMemoryStores stores = stores();
+        stores.users.add(UserAccount.builder()
+                .id(UUID.randomUUID())
+                .username("existing")
+                .passwordHash("hash")
+                .tenantId("default")
+                .roleCode("ANALYST")
+                .tokenVersion("1")
+                .build());
+
+        service(properties, stores).bootstrapConfiguredUsers();
+
+        assertThat(stores.users).extracting(UserAccount::getUsername)
+                .containsExactly("existing");
+    }
+
+    @Test
+    void bootstrapConfiguredAnalystNormalizesMissingKnowledgeBaseIds() {
+        ApiSecurityProperties properties = new ApiSecurityProperties();
+        ApiSecurityProperties.UserAccount configured = new ApiSecurityProperties.UserAccount();
+        configured.setUsername("configured-analyst");
+        configured.setPasswordHash("pbkdf2$hash");
+        configured.setRole("ANALYST");
+        configured.setKnowledgeBaseIds(null);
+        properties.getUsers().add(configured);
+        InMemoryStores stores = stores();
+
+        service(properties, stores).bootstrapConfiguredUsers();
+
+        assertThat(stores.users).singleElement().satisfies(user -> {
+            assertThat(user.getUsername()).isEqualTo("configured-analyst");
+            assertThat(user.getKnowledgeBaseIds()).isEmpty();
+        });
+    }
+
+    @Test
     void generatesPbkdf2PasswordHashWithoutStoringThePassword() {
         String hash = service(new ApiSecurityProperties(), stores()).generatePasswordHash("secret");
 

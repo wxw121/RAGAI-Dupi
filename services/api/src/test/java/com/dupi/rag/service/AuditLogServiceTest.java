@@ -104,6 +104,25 @@ class AuditLogServiceTest {
     }
 
     @Test
+    void recordSuccessInCurrentTransactionStoresTheSameAuditContextWithoutNewTransaction() {
+        UUID targetId = UUID.randomUUID();
+
+        service().recordSuccessInCurrentTransaction("PROFILE_ACTIVATE", "KNOWLEDGE_BASE", targetId,
+                "Activated retrieval profile");
+
+        ArgumentCaptor<AuditLog> captor = ArgumentCaptor.forClass(AuditLog.class);
+        verify(repository).save(captor.capture());
+        AuditLog log = captor.getValue();
+        assertThat(log.getTenantId()).isEqualTo("tenant-a");
+        assertThat(log.getAction()).isEqualTo("PROFILE_ACTIVATE");
+        assertThat(log.getTargetType()).isEqualTo("KNOWLEDGE_BASE");
+        assertThat(log.getTargetId()).isEqualTo(targetId);
+        assertThat(log.getStatus()).isEqualTo(AuditLogStatus.SUCCESS);
+        assertThat(log.getMessage()).isEqualTo("Activated retrieval profile");
+        assertThat(log.getErrorMessage()).isNull();
+    }
+
+    @Test
     void listFiltersAuditLogsByTenantActionStatusAndLimit() {
         UUID targetId = UUID.randomUUID();
         AuditLog log = AuditLog.builder()

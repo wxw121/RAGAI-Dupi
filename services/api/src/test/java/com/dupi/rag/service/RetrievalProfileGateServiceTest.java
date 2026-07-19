@@ -18,6 +18,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -116,6 +117,32 @@ class RetrievalProfileGateServiceTest {
 
         assertThat(decision.getStatus()).isEqualTo(RagEvalGateStatus.PASSED);
         assertThat(decision.getCandidate()).isEqualTo(RetrievalProfile.COMBINED);
+    }
+
+    @Test
+    void assertCanActivateAllowsClassicAndPassingCandidateOnly() {
+        UUID kbId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+
+        service().assertCanActivate(kbId, RetrievalProfile.CLASSIC);
+
+        when(runRepository.findLatestCompletedContainingClassicAndProfile(kbId, RetrievalProfile.PARENT_CHILD.name()))
+                .thenReturn(Optional.of(RagEvalRun.builder()
+                        .id(runId)
+                        .kbId(kbId)
+                        .profileSet(List.of(RetrievalProfile.CLASSIC, RetrievalProfile.PARENT_CHILD))
+                        .indexRevision(3L)
+                        .build()));
+        when(resultRepository.findByRunIdOrderByCaseKeyAsc(runId))
+                .thenReturn(passingResults(RetrievalProfile.PARENT_CHILD));
+        when(profileIndexStateService.currentRevision(kbId)).thenReturn(3L);
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+
+        service().assertCanActivate(kbId, RetrievalProfile.PARENT_CHILD);
+
+        assertThatThrownBy(() -> service().assertCanActivate(kbId, RetrievalProfile.QA_ASSISTED))
+                .isInstanceOf(com.dupi.rag.exception.RetrievalProfileConflictException.class)
+                .hasMessageContaining("not_evaluated");
     }
 
     private RetrievalProfileGateService service() {
