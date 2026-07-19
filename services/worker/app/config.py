@@ -20,6 +20,13 @@ class Settings:
     milvus_host: str = os.getenv("MILVUS_HOST", "localhost")
     milvus_port: int = int(os.getenv("MILVUS_PORT", "19530"))
     milvus_collection: str = os.getenv("MILVUS_COLLECTION", "dupi_chunks")
+    milvus_profile_collection: str = os.getenv(
+        "MILVUS_PROFILE_COLLECTION",
+        os.getenv("MILVUS_COLLECTION", "dupi_chunks") + "_profiles_v2",
+    )
+    combined_child_weight: float = float(os.getenv("COMBINED_CHILD_WEIGHT", "1.0"))
+    combined_qa_weight: float = float(os.getenv("COMBINED_QA_WEIGHT", "0.8"))
+    rrf_k: int = int(os.getenv("RRF_K", "60"))
 
     api_base_url: str = os.getenv("API_BASE_URL", "http://localhost:8080")
     dupi_internal_key: str = os.getenv("DUPI_INTERNAL_KEY", "")

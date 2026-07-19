@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.callback import download_object, post_status
 from app.canonical import canonicalize
+from app.config import settings
 from app.embedder import Embedder
 from app.indexer import MilvusIndexer
 from app.models import DocumentNode
@@ -108,9 +109,28 @@ def process_ingest_job(job: dict):
             )
 
         update("processing", "indexing")
-        indexer = MilvusIndexer(dimension=embedding_dimension)
-        indexer.delete_by_doc(doc_id)
-        indexer.index_chunks(kb_id, doc_id, index_chunks, vectors)
+        profile_indexer = MilvusIndexer(
+            dimension=embedding_dimension,
+            collection_name=settings.milvus_profile_collection,
+            profile_schema=True,
+        )
+        profile_indexer.delete_by_doc(doc_id)
+        profile_indexer.index_profile_chunks(kb_id, doc_id, index_chunks, vectors)
+
+        if job.get("legacyWriteRequired", True):
+            vector_by_chunk_id = {
+                chunk.id: vector
+                for chunk, vector in zip(index_chunks, vectors)
+            }
+            legacy_vectors = [vector_by_chunk_id[chunk.id] for chunk in plan.legacy_chunks]
+            legacy_indexer = MilvusIndexer(dimension=embedding_dimension)
+            legacy_indexer.delete_by_doc(doc_id)
+            legacy_indexer.index_chunks(
+                kb_id,
+                doc_id,
+                plan.legacy_chunks,
+                legacy_vectors,
+            )
 
         update(
             "completed",

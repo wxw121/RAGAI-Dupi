@@ -88,6 +88,7 @@ def test_parse_text_excel_and_unsupported_document(tmp_path):
 
 def test_process_ingest_job_success_uses_canonical_pipeline(monkeypatch):
     statuses = []
+    index_calls = []
     chunks = [TextChunk("c1", 0, "content", 2, {"heading": "H"})]
 
     monkeypatch.setattr("app.consumer.post_status", lambda payload: statuses.append(payload))
@@ -109,13 +110,20 @@ def test_process_ingest_job_success_uses_canonical_pipeline(monkeypatch):
             return [[1.0, 2.0]]
 
     class FakeIndexer:
-        def __init__(self, dimension):
+        def __init__(self, dimension, collection_name=None, profile_schema=False):
             self.dimension = dimension
+            self.profile_schema = profile_schema
 
         def delete_by_doc(self, doc_id):
-            statuses.append({"deleted": doc_id})
+            index_calls.append(("profile-delete" if self.profile_schema else "legacy-delete", doc_id))
 
         def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+            index_calls.append(("legacy-index", [chunk.id for chunk in chunks_arg]))
+            chunks_arg[0].milvus_id = "m1"
+            return ["m1"]
+
+        def index_profile_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+            index_calls.append(("profile-index", [chunk.id for chunk in chunks_arg]))
             chunks_arg[0].milvus_id = "m1"
             return ["m1"]
 
@@ -135,6 +143,12 @@ def test_process_ingest_job_success_uses_canonical_pipeline(monkeypatch):
     assert [s.get("stage") for s in statuses if "stage" in s] == ["parsing", "chunking", "embedding", "indexing", "completed"]
     assert statuses[-1]["chunks"][0]["milvusId"] == "m1"
     assert statuses[-1]["indexSchemaVersion"] == 2
+    assert index_calls == [
+        ("profile-delete", "doc"),
+        ("profile-index", ["c1"]),
+        ("legacy-delete", "doc"),
+        ("legacy-index", ["c1"]),
+    ]
 
 
 def test_process_ingest_job_falls_back_and_reports_failures(monkeypatch):
@@ -238,13 +252,16 @@ def test_process_ingest_job_parent_child_indexes_children_and_reports_parents(mo
             return [[1.0, 2.0] for _ in texts]
 
     class FakeIndexer:
-        def __init__(self, dimension):
+        def __init__(self, dimension, collection_name=None, profile_schema=False):
             self.dimension = dimension
 
         def delete_by_doc(self, doc_id):
             pass
 
         def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+            pass
+
+        def index_profile_chunks(self, kb_id, doc_id, chunks_arg, vectors):
             indexed_chunk_ids.extend(chunk.id for chunk in chunks_arg)
             for chunk in chunks_arg:
                 chunk.milvus_id = f"m-{chunk.id}"
@@ -307,13 +324,16 @@ def test_process_ingest_job_qa_assisted_indexes_original_and_qa_chunks(monkeypat
             return [[1.0, 2.0] for _ in texts]
 
     class FakeIndexer:
-        def __init__(self, dimension):
+        def __init__(self, dimension, collection_name=None, profile_schema=False):
             self.dimension = dimension
 
         def delete_by_doc(self, doc_id):
             pass
 
         def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+            pass
+
+        def index_profile_chunks(self, kb_id, doc_id, chunks_arg, vectors):
             indexed_chunk_ids.extend(chunk.id for chunk in chunks_arg)
             for chunk in chunks_arg:
                 chunk.milvus_id = f"m-{chunk.id}"
@@ -368,13 +388,16 @@ def test_process_ingest_job_combined_uses_parents_as_qa_sources(monkeypatch):
             return [[1.0, 2.0] for _ in texts]
 
     class FakeIndexer:
-        def __init__(self, dimension):
+        def __init__(self, dimension, collection_name=None, profile_schema=False):
             self.dimension = dimension
 
         def delete_by_doc(self, doc_id):
             pass
 
         def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+            pass
+
+        def index_profile_chunks(self, kb_id, doc_id, chunks_arg, vectors):
             indexed_chunk_ids.extend(chunk.id for chunk in chunks_arg)
 
     monkeypatch.setattr("app.consumer.Embedder", FakeEmbedder)
@@ -398,6 +421,7 @@ def test_process_ingest_job_combined_uses_parents_as_qa_sources(monkeypatch):
 def test_process_ingest_job_qa_failure_still_completes_original_index(monkeypatch):
     statuses = []
     indexed_chunk_ids = []
+    indexer_modes = []
     source = TextChunk("source-1", 0, "source content", 2, {})
 
     monkeypatch.setattr("app.consumer.post_status", lambda payload: statuses.append(payload))
@@ -419,13 +443,17 @@ def test_process_ingest_job_qa_failure_still_completes_original_index(monkeypatc
             return [[1.0, 2.0] for _ in texts]
 
     class FakeIndexer:
-        def __init__(self, dimension):
+        def __init__(self, dimension, collection_name=None, profile_schema=False):
             self.dimension = dimension
+            indexer_modes.append(profile_schema)
 
         def delete_by_doc(self, doc_id):
             pass
 
         def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+            pass
+
+        def index_profile_chunks(self, kb_id, doc_id, chunks_arg, vectors):
             indexed_chunk_ids.extend(chunk.id for chunk in chunks_arg)
 
     monkeypatch.setattr("app.consumer.Embedder", FakeEmbedder)
@@ -440,8 +468,10 @@ def test_process_ingest_job_qa_failure_still_completes_original_index(monkeypatc
         "mimeType": "text/plain",
         "embeddingDimension": 2,
         "retrievalProfile": "qa-assisted",
+        "legacyWriteRequired": False,
     })
 
     assert indexed_chunk_ids == ["source-1"]
+    assert indexer_modes == [True]
     assert statuses[-1]["status"] == "completed"
     assert [chunk["id"] for chunk in statuses[-1]["chunks"]] == ["source-1"]
