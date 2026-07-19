@@ -232,6 +232,39 @@ describe('api client', () => {
     expect(init.body).toBeInstanceOf(FormData)
   })
 
+  it('sends upload idempotency headers and abort signal and exposes Retry-After', async () => {
+    setAuthToken('csrf-token')
+    const controller = new AbortController()
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ uploaded: true }))
+      .mockResolvedValueOnce(new Response(
+        JSON.stringify({ error: 'upload_quota_exceeded', message: 'quota exhausted' }),
+        {
+          status: 429,
+          headers: { 'Content-Type': 'application/json', 'Retry-After': '12' },
+        },
+      ))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await apiUpload('/upload', new File(['abc'], 'a.txt'), {
+      headers: { 'Idempotency-Key': 'upload-key' },
+      signal: controller.signal,
+    })
+
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+      headers: {
+        'X-Dupi-CSRF-Token': 'csrf-token',
+        'Idempotency-Key': 'upload-key',
+      },
+      signal: controller.signal,
+    })
+    await expect(apiUpload('/upload', new File(['abc'], 'a.txt'))).rejects.toMatchObject({
+      status: 429,
+      retryAfter: '12',
+    })
+  })
+
   it('uploads multiple files through the batch FormData field', async () => {
     setAuthToken('csrf-token')
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse([{ uploaded: true }]))

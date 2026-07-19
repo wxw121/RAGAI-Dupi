@@ -1,6 +1,8 @@
 package com.dupi.rag.repository;
 
 import com.dupi.rag.domain.entity.RagEvalRun;
+import com.dupi.rag.domain.enums.RagEvalRunStatus;
+import com.dupi.rag.domain.enums.RagQualityGateStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -26,4 +28,9 @@ public interface RagEvalRunRepository extends JpaRepository<RagEvalRun, UUID> {
             @Param("kbId") UUID kbId,
             @Param("profile") String profile
     );
+
+    List<RagEvalRun> findByKbIdAndStatusAndGateStatus(
+            UUID kbId, RagEvalRunStatus status, RagQualityGateStatus gateStatus);
+
+    boolean existsByKbIdAndStatus(UUID kbId, RagEvalRunStatus status);
 }

@@ -1,5 +1,117 @@
 # dupi-RAG
 
+> V1.4.2 is in development as a governance ops stabilization slice. It adds a read-only GET /api/v1/ops/governance-summary endpoint for OPS_ADMIN operators plus a smoke script and Pester check for the V1.4.1 upload, ingest, outbox, notification, and vector cleanup state. It is not yet documented here as merged, tagged, or released.
+
+## V1.4.2 Governance Ops
+
+GET /api/v1/ops/governance-summary returns a compact read-only snapshot with generatedAt, uploadQuota, ingestJobs, ingestOutbox, failureNotifications, vectorCleanup, and alerts.
+
+Smoke check: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-governance-summary.ps1 -BaseUrl http://localhost:8080 -ApiKey $env:DUPI_API_KEY -OutFile evidence/governance-summary-smoke.json
+
+Focused Pester coverage currently passes 4 of 4: powershell -NoProfile -ExecutionPolicy Bypass -Command Import-Module Pester; Invoke-Pester -Path scripts/tests/smoke-governance-summary.Tests.ps1 -CI
+
+Local Web validation on this workstation must use project npm scripts so services/web/scripts/node16-webcrypto.cjs loads the Node 16 WebCrypto shim. Do not invoke raw vite or vitest directly on Node 16.
+
+> V1.4.1 adds persisted tenant/user upload quotas, idempotent per-file uploads, cancellable and leased ingest executions, stale callback protection, and deduplicated terminal-failure events with optional webhook delivery. API version: `1.4.1-SNAPSHOT`; Web version: `1.4.1`.
+
+## V1.4.1 Upload Governance
+
+The Web uploads each file independently with bounded concurrency and an `Idempotency-Key`. It shows retained and rolling-window quota, keeps failures isolated per file, supports transport abort/retry, and calls the ingest cancellation API after a job exists. Polling is serialized and aborted on unmount so an older response cannot overwrite newer state.
+
+PostgreSQL is authoritative for upload reservations and ingest execution. Upload reservations move through `PENDING -> COMMITTED -> RELEASED`; retained quota counts active `PENDING` + `COMMITTED` reservations, while `RELEASED` reservations no longer consume retained bytes/documents. `attemptId` / `attemptExpiresAt` lease in-flight uploads so the stale-upload reconciler can either commit durable doc/job/outbox attempts or clean partial objects/jobs/docs before release. A retry of the same released idempotency key rechecks retained quota but does not double-charge rolling-window bytes. Ingest retries rotate `executionId`; Worker callbacks carry a monotonic `sequence`; stale, duplicate, or terminal-state callbacks are acknowledged as ignored. Redis uses ready and processing lists, a bounded reaper moves `requeueEligible` processing payloads back to ready, and a processing item is acknowledged only after terminal handling.
+
+Terminal `FAILED`/`DEAD_LETTER` notifications are persisted once per job execution/status. With a webhook configured, due `PENDING`/`FAILED` rows are delivered with bounded backoff; 2xx responses become `DELIVERED`, and rows that reach the attempt limit become `EXHAUSTED`. Webhook delivery requires HTTPS by default, blocks local/metadata hosts unless explicitly allowed, can include `X-Dupi-Webhook-Secret`, and truncates sanitized error text.
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `UPLOAD_QUOTA_ENABLED` | `true` | Enable persistent upload quota accounting |
+| `UPLOAD_QUOTA_RETAINED_BYTES_LIMIT` | `1073741824` | Retained bytes per tenant/user |
+| `UPLOAD_QUOTA_RETAINED_DOCUMENTS_LIMIT` | `1000` | Retained documents per tenant/user |
+| `UPLOAD_QUOTA_WINDOW_BYTES_LIMIT` | `268435456` | Accepted bytes per rolling window |
+| `UPLOAD_QUOTA_WINDOW_SECONDS` | `3600` | Rolling upload window |
+| `UPLOAD_QUOTA_ATTEMPT_LEASE_SECONDS` | `300` | In-flight upload attempt lease before stale reconciliation |
+| `UPLOAD_QUOTA_RECONCILIATION_BATCH_SIZE` | `50` | Max stale upload reservations claimed per reconciler pass |
+| `UPLOAD_QUOTA_RECONCILIATION_CRON` | `0 */5 * * * *` | Stale upload reservation reconciler cadence |
+| `INGEST_PROCESSING_QUEUE` | `dupi:ingest:jobs:processing` | Worker in-flight Redis list |
+| `INGEST_LEASE_SECONDS` | `60` | PostgreSQL ingest claim lease |
+| `INGEST_HEARTBEAT_INTERVAL_SECONDS` | `15` | Worker lease heartbeat during long operations |
+| `INGEST_PROCESSING_REAP_INTERVAL_SECONDS` | `60` | Worker processing-list reaper cadence |
+| `INGEST_PROCESSING_REAP_BATCH_SIZE` | `100` | Oldest-tail processing payloads inspected per reaper pass |
+| `REDIS_RETRY_DELAY_SECONDS` | `1` | Worker Redis transient failure backoff |
+| `WORKER_ID` | host/process derived | Stable claim owner identifier |
+| `INGEST_FAILURE_NOTIFICATION_WEBHOOK_URL` | empty | Optional POST target for FAILED/DEAD_LETTER ingest events |
+| `INGEST_FAILURE_NOTIFICATION_TIMEOUT_SECONDS` | `10` | Webhook delivery timeout |
+| `INGEST_FAILURE_NOTIFICATION_MAX_ATTEMPTS` | `5` | Bounded webhook retry attempts before `EXHAUSTED` |
+| `INGEST_FAILURE_NOTIFICATION_WEBHOOK_SECRET` | empty | Optional `X-Dupi-Webhook-Secret` header value |
+| `INGEST_FAILURE_NOTIFICATION_MAX_ERROR_MESSAGE_LENGTH` | `512` | Sanitized webhook error-text cap |
+| `INGEST_FAILURE_NOTIFICATION_ALLOW_INSECURE_WEBHOOK` | `false` | Permit non-HTTPS/local webhook targets for trusted local testing only |
+| `INGEST_FAILURE_NOTIFICATION_DISPATCH_CRON` | `*/30 * * * * *` | Failure-notification dispatch cadence |
+
+Key routes:
+
+```bash
+# User-visible quota; requires DOCUMENT_UPLOAD
+curl http://localhost:8080/api/v1/upload-quota
+
+# Idempotent single-file upload
+curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/documents \
+  -H "Idempotency-Key: upload-20260718-001" \
+  -F "file=@sample.pdf"
+
+# Cancel queued/running ingest
+curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs/{jobId}/cancel
+```
+
+See [the V1.4.1 release runbook](docs/v1.4.1-release-runbook.md) and the [design](docs/superpowers/specs/2026-07-18-v1.4.1-upload-governance-design.md). The latest local V1.4.1 release scan records image digest `sha256:eec613fab9cdd1d873b95172f98d42ade5989238e2b0f76761b6b4f63b86515a`, image size 640,389,450 bytes, no Python findings, and 22 accepted upstream-unfixed OS findings expiring 2026-08-15.
+
+> V1.4.0 adds tenant-scoped, checksum-verified knowledge-base archives and idempotent restore into a new hidden knowledge base. It is an application recovery layer, not a replacement for PostgreSQL, MinIO, etcd, or Milvus infrastructure backups.
+
+## V1.4 Verifiable Recovery
+
+Operators with `KB_RECOVERY` use the **Recovery** tab to create, inspect, download, retry, and delete archives, and to create, retry, or abandon restores. Archive objects are sealed under `archives/{tenantId}/{archiveId}/` in a private recovery bucket; `manifest.json` is written last. A target stays hidden as `RESTORING` until objects, records, dense/sparse vectors, counts, schemas, and checksums verify.
+
+Routes are below `/api/v1/knowledge-bases/{kbId}/recovery`. Commands return `202 Accepted`; the Web panel polls non-terminal jobs every three seconds. See [the recovery runbook](docs/v1.4-recovery-runbook.md).
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `DUPI_RECOVERY_BUCKET` | `dupi-recovery` | Dedicated private MinIO bucket |
+| `DUPI_RECOVERY_QUIESCENCE_TIMEOUT_SECONDS` | `300` | Wait for active KB mutations |
+| `DUPI_RECOVERY_PAGE_SIZE` | `500` | Bounded vector snapshot page size |
+| `DUPI_RECOVERY_MAX_CONCURRENT_JOBS` | `2` | Bounded archive/restore concurrency |
+
+### V1.4.0 Release Gate
+
+The Worker image installs CPU-only PyTorch from the official CPU wheel index, uses PyMilvus 2.5.18 with the current patched packaging toolchain, and runs as UID/GID `65534`. The gate runs `pip check` and imports the production Worker modules before scanning. Run it from the repository root:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scan-release.ps1 `
+  -Image dupi-rag-worker:v1.4 `
+  -OutputPath artifacts/v1.4-release-scan `
+  -HighExceptionPath deploy/release-exceptions/v1.4.0.json
+```
+
+The scan exports the image's exact `pip freeze --all` result to `worker-requirements.lock.txt`, then audits that lock without resolving a second dependency graph. It accepts either a `pip-audit` executable on `PATH` or an installed `pip_audit` module through `python -m pip_audit`, retries transient audit failures up to three times, and falls back to the pinned `dupi-rag-pip-audit:2.10.1` container when host networking cannot reach OSV. Every path deletes stale output first and records the execution mode in `summary.md`. Use `-TrivySkipDbUpdate` only when the local Trivy database was refreshed separately. The structured exception release must match the normalized image tag, cover every active upstream-unfixed finding exactly, and expires on `2026-08-15`; fixable, expired, unused, or unmatched entries fail the gate. The release scan generates the dependency lock, pip-audit JSON, CycloneDX/Syft SBOM, Trivy version/result JSON, and `summary.md` under `artifacts/v1.4-release-scan`. The summary records the immutable image digest and Trivy vulnerability-database timestamp.
+
+> V1.3 增加可阻断的 RAG 质量策略/基线、版本化 Retrieval Profile，以及 Milvus 原生 Sparse BM25 的回填、双写、Shadow、Cutover 和 Rollback。生产部署要求 Milvus 2.5.4；升级前必须备份 Milvus/etcd/MinIO/PostgreSQL，并在隔离环境完成回填与回滚演练。
+
+## V1.3 Sparse 迁移运维
+
+每个 Profile 使用独立集合 `{MILVUS_COLLECTION}_sparse_{kbId}_v{version}`。迁移状态依次为 `PREPARING -> BACKFILLING -> DUAL_WRITING -> SHADOW_VALIDATING -> CUTOVER -> COMPLETED`，失败进入 `FAILED`，`BACKFILLING` 可幂等重试。legacy BM25 fallback 由迁移记录持久化控制，仅允许在双写和 Shadow 阶段启用；完成后由激活 Profile 永久驱动 Sparse 写入。
+
+Cutover 要求覆盖率 100%、embedding 维度一致、候选 Profile 有完全匹配的 PASS 评测、候选 P95 不超过基线 1.25 倍、fallback rate 不增加。Rollback 只能重新激活更旧且已有 PASS 证据的 Profile。删除文档会同步清理 dense 集合和该知识库所有版本化 Sparse 集合。
+
+真实语料基准命令：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rag-retrieval-benchmark.ps1 `
+  -KbId <kbId> -HybridProfileId <profileId> -RerankProfileId <rerankProfileId> `
+  -ApiKey $env:DUPI_API_KEY -OutputPath artifacts/v13-real-benchmark.json
+```
+
+脚本会核对实际模式、Profile 开关、逐用例阶段排名和相对 VECTOR 的 rank delta；实际未执行 reranker 时直接失败。
+
+Worker 使用 CPU-only PyTorch 和 `BAAI/bge-reranker-base`，默认在启动生命周期加载模型并执行预热推理；Compose 通过 `hf_model_cache` 持久化模型缓存。预热失败会在 `/health` 中标记 Rerank 不可用，但不阻断 VECTOR/HYBRID；冷启动延迟不得与热态 P95 混用。
+
 > 账号 / RBAC 与 ops 管理权限更新记录见 [docs/rbac-ops-admin-2026-07-06.md](docs/rbac-ops-admin-2026-07-06.md)；摄入 outbox、删除 tombstone、实例级授权与审计运维增强见 [docs/outbox-tombstone-rbac-ops-2026-07-07.md](docs/outbox-tombstone-rbac-ops-2026-07-07.md)。
 > V1.1（API `0.1.1-SNAPSHOT` / Web `0.1.1`）新增真实浏览器 E2E 门禁、摄入诊断、知识库详情 `RAG 评估`、上传治理提示与聚合运维告警；设计与实施记录见 [docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md](docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md) 与 [docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md](docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md)。
 > V1.2（API `0.1.2-SNAPSHOT` / Web `0.1.2`）扩展真实浏览器门禁，新增文档索引详情、结构化 Chat 错误、持久化 RAG 评估用例/历史、混合检索与 Rerank 控制、审计告警 Webhook，以及知识库元数据/分块快照导出恢复；实施计划见 [docs/superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md](docs/superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md)。
@@ -276,3 +388,8 @@ cd services/api
 | V4 | K8s、多租户、合规审计 |
 
 详细规划见 [docs/todo.md](docs/todo.md) 与 [docs/decisions.md](docs/decisions.md)。
+# V1.3 发布硬化
+
+V1.3 使用 30 条、六分类检索清单及当前/legacy 冲突语料作为发布基准，Worker 支持 Rerank 启动预热和持久化 Hugging Face 缓存，知识库 RAG 评估页提供 Sparse Migration 状态轨道和受保护的 Cutover 操作。Milvus 2.4.1 到 2.5.4 的备份/恢复演练及依赖、许可证、CVE、镜像体积扫描均提供可重复脚本。
+
+完整发布步骤、环境变量、失败策略和证据位置见 [V1.3 发布运行手册](docs/v1.3-release-runbook.md)。实际生产同规格演练、30 Case 环境基准和镜像扫描仍是正式发布前的必做项。

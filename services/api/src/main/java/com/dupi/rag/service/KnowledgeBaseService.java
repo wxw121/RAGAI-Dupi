@@ -34,6 +34,7 @@ public class KnowledgeBaseService {
     private final AuditLogService auditLogService;
     private final ProfileIndexStateService profileIndexStateService;
     private final RetrievalProfileGateService retrievalProfileGateService;
+    private final KnowledgeBaseMaintenanceService maintenanceService;
 
     @Transactional
     public KnowledgeBaseResponse create(CreateKnowledgeBaseRequest request) {
@@ -74,13 +75,20 @@ public class KnowledgeBaseService {
 
     @Transactional
     public KnowledgeBaseResponse updateRetrievalProfile(UUID id, RetrievalProfile retrievalProfile) {
+        maintenanceService.assertMutationAllowed(id);
         KnowledgeBase kb = findForUpdateOrThrow(id);
         RetrievalProfile target = retrievalProfile == null ? RetrievalProfile.CLASSIC : retrievalProfile;
         if (target != RetrievalProfile.CLASSIC) {
             retrievalProfileGateService.assertCanActivate(id, target);
         }
         kb.setRetrievalProfile(target);
-        return toResponse(repository.save(kb));
+        KnowledgeBase saved = repository.save(kb);
+        auditLogService.recordSuccessInCurrentTransaction(
+                "KNOWLEDGE_BASE_RETRIEVAL_PROFILE_UPDATE",
+                "KNOWLEDGE_BASE",
+                id,
+                "Updated retrieval profile to " + target.name());
+        return toResponse(saved);
     }
 
     public List<KnowledgeBaseResponse> list() {

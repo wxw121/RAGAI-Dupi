@@ -13,18 +13,27 @@ import java.util.Optional;
 import java.util.UUID;
 
 public interface KnowledgeBaseRepository extends JpaRepository<KnowledgeBase, UUID> {
-    List<KnowledgeBase> findByTenantIdOrderByCreatedAtDesc(String tenantId);
+    @Query("select kb from KnowledgeBase kb where kb.tenantId = :tenantId and kb.lifecycleStatus = com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus.READY order by kb.createdAt desc")
+    List<KnowledgeBase> findByTenantIdOrderByCreatedAtDesc(@Param("tenantId") String tenantId);
 
-    Optional<KnowledgeBase> findByIdAndTenantId(UUID id, String tenantId);
+    @Query("select kb from KnowledgeBase kb where kb.id = :id and kb.tenantId = :tenantId and kb.lifecycleStatus = com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus.READY")
+    Optional<KnowledgeBase> findByIdAndTenantId(@Param("id") UUID id, @Param("tenantId") String tenantId);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select kb from KnowledgeBase kb where kb.id = :id")
     Optional<KnowledgeBase> findByIdForUpdate(@Param("id") UUID id);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("select kb from KnowledgeBase kb where kb.id = :id and kb.tenantId = :tenantId")
+    @Query("select kb from KnowledgeBase kb where kb.id = :id and kb.tenantId = :tenantId and kb.lifecycleStatus = com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus.READY")
     Optional<KnowledgeBase> findByIdAndTenantIdForUpdate(
             @Param("id") UUID id,
             @Param("tenantId") String tenantId
     );
+
+    Optional<KnowledgeBase> findByIdAndTenantIdAndLifecycleStatus(
+            UUID id, String tenantId, com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus lifecycleStatus);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select kb from KnowledgeBase kb where kb.id = :id")
+    Optional<KnowledgeBase> findSystemByIdForUpdate(@Param("id") UUID id);
 }

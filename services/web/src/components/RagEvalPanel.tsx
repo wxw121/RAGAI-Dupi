@@ -4,28 +4,38 @@ import {
   deleteRagEvalCase,
   listRagEvalCases,
   listRagEvalRuns,
+  getRagQualityPolicy,
+  promoteRagEvalBaseline,
   runRagEval,
+  updateRagQualityPolicy,
   updateRagEvalCase,
 } from '@/api/knowledgeBase'
 import { useToast } from '@/components/Toast'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import type { RagEvalCase, RagEvalCaseRequest, RagEvalGateDecision, RagEvalRun, RetrievalProfile } from '@/types'
+import type {
+  RagEvalCase,
+  RagEvalCaseRequest,
+  RagEvalGateDecision,
+  RagEvalRun,
+  RagQualityPolicy,
+  RetrievalIndexMode,
+} from '@/types'
 import { CheckCircle2, Loader2, Pencil, Play, Save, Trash2, X, XCircle } from 'lucide-react'
 
 interface RagEvalPanelProps {
   kbId: string
 }
 
-const RETRIEVAL_PROFILE_OPTIONS: Array<{ value: RetrievalProfile; label: string }> = [
+const RETRIEVAL_PROFILE_OPTIONS: Array<{ value: RetrievalIndexMode; label: string }> = [
   { value: 'CLASSIC', label: 'classic' },
   { value: 'PARENT_CHILD', label: 'parent-child' },
   { value: 'QA_ASSISTED', label: 'qa-assisted' },
   { value: 'COMBINED', label: 'combined' },
 ]
 
-const formatPercent = (value: number | null | undefined) => `${(((value ?? 0) * 100)).toFixed(1)}%`
+const formatPercent = (value: number | null | undefined) => `${((value ?? 0) * 100).toFixed(1)}%`
 const formatDelta = (value: number | null | undefined) => `${(value ?? 0) >= 0 ? '+' : ''}${formatPercent(value)}`
 
 const EMPTY_FORM: RagEvalCaseRequest = {
@@ -46,17 +56,19 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
   const [saving, setSaving] = useState(false)
   const [running, setRunning] = useState(false)
   const [useRerank, setUseRerank] = useState(false)
-  const [selectedProfiles, setSelectedProfiles] = useState<RetrievalProfile[]>(['CLASSIC'])
+  const [selectedProfiles, setSelectedProfiles] = useState<RetrievalIndexMode[]>(['CLASSIC'])
+  const [policy, setPolicy] = useState<RagQualityPolicy | null>(null)
   const { showError, showSuccess } = useToast()
 
   useEffect(() => {
     let active = true
     setLoading(true)
-    void Promise.all([listRagEvalCases(kbId), listRagEvalRuns(kbId)])
-      .then(([nextCases, nextRuns]) => {
+    void Promise.all([listRagEvalCases(kbId), listRagEvalRuns(kbId), getRagQualityPolicy(kbId)])
+      .then(([nextCases, nextRuns, nextPolicy]) => {
         if (!active) return
         setCases(nextCases)
         setRuns(nextRuns)
+        setPolicy(nextPolicy)
       })
       .catch((error: unknown) => {
         if (active) showError(error instanceof Error ? error.message : 'RAG 评估数据加载失败')
@@ -86,11 +98,9 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
     setForm((current) => ({ ...current, [key]: value }))
   }
 
-  const toggleProfile = (profile: RetrievalProfile, checked: boolean) => {
+  const toggleProfile = (profile: RetrievalIndexMode, checked: boolean) => {
     setSelectedProfiles((current) => {
-      if (checked) {
-        return current.includes(profile) ? current : [...current, profile]
-      }
+      if (checked) return current.includes(profile) ? current : [...current, profile]
       const next = current.filter((item) => item !== profile)
       return next.length > 0 ? next : current
     })
@@ -98,9 +108,7 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
 
   const evalRunRequest = () => {
     const base = { useRerank }
-    if (selectedProfiles.length === 1 && selectedProfiles[0] === 'CLASSIC') {
-      return base
-    }
+    if (selectedProfiles.length === 1 && selectedProfiles[0] === 'CLASSIC') return base
     return { ...base, profiles: selectedProfiles }
   }
 
@@ -180,6 +188,25 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
     }
   }
 
+  const savePolicy = async () => {
+    if (!policy) return
+    setSaving(true)
+    try {
+      setPolicy(await updateRagQualityPolicy(kbId, policy))
+      showSuccess('质量策略已更新')
+    } catch (error) { showError(error instanceof Error ? error.message : '质量策略更新失败') }
+    finally { setSaving(false) }
+  }
+
+  const promoteBaseline = async (runId: string) => {
+    setSaving(true)
+    try {
+      setPolicy(await promoteRagEvalBaseline(kbId, runId))
+      showSuccess('评测运行已设为基线')
+    } catch (error) { showError(error instanceof Error ? error.message : '基线设置失败') }
+    finally { setSaving(false) }
+  }
+
   return (
     <div className="mx-auto max-w-6xl space-y-6 px-4 py-6 md:px-8">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -198,10 +225,9 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
             />
             启用 Rerank
           </label>
-
           <div className="flex flex-wrap items-center gap-2 text-xs" aria-label="Retrieval profiles">
             {RETRIEVAL_PROFILE_OPTIONS.map((profile) => (
-              <label key={profile.value} className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-1">
+              <label key={profile.value} className="inline-flex items-center gap-1 rounded border border-border px-2 py-1">
                 <input
                   name={`profile-${profile.value}`}
                   type="checkbox"
@@ -219,6 +245,40 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
           </Button>
         </div>
       </div>
+
+      {policy && <section className="border-y border-border py-4">
+        <div className="grid gap-3 md:grid-cols-5">
+          <label className="text-xs text-muted-foreground">最低通过率<Input type="number" min={0} max={100} value={policy.minimumPassRate} onChange={(e) => setPolicy({ ...policy, minimumPassRate: Number(e.target.value) })} /></label>
+          <label className="text-xs text-muted-foreground">最大通过率下降<Input type="number" min={0} max={100} value={policy.maximumPassRateDrop} onChange={(e) => setPolicy({ ...policy, maximumPassRateDrop: Number(e.target.value) })} /></label>
+          <label className="text-xs text-muted-foreground">最大新增失败<Input type="number" min={0} value={policy.maximumNewFailures} onChange={(e) => setPolicy({ ...policy, maximumNewFailures: Number(e.target.value) })} /></label>
+          <label className="flex items-center gap-2 pt-5 text-sm"><input type="checkbox" checked={policy.blockWhenUnbaselined} onChange={(e) => setPolicy({ ...policy, blockWhenUnbaselined: e.target.checked })} />无基线时阻断</label>
+          <Button className="self-end" onClick={() => void savePolicy()} disabled={saving}><Save className="h-4 w-4" />保存策略</Button>
+        </div>
+      </section>}
+
+      {latestGateDecisions.length > 0 && (
+        <section className="border-y border-border py-4">
+          <h3 className="mb-3 text-sm font-semibold">Profile quality gates</h3>
+          <div className="grid gap-3 md:grid-cols-2">
+            {latestGateDecisions.map(([profile, decision]) => (
+              <div key={profile} className="rounded border border-border p-3 text-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-mono font-semibold">{profile} {decision.status}</span>
+                  <Badge variant={decision.status === 'PASSED' ? 'success' : 'error'}>
+                    {decision.reason}
+                  </Badge>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+                  <span>Hit {formatPercent(decision.metrics?.hitRate)}</span>
+                  <span>Citation {formatPercent(decision.metrics?.citationPassRate)}</span>
+                  <span>Hit delta {formatDelta(decision.hitRateDelta)}</span>
+                  <span>Citation delta {formatDelta(decision.citationPassRateDelta)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="border-y border-border py-5">
         <div className="mb-4 flex items-center justify-between gap-3">
@@ -344,7 +404,12 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
         ) : (
           <div className="flex gap-2 overflow-x-auto pb-2">
             {runSummary.map((item) => (
-              <div key={item.id} className="min-w-44 rounded-lg border border-border px-3 py-2 text-xs">
+              <div key={item.id} className="min-w-52 rounded border border-border px-3 py-2 text-xs">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <Badge variant={item.gateStatus === 'PASS' ? 'success' : item.gateStatus === 'WARN' || item.gateStatus === 'UNBASELINED' ? 'warning' : 'error'}>{item.gateStatus ?? 'NO GATE'}</Badge>
+                  {item.gateStatus === 'PASS' && policy?.baselineRunId !== item.id && <Button size="sm" variant="ghost" onClick={() => void promoteBaseline(item.id)}>设为基线</Button>}
+                </div>
+                <p className="mb-2 font-mono text-muted-foreground">P95 {item.metrics?.latencyP95Ms ?? '-'} ms</p>
                 <div className="flex items-center justify-between gap-3">
                   <span className="font-semibold">{item.passedCount}/{item.totalCount}</span>
                   <Badge variant={item.status === 'RUNNING' ? 'warning' : item.status === 'FAILED' ? 'error' : item.passed ? 'success' : 'error'}>
@@ -359,34 +424,6 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
           </div>
         )}
       </section>
-
-
-      {latestGateDecisions.length > 0 && (
-        <section className="rounded-lg border border-border bg-background p-3">
-          <h3 className="text-sm font-semibold">Profile gate comparison</h3>
-          <div className="mt-3 grid gap-2 md:grid-cols-2">
-            {latestGateDecisions.map(([profile, decision]) => (
-              <div key={profile} className="rounded-lg border border-border px-3 py-2 text-xs">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono font-semibold">{profile} {decision.status}</span>
-                  <Badge variant={decision.status === 'PASSED' ? 'success' : decision.status === 'BLOCKED' ? 'error' : 'warning'}>
-                    {decision.reason}
-                  </Badge>
-                </div>
-                <div className="mt-2 grid grid-cols-2 gap-2 text-muted-foreground">
-                  <span>Hit {formatPercent(decision.metrics?.hitRate)}</span>
-                  <span>? {formatDelta(decision.hitRateDelta)}</span>
-                  <span>Citation {formatPercent(decision.metrics?.citationPassRate)}</span>
-                  <span>? {formatDelta(decision.citationPassRateDelta)}</span>
-                  <span>Pass {formatPercent(decision.metrics?.passRate)}</span>
-                  <span>Classic {formatPercent(decision.classicMetrics?.passRate)}</span>
-                </div>
-                <p className="mt-2 text-muted-foreground">{decision.reason}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
 
       <div className="overflow-x-auto rounded-lg border border-border bg-background">
         <table className="w-full text-sm">
@@ -403,7 +440,7 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
           </thead>
           <tbody>
             {latestResults.length === 0 ? (
-              <tr><td colSpan={8} className="px-4 py-10 text-center text-muted-foreground">最新运行暂无结果</td></tr>
+              <tr><td colSpan={7} className="px-4 py-10 text-center text-muted-foreground">最新运行暂无结果</td></tr>
             ) : latestResults.map((result) => (
               <tr key={result.id} className="border-b last:border-0">
                 <td className="px-4 py-3">
@@ -422,7 +459,6 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
                   {result.expectedFileName && <p className="mt-1 text-xs text-muted-foreground">期望 {result.expectedFileName}</p>}
                 </td>
                 <td className="px-4 py-3 text-muted-foreground">{result.matchedToken ?? '-'}</td>
-                <td className="px-4 py-3 font-mono text-xs">{result.retrievalProfile ?? 'CLASSIC'}</td>
                 <td className="px-4 py-3">
                   <p className="font-mono text-xs">{result.retrievalMode ?? '-'}</p>
                   <p className="mt-1 text-xs text-muted-foreground">dim {result.embeddingDimension ?? '-'}</p>

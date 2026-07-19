@@ -200,7 +200,11 @@ def test_hybrid_retrieve_fuses_vector_and_bm25_then_reranks(monkeypatch):
 
     result = hybrid.hybrid_retrieve("kb", "hello", 1, "m", 3, use_rerank=True, corpus_fetcher=lambda _: corpus)
 
-    assert result == [{"chunk_id": "b1", "doc_id": "d", "content": "hello bm25", "score": 9.0}]
+    assert result[0]["chunk_id"] == "b1"
+    assert result[0]["content"] == "hello bm25"
+    assert result[0]["score"] == 9.0
+    assert result[0]["sparse_rank"] == 1
+    assert result[0]["fusion_rank"] == 2
 
 
 def test_hybrid_retrieve_without_rerank_fetches_default_corpus(monkeypatch):
@@ -412,6 +416,9 @@ def test_weighted_rrf_combines_routes_and_validates_parameters():
 
     assert [hit["chunk_id"] for hit in fused] == ["child-a", "child-b", "qa-a"]
     assert fused[0]["score"] == pytest.approx(1.0 / 61.0)
+    assert [hit["fusion_rank"] for hit in fused] == [1, 2, 3]
+    assert fused[0]["fusion_score"] == fused[0]["score"]
+    assert fused[0]["route_ranks"] == {"route_1": 1}
     with pytest.raises(ValueError, match="RRF K"):
         hybrid.weighted_rrf([], k=0)
     with pytest.raises(ValueError, match="weight"):
@@ -565,3 +572,54 @@ def test_not_ready_classic_hybrid_uses_legacy_search(monkeypatch):
 
     assert calls == [("init", 3), ("search", "kb", 2)]
     assert [hit["chunk_id"] for hit in result] == ["legacy"]
+
+
+def test_ready_classic_hybrid_uses_versioned_sparse_search(monkeypatch):
+    calls = []
+
+    class FakeEmbedder:
+        def __init__(self, model):
+            self.model = model
+
+        def embed(self, query):
+            return [0.1]
+
+    class FakeIndexer:
+        def __init__(self, dimension, collection_name=None, profile_schema=False):
+            calls.append(("dense-init", collection_name, profile_schema))
+
+        def search_profile(self, kb_id, vector, top_k, profile, entry_kind=None):
+            calls.append(("dense-search", profile, entry_kind, top_k))
+            return [{"chunk_id": "dense", "doc_id": "d", "content": "dense", "score": 0.9}]
+
+    class FakeSparse:
+        def __init__(self, kb_id, profile_version, index_params=None):
+            calls.append(("sparse-init", profile_version, index_params))
+
+        def search(self, kb_id, query, top_k, search_params=None):
+            calls.append(("sparse-search", top_k, search_params))
+            return [{"chunk_id": "sparse", "doc_id": "d", "content": "sparse", "score": 0.8}]
+
+    monkeypatch.setattr(hybrid, "Embedder", FakeEmbedder)
+    monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
+    monkeypatch.setattr(hybrid, "SparseMilvusAdapter", FakeSparse)
+    monkeypatch.setattr(
+        hybrid,
+        "bm25_search",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy BM25 used")),
+    )
+
+    result = hybrid.hybrid_retrieve(
+        "kb",
+        "query",
+        2,
+        "m",
+        3,
+        retrieval_profile="classic",
+        profile_index_ready=True,
+        profile_version=7,
+        corpus_fetcher=lambda _: [],
+    )
+
+    assert [hit["chunk_id"] for hit in result] == ["dense", "sparse"]
+    assert ("sparse-init", 7, None) in calls

@@ -1,6 +1,7 @@
 package com.dupi.rag.domain.entity;
 
 import com.dupi.rag.domain.enums.ChunkStrategy;
+import com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus;
 import com.dupi.rag.domain.enums.RetrievalMode;
 import com.dupi.rag.domain.enums.RetrievalProfile;
 import jakarta.persistence.*;
@@ -72,6 +73,14 @@ public class KnowledgeBase {
     @Column(name = "profile_index_activated", nullable = false)
     @Builder.Default
     private boolean profileIndexActivated = false;
+
+    @Column(name = "active_retrieval_profile_id")
+    private UUID activeRetrievalProfileId;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "lifecycle_status", nullable = false)
+    @Builder.Default
+    private KnowledgeBaseLifecycleStatus lifecycleStatus = KnowledgeBaseLifecycleStatus.READY;
 
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;

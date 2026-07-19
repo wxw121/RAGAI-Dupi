@@ -15,6 +15,7 @@ import com.dupi.rag.dto.RetrieveResponse;
 import com.dupi.rag.repository.RagEvalCaseRepository;
 import com.dupi.rag.repository.RagEvalRunRepository;
 import com.dupi.rag.repository.RagEvalRunResultRepository;
+import com.dupi.rag.repository.RagQualityPolicyRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -49,6 +50,11 @@ class RagEvalServiceTest {
     @Mock RagEvalCaseCoordinator caseCoordinator;
     @Mock ProfileIndexStateService profileIndexStateService;
     @Mock RetrievalProfileGateService retrievalProfileGateService;
+    @Mock RagQualityPolicyRepository policyRepository;
+    @Mock RagQualityGateService qualityGateService;
+    @Mock AuditLogService auditLogService;
+    @Mock RetrievalProfileService retrievalProfileService;
+    @Mock KnowledgeBaseMaintenanceService maintenanceService;
 
     @Test
     void listCasesSeedsBuiltInCasesWhenKnowledgeBaseHasNoPersistedCases() {
@@ -293,6 +299,11 @@ class RagEvalServiceTest {
                 runRepository,
                 resultRepository,
                 caseCoordinator,
+                policyRepository,
+                qualityGateService,
+                auditLogService,
+                retrievalProfileService,
+                maintenanceService,
                 profileIndexStateService,
                 retrievalProfileGateService
         );

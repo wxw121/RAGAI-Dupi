@@ -4,11 +4,17 @@ import com.dupi.rag.config.RedisQueueProperties;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.dto.IngestJobMessage;
+import com.dupi.rag.domain.enums.SparseMigrationState;
+import com.dupi.rag.repository.RetrievalProfileRepository;
+import com.dupi.rag.repository.SparseMigrationRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.UUID;
 
 @Slf4j
 @Service
@@ -19,12 +25,31 @@ public class IngestJobProducer {
     private final RedisQueueProperties queueProperties;
     private final ObjectMapper objectMapper;
     private final ProfileIndexStateService profileIndexStateService;
+    private final SparseMigrationRepository sparseMigrationRepository;
+    private final RetrievalProfileRepository retrievalProfileRepository;
 
     public void enqueue(IngestJob job, KnowledgeBase kb, String objectKey, String fileName, String mimeType) {
         assertQueueAccepting();
         try {
+            Integer sparseProfileVersion = sparseMigrationRepository
+                    .findTopByKbIdAndStateInOrderByCreatedAtDesc(job.getKbId(), List.of(
+                            SparseMigrationState.BACKFILLING,
+                            SparseMigrationState.DUAL_WRITING,
+                            SparseMigrationState.SHADOW_VALIDATING,
+                            SparseMigrationState.CUTOVER))
+                    .flatMap(migration -> retrievalProfileRepository.findByIdAndKbId(
+                            migration.getProfileId(), job.getKbId()))
+                    .map(profile -> profile.getVersion())
+                    .orElse(null);
+            if (sparseProfileVersion == null && kb.getActiveRetrievalProfileId() != null) {
+                sparseProfileVersion = retrievalProfileRepository
+                        .findByIdAndKbId(kb.getActiveRetrievalProfileId(), job.getKbId())
+                        .map(profile -> profile.getVersion())
+                        .orElse(null);
+            }
             IngestJobMessage message = IngestJobMessage.builder()
                     .jobId(job.getId().toString())
+                    .executionId(ensureExecutionId(job).toString())
                     .kbId(job.getKbId().toString())
                     .docId(job.getDocId().toString())
                     .objectKey(objectKey)
@@ -36,6 +61,7 @@ public class IngestJobProducer {
                     .retrievalProfile(kb.getRetrievalProfile().wireValue())
                     .embeddingModel(kb.getEmbeddingModel())
                     .embeddingDimension(kb.getEmbeddingDimension())
+                    .sparseProfileVersion(sparseProfileVersion)
                     .legacyWriteRequired(!profileIndexStateService.isV2Activated(job.getKbId()))
                     .indexSchemaVersion(ProfileIndexStateService.TARGET_SCHEMA_VERSION)
                     .build();
@@ -45,6 +71,13 @@ public class IngestJobProducer {
         } catch (Exception e) {
             throw new IllegalStateException("Failed to enqueue ingest job", e);
         }
+    }
+
+    private UUID ensureExecutionId(IngestJob job) {
+        if (job.getExecutionId() == null) {
+            job.setExecutionId(UUID.randomUUID());
+        }
+        return job.getExecutionId();
     }
 
     public void assertQueueAccepting() {

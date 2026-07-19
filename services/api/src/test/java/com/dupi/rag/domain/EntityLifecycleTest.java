@@ -7,21 +7,29 @@ import com.dupi.rag.domain.entity.ChatSession;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.DocumentTombstone;
 import com.dupi.rag.domain.entity.IngestJob;
+import com.dupi.rag.domain.entity.IngestFailureNotification;
 import com.dupi.rag.domain.entity.IngestOutboxEvent;
 import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.entity.RagEvalCase;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.entity.RagEvalRunResult;
+import com.dupi.rag.domain.entity.RagQualityPolicy;
 import com.dupi.rag.domain.entity.Role;
 import com.dupi.rag.domain.entity.UserAccount;
+import com.dupi.rag.domain.entity.UploadQuotaReservation;
+import com.dupi.rag.domain.entity.UploadWindowEvent;
 import com.dupi.rag.domain.entity.VectorCleanupTask;
 import com.dupi.rag.domain.enums.AuditLogStatus;
 import com.dupi.rag.domain.enums.ChatMessageRole;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
+import com.dupi.rag.domain.enums.RagEvalComparisonStatus;
+import com.dupi.rag.domain.enums.RagQualityGateStatus;
 import com.dupi.rag.domain.enums.VectorCleanupStatus;
 import com.dupi.rag.domain.enums.VectorCleanupTargetType;
 import com.dupi.rag.domain.enums.IngestOutboxStatus;
+import com.dupi.rag.domain.enums.IngestFailureNotificationStatus;
+import com.dupi.rag.domain.enums.UploadQuotaReservationStatus;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
@@ -321,6 +329,151 @@ class EntityLifecycleTest {
         assertThat(result.getEmbeddingDimension()).isEqualTo(1024);
         assertThat(result.getTopK()).isEqualTo(8);
         assertThat(result.getCreatedAt()).isNotNull();
+    }
+
+    @Test
+    void ragQualityEvidenceExposesPolicyRunAndComparisonFields() throws Exception {
+        UUID kbId = UUID.randomUUID();
+        UUID baselineRunId = UUID.randomUUID();
+        RagQualityPolicy policy = RagQualityPolicy.builder()
+                .kbId(kbId)
+                .minimumPassRate(80)
+                .maximumPassRateDrop(5)
+                .maximumNewFailures(0)
+                .blockWhenUnbaselined(true)
+                .baselineRunId(baselineRunId)
+                .build();
+        invoke(policy, "onCreate");
+
+        assertThat(policy.getId()).isNotNull();
+        assertThat(policy.getKbId()).isEqualTo(kbId);
+        assertThat(policy.getBaselineRunId()).isEqualTo(baselineRunId);
+        assertThat(policy.getCreatedAt()).isNotNull();
+        assertThat(policy.getUpdatedAt()).isNotNull();
+
+        RagEvalRun run = RagEvalRun.builder()
+                .kbId(kbId)
+                .gateStatus(RagQualityGateStatus.PASS)
+                .metrics(Map.of("passRate", 100, "fallbackCount", 0))
+                .profileSnapshot(Map.of("version", 1))
+                .build();
+        invoke(run, "onCreate");
+
+        assertThat(run.getGateStatus()).isEqualTo(RagQualityGateStatus.PASS);
+        assertThat(run.getMetrics()).containsEntry("passRate", 100);
+        assertThat(run.getProfileSnapshot()).containsEntry("version", 1);
+
+        RagEvalRunResult result = RagEvalRunResult.builder()
+                .runId(run.getId())
+                .caseKey("case-1")
+                .query("query")
+                .caseFingerprint("sha256:fingerprint")
+                .comparisonStatus(RagEvalComparisonStatus.UNCHANGED)
+                .build();
+        invoke(result, "onCreate");
+
+        assertThat(result.getCaseFingerprint()).isEqualTo("sha256:fingerprint");
+        assertThat(result.getComparisonStatus()).isEqualTo(RagEvalComparisonStatus.UNCHANGED);
+    }
+
+    @Test
+    void uploadGovernanceEntitiesExposeFieldsAndPopulateLifecycleValues() throws Exception {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
+        Instant original = Instant.parse("2026-07-18T00:00:00Z");
+
+        IngestFailureNotification notification = new IngestFailureNotification();
+        assertThat(notification.getDeliveryStatus()).isEqualTo(IngestFailureNotificationStatus.PENDING);
+        assertThat(notification.getAttemptCount()).isZero();
+        invoke(notification, "onCreate");
+        notification.setEventKey("event-1");
+        notification.setTenantId("tenant-a");
+        notification.setKbId(kbId);
+        notification.setDocId(docId);
+        notification.setJobId(jobId);
+        notification.setExecutionId(executionId);
+        notification.setStatus("FAILED");
+        notification.setStage("EMBEDDING");
+        notification.setErrorMessage("provider down");
+        notification.setDeliveryStatus(IngestFailureNotificationStatus.FAILED);
+        notification.setAttemptCount(2);
+        notification.setLastError("webhook down");
+        notification.setNextAttemptAt(original);
+        notification.setCreatedAt(original);
+        notification.setUpdatedAt(original);
+        invoke(notification, "onUpdate");
+
+        assertThat(notification.getId()).isNotNull();
+        assertThat(notification.getEventKey()).isEqualTo("event-1");
+        assertThat(notification.getTenantId()).isEqualTo("tenant-a");
+        assertThat(notification.getKbId()).isEqualTo(kbId);
+        assertThat(notification.getDocId()).isEqualTo(docId);
+        assertThat(notification.getJobId()).isEqualTo(jobId);
+        assertThat(notification.getExecutionId()).isEqualTo(executionId);
+        assertThat(notification.getStatus()).isEqualTo("FAILED");
+        assertThat(notification.getStage()).isEqualTo("EMBEDDING");
+        assertThat(notification.getErrorMessage()).isEqualTo("provider down");
+        assertThat(notification.getDeliveryStatus()).isEqualTo(IngestFailureNotificationStatus.FAILED);
+        assertThat(notification.getAttemptCount()).isEqualTo(2);
+        assertThat(notification.getNextAttemptAt()).isEqualTo(original);
+        assertThat(notification.getLastError()).isEqualTo("webhook down");
+        assertThat(notification.getCreatedAt()).isEqualTo(original);
+        assertThat(notification.getUpdatedAt()).isAfter(original);
+
+        UploadQuotaReservation reservation = new UploadQuotaReservation();
+        assertThat(reservation.getReservedBytes()).isZero();
+        assertThat(reservation.getStatus()).isEqualTo(UploadQuotaReservationStatus.PENDING);
+        invoke(reservation, "onCreate");
+        reservation.setTenantId("tenant-a");
+        reservation.setUserId("alice");
+        reservation.setKbId(kbId);
+        reservation.setDocId(docId);
+        reservation.setIdempotencyKey("key-1");
+        reservation.setFileFingerprint("a.md:10:text/markdown");
+        reservation.setReservedBytes(10L);
+        reservation.setStatus(UploadQuotaReservationStatus.RELEASED);
+        reservation.setReleaseReason("deleted");
+        reservation.setCreatedAt(original);
+        reservation.setUpdatedAt(original);
+        invoke(reservation, "onUpdate");
+
+        assertThat(reservation.getId()).isNotNull();
+        assertThat(reservation.getTenantId()).isEqualTo("tenant-a");
+        assertThat(reservation.getUserId()).isEqualTo("alice");
+        assertThat(reservation.getKbId()).isEqualTo(kbId);
+        assertThat(reservation.getDocId()).isEqualTo(docId);
+        assertThat(reservation.getIdempotencyKey()).isEqualTo("key-1");
+        assertThat(reservation.getFileFingerprint()).isEqualTo("a.md:10:text/markdown");
+        assertThat(reservation.getReservedBytes()).isEqualTo(10L);
+        assertThat(reservation.getStatus()).isEqualTo(UploadQuotaReservationStatus.RELEASED);
+        assertThat(reservation.getReleaseReason()).isEqualTo("deleted");
+        assertThat(reservation.getCreatedAt()).isEqualTo(original);
+        assertThat(reservation.getUpdatedAt()).isAfter(original);
+
+        UploadWindowEvent windowEvent = new UploadWindowEvent();
+        assertThat(windowEvent.getBytes()).isZero();
+        windowEvent.setTenantId("tenant-a");
+        windowEvent.setUserId("alice");
+        windowEvent.setBytes(10L);
+        windowEvent.setIdempotencyKey("key-1");
+        invoke(windowEvent, "onCreate");
+
+        assertThat(windowEvent.getId()).isNotNull();
+        assertThat(windowEvent.getTenantId()).isEqualTo("tenant-a");
+        assertThat(windowEvent.getUserId()).isEqualTo("alice");
+        assertThat(windowEvent.getBytes()).isEqualTo(10L);
+        assertThat(windowEvent.getIdempotencyKey()).isEqualTo("key-1");
+        assertThat(windowEvent.getAcceptedAt()).isNotNull();
+
+        UUID existingId = windowEvent.getId();
+        Instant acceptedAt = windowEvent.getAcceptedAt();
+        windowEvent.setId(existingId);
+        windowEvent.setAcceptedAt(acceptedAt);
+        invoke(windowEvent, "onCreate");
+        assertThat(windowEvent.getId()).isEqualTo(existingId);
+        assertThat(windowEvent.getAcceptedAt()).isEqualTo(acceptedAt);
     }
 
     private static void invoke(Object target, String methodName) throws Exception {

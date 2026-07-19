@@ -1,3 +1,4 @@
+import json
 import uuid
 
 from pymilvus import (
@@ -14,6 +15,8 @@ from app.config import settings
 from app.models import TextChunk
 
 MILVUS_OPERATION_TIMEOUT_SECONDS = 10
+DELETE_BATCH_SIZE = 256
+VECTOR_ID_NAMESPACE = uuid.UUID("bce98f18-8f7d-5a6c-a52d-2f544582584c")
 PROFILE_FIELDS = {
     "classic": "profile_classic",
     "parent-child": "profile_parent_child",
@@ -30,6 +33,20 @@ PROFILE_SCHEMA_FIELDS = {
     *PROFILE_FIELDS.values(),
     "embedding",
 }
+
+
+def scope_chunk_ids(chunks: list[TextChunk], execution_id: str | None, doc_id: str) -> list[str]:
+    if not execution_id:
+        return [chunk.id for chunk in chunks]
+
+    execution_namespace = uuid.uuid5(VECTOR_ID_NAMESPACE, f"{execution_id}\0{doc_id}")
+    for chunk in chunks:
+        chunk.id = str(uuid.uuid5(execution_namespace, str(chunk.chunk_index)))
+    return [chunk.id for chunk in chunks]
+
+
+def _chunk_ids_expr(chunk_ids: list[str]) -> str:
+    return f"chunk_id in {json.dumps(chunk_ids, ensure_ascii=True)}"
 
 
 class MilvusIndexer:
@@ -102,6 +119,7 @@ class MilvusIndexer:
         doc_id: str,
         chunks: list[TextChunk],
         vectors: list[list[float]],
+        sparse_profile_version: int = 0,
     ) -> list[str]:
         if not chunks:
             return []
@@ -115,6 +133,9 @@ class MilvusIndexer:
 
         for chunk, cid in zip(chunks, chunk_ids):
             chunk.milvus_id = cid
+        if sparse_profile_version > 0:
+            from app.retrieval.sparse import SparseMilvusAdapter
+            SparseMilvusAdapter(kb_id, sparse_profile_version).upsert(kb_id, doc_id, chunks)
         return chunk_ids
 
     def index_profile_chunks(
@@ -163,19 +184,49 @@ class MilvusIndexer:
             chunk.milvus_id = chunk_id
         return chunk_ids
 
-    def delete_by_doc(self, doc_id: str):
+    def _delete_dense(self, expression: str, strict: bool):
         try:
-            self.collection.delete(expr=f'doc_id == "{doc_id}"', timeout=MILVUS_OPERATION_TIMEOUT_SECONDS)
+            self.collection.delete(expr=expression, timeout=MILVUS_OPERATION_TIMEOUT_SECONDS)
         except MilvusException as exc:
             error = str(exc).lower()
             if (
-                "collection not loaded" in error
-                or "collection not fully loaded" in error
-                or "timestamp lag too large" in error
-                or "failed to search/query delegator" in error
+                not strict
+                and (
+                    "collection not loaded" in error
+                    or "collection not fully loaded" in error
+                    or "timestamp lag too large" in error
+                    or "failed to search/query delegator" in error
+                )
             ):
                 return
             raise
+
+    def delete_by_doc(
+        self,
+        doc_id: str,
+        kb_id: str = "",
+        sparse_profile_version: int = 0,
+        strict: bool = False,
+    ):
+        self._delete_dense(f'doc_id == "{doc_id}"', strict)
+        if sparse_profile_version > 0:
+            from app.retrieval.sparse import SparseMilvusAdapter
+            SparseMilvusAdapter(kb_id, sparse_profile_version).delete_by_doc(doc_id)
+
+    def delete_by_ids(
+        self,
+        chunk_ids: list[str],
+        kb_id: str = "",
+        sparse_profile_version: int = 0,
+        strict: bool = False,
+    ):
+        owned_ids = list(dict.fromkeys(chunk_ids))
+        for offset in range(0, len(owned_ids), DELETE_BATCH_SIZE):
+            batch = owned_ids[offset:offset + DELETE_BATCH_SIZE]
+            self._delete_dense(_chunk_ids_expr(batch), strict)
+        if sparse_profile_version > 0 and owned_ids:
+            from app.retrieval.sparse import SparseMilvusAdapter
+            SparseMilvusAdapter(kb_id, sparse_profile_version).delete_by_ids(owned_ids)
 
     def search(self, kb_id: str, vector: list[float], top_k: int) -> list[dict]:
         return self._search(

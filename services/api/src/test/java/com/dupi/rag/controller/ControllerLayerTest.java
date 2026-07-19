@@ -2,12 +2,13 @@ package com.dupi.rag.controller;
 
 import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;
+import com.dupi.rag.domain.enums.IngestJobStatus;
+import com.dupi.rag.domain.enums.RetrievalMode;
 import com.dupi.rag.config.ApiSecurityProperties;
 import com.dupi.rag.config.ApiTokenService;
 import com.dupi.rag.config.AuditProperties;
 import com.dupi.rag.config.RedisQueueProperties;
 import com.dupi.rag.config.UploadRateLimitProperties;
-import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.*;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
@@ -19,6 +20,7 @@ import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.util.unit.DataSize;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 
@@ -30,6 +32,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;
 
@@ -124,7 +127,7 @@ class ControllerLayerTest {
                 .document(docResponse)
                 .objectKey("key")
                 .build();
-        when(documentService.upload(kbId, file)).thenReturn(docResponse);
+        when(documentService.upload(kbId, file, null)).thenReturn(docResponse);
         when(documentService.uploadBatch(kbId, List.of(batchFile))).thenReturn(batchUploadResponse);
         when(documentService.listByKb(kbId)).thenReturn(List.of(docResponse));
         when(documentService.get(kbId, docId)).thenReturn(docResponse);
@@ -148,13 +151,51 @@ class ControllerLayerTest {
         IngestJobService service = mock(IngestJobService.class);
         IngestCallbackController controller = new IngestCallbackController(service);
         UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
         IngestStatusUpdate update = IngestStatusUpdate.builder().jobId(jobId.toString()).build();
         IngestJobResponse response = IngestJobResponse.builder().id(jobId).build();
+        when(service.handleStatusUpdate(update)).thenReturn(IngestCallbackAckResponse.ok());
+        when(service.claim(jobId, executionId, "worker-a", java.time.Duration.ofSeconds(45))).thenReturn(response);
+        when(service.refreshLease(jobId, executionId, "worker-a", java.time.Duration.ofSeconds(30))).thenReturn(response);
+        when(service.isCancellationRequested(jobId, executionId)).thenReturn(true);
+        Map<String, Object> executionState = Map.of(
+                "status", IngestJobStatus.PROCESSING,
+                "executionCurrent", true,
+                "terminal", false,
+                "leaseExpired", false,
+                "requeueEligible", false
+        );
+        when(service.getExecutionState(jobId, executionId)).thenReturn(executionState);
         when(service.retry(jobId)).thenReturn(response);
 
         assertThat(controller.updateStatus(update)).containsEntry("status", "ok");
+        assertThat(controller.claim(jobId, Map.of(
+                "executionId", executionId.toString(),
+                "workerId", "worker-a",
+                "leaseSeconds", 45
+        ))).isSameAs(response);
+        assertThat(controller.refreshLease(jobId, Map.of(
+                "executionId", executionId.toString(),
+                "workerId", "worker-a",
+                "leaseSeconds", 30
+        ))).isSameAs(response);
+        assertThat(controller.cancelled(jobId, executionId)).containsEntry("cancelled", true);
+        assertThat(controller.executionState(jobId, executionId)).isSameAs(executionState);
         assertThat(controller.retry(jobId)).isSameAs(response);
         verify(service).handleStatusUpdate(update);
+        verify(service).getExecutionState(jobId, executionId);
+    }
+
+    @Test
+    void ingestCallbackControllerExposesExecutionStateContract() {
+        assertThatCode(() -> {
+            var method = IngestCallbackController.class.getMethod(
+                    "executionState", UUID.class, UUID.class);
+            var mapping = method.getAnnotation(GetMapping.class);
+            assertThat(mapping).isNotNull();
+            assertThat(mapping.value())
+                    .containsExactly("/jobs/{jobId}/executions/{executionId}/state");
+        }).doesNotThrowAnyException();
     }
 
     @Test
@@ -166,15 +207,15 @@ class ControllerLayerTest {
         ChatSessionService chatSessionService = mock(ChatSessionService.class);
         RagEvalService ragEvalService = mock(RagEvalService.class);
         KnowledgeBaseExportService knowledgeBaseExportService = mock(KnowledgeBaseExportService.class);
+        RetrievalProfileService retrievalProfileService = mock(RetrievalProfileService.class);
+        SparseMigrationService sparseMigrationService = mock(SparseMigrationService.class);
         KnowledgeBaseController controller = new KnowledgeBaseController(kbService, retrievalService, chatService,
-                ingestJobService, chatSessionService, ragEvalService, knowledgeBaseExportService);
+                ingestJobService, chatSessionService, ragEvalService, knowledgeBaseExportService,
+                retrievalProfileService, sparseMigrationService);
         UUID kbId = UUID.randomUUID();
         UUID sessionId = UUID.randomUUID();
         UUID secondSessionId = UUID.randomUUID();
         CreateKnowledgeBaseRequest create = new CreateKnowledgeBaseRequest();
-        UpdateKnowledgeBaseRetrievalProfileRequest updateProfile =
-                new UpdateKnowledgeBaseRetrievalProfileRequest();
-        updateProfile.setRetrievalProfile(RetrievalProfile.PARENT_CHILD);
         RetrieveRequest retrieve = new RetrieveRequest();
         retrieve.setQuery("q");
         ChatRequest streamChat = new ChatRequest();
@@ -192,6 +233,11 @@ class ControllerLayerTest {
         RetrieveResponse retrieveResponse = RetrieveResponse.builder().query("q").hits(List.of()).build();
         IngestJobResponse jobResponse = IngestJobResponse.builder().kbId(kbId).build();
         IngestJobResponse retryResponse = IngestJobResponse.builder().id(UUID.randomUUID()).kbId(kbId).build();
+        IngestJobResponse cancelResponse = IngestJobResponse.builder()
+                .id(UUID.randomUUID())
+                .kbId(kbId)
+                .status(com.dupi.rag.domain.enums.IngestJobStatus.CANCEL_REQUESTED)
+                .build();
         RagEvalRunResponse ragEvalRun = RagEvalRunResponse.builder()
                 .id(UUID.randomUUID())
                 .kbId(kbId)
@@ -205,6 +251,31 @@ class ControllerLayerTest {
                 .caseKey("case")
                 .query("q")
                 .build();
+        RagQualityPolicyRequest qualityPolicyRequest = new RagQualityPolicyRequest();
+        qualityPolicyRequest.setMinimumPassRate(80);
+        qualityPolicyRequest.setMaximumPassRateDrop(5);
+        qualityPolicyRequest.setMaximumNewFailures(0);
+        qualityPolicyRequest.setBlockWhenUnbaselined(false);
+        RagQualityPolicyResponse qualityPolicy = RagQualityPolicyResponse.builder()
+                .kbId(kbId)
+                .minimumPassRate(80)
+                .maximumPassRateDrop(5)
+                .maximumNewFailures(0)
+                .blockWhenUnbaselined(false)
+                .build();
+        RetrievalProfileRequest profileRequest = new RetrievalProfileRequest();
+        profileRequest.setName("balanced");
+        profileRequest.setVectorCandidateCount(30);
+        profileRequest.setSparseCandidateCount(30);
+        profileRequest.setRrfConstant(60);
+        profileRequest.setRerankEnabled(true);
+        profileRequest.setRerankCandidateLimit(20);
+        profileRequest.setFinalTopK(5);
+        RetrievalProfileResponse profileResponse = RetrievalProfileResponse.builder()
+                .id(UUID.randomUUID()).kbId(kbId).name("balanced").version(1).build();
+        SparseMigrationResponse migrationResponse = SparseMigrationResponse.builder().id(UUID.randomUUID())
+                .kbId(kbId).profileId(profileResponse.getId())
+                .state(com.dupi.rag.domain.enums.SparseMigrationState.PREPARING).build();
         KnowledgeBaseExportResponse exportResponse = KnowledgeBaseExportResponse.builder()
                 .knowledgeBase(KnowledgeBaseExportResponse.KnowledgeBaseSnapshot.builder()
                         .originalId(kbId)
@@ -227,12 +298,12 @@ class ControllerLayerTest {
         when(kbService.create(create)).thenReturn(kbResponse);
         when(kbService.list()).thenReturn(List.of(kbResponse));
         when(kbService.get(kbId)).thenReturn(kbResponse);
-        when(kbService.updateRetrievalProfile(kbId, RetrievalProfile.PARENT_CHILD)).thenReturn(kbResponse);
         when(retrievalService.retrieve(kbId, retrieve)).thenReturn(retrieveResponse);
         when(chatService.chatStream(kbId, streamChat)).thenReturn(Flux.just(ServerSentEvent.<String>builder().event("done").data("{}").build()));
         when(chatService.chat(kbId, syncChat)).thenReturn("answer");
         when(ingestJobService.listByKb(kbId)).thenReturn(List.of(jobResponse));
         when(ingestJobService.retryForKnowledgeBase(kbId, retryResponse.getId())).thenReturn(retryResponse);
+        when(ingestJobService.cancelForKnowledgeBase(kbId, cancelResponse.getId())).thenReturn(cancelResponse);
         when(chatSessionService.list(kbId)).thenReturn(List.of(sessionResponse));
         when(chatSessionService.create(kbId, createSession)).thenReturn(sessionResponse);
         when(chatSessionService.getDetail(kbId, sessionId)).thenReturn(sessionDetail);
@@ -242,15 +313,30 @@ class ControllerLayerTest {
         when(ragEvalService.createCase(eq(kbId), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.updateCase(eq(kbId), eq(ragEvalCase.getId()), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.listRuns(kbId)).thenReturn(List.of(ragEvalRun));
-        when(ragEvalService.run(eq(kbId), eq(true), eq(List.of(RetrievalProfile.CLASSIC))))
-                .thenReturn(ragEvalRun);
+        when(ragEvalService.run(eq(kbId), eq(true), isNull(), eq(RetrievalMode.HYBRID))).thenReturn(ragEvalRun);
+        when(ragEvalService.getPolicy(kbId)).thenReturn(qualityPolicy);
+        when(ragEvalService.updatePolicy(kbId, qualityPolicyRequest)).thenReturn(qualityPolicy);
+        when(ragEvalService.promoteBaseline(kbId, ragEvalRun.getId())).thenReturn(qualityPolicy);
+        when(ragEvalService.getRunComparison(kbId, ragEvalRun.getId())).thenReturn(ragEvalRun);
+        when(retrievalProfileService.list(kbId)).thenReturn(List.of(profileResponse));
+        when(retrievalProfileService.create(kbId, profileRequest)).thenReturn(profileResponse);
+        when(retrievalProfileService.activate(kbId, profileResponse.getId())).thenReturn(profileResponse);
+        when(retrievalProfileService.rollback(kbId, profileResponse.getId())).thenReturn(profileResponse);
+        when(sparseMigrationService.list(kbId)).thenReturn(List.of(migrationResponse));
+        when(sparseMigrationService.start(kbId, profileResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.backfill(kbId, migrationResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.beginShadowValidation(kbId, migrationResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.recordShadowValidation(eq(kbId), eq(migrationResponse.getId()), any()))
+                .thenReturn(migrationResponse);
+        when(sparseMigrationService.cutover(kbId, migrationResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.complete(kbId, migrationResponse.getId())).thenReturn(migrationResponse);
+        when(sparseMigrationService.setLegacyFallback(kbId, migrationResponse.getId(), true)).thenReturn(migrationResponse);
         when(knowledgeBaseExportService.exportKnowledgeBase(kbId)).thenReturn(exportResponse);
         when(knowledgeBaseExportService.restore(importRequest)).thenReturn(kbResponse);
 
         assertThat(controller.create(create)).isSameAs(kbResponse);
         assertThat(controller.list()).containsExactly(kbResponse);
         assertThat(controller.get(kbId)).isSameAs(kbResponse);
-        assertThat(controller.updateRetrievalProfile(kbId, updateProfile)).isSameAs(kbResponse);
         controller.delete(kbId);
         assertThat(controller.retrieve(kbId, retrieve)).isSameAs(retrieveResponse);
         assertThat(controller.chatStream(kbId, streamChat).collectList().block()).hasSize(1);
@@ -259,6 +345,7 @@ class ControllerLayerTest {
         assertThat(controller.cancelChat(Map.of())).containsEntry("status", "cancel_requested");
         assertThat(controller.listJobs(kbId)).containsExactly(jobResponse);
         assertThat(controller.retryJob(kbId, retryResponse.getId())).isSameAs(retryResponse);
+        assertThat(controller.cancelJob(kbId, cancelResponse.getId())).isSameAs(cancelResponse);
         assertThat(controller.reindex(kbId)).containsExactly(jobResponse);
         assertThat(controller.exportKnowledgeBase(kbId)).isSameAs(exportResponse);
         assertThat(controller.importKnowledgeBase(importRequest)).isSameAs(kbResponse);
@@ -278,10 +365,27 @@ class ControllerLayerTest {
         assertThat(controller.listRagEvalRuns(kbId)).containsExactly(ragEvalRun);
         RagEvalRunRequest ragEvalRunRequest = new RagEvalRunRequest();
         ragEvalRunRequest.setUseRerank(true);
+        ragEvalRunRequest.setRetrievalMode(RetrievalMode.HYBRID);
         assertThat(controller.runRagEval(kbId, ragEvalRunRequest)).isSameAs(ragEvalRun);
+        assertThat(controller.getRagQualityPolicy(kbId)).isSameAs(qualityPolicy);
+        assertThat(controller.updateRagQualityPolicy(kbId, qualityPolicyRequest)).isSameAs(qualityPolicy);
+        assertThat(controller.promoteRagEvalBaseline(kbId, ragEvalRun.getId())).isSameAs(qualityPolicy);
+        assertThat(controller.getRagEvalRunComparison(kbId, ragEvalRun.getId())).isSameAs(ragEvalRun);
+        assertThat(controller.listRetrievalProfiles(kbId)).containsExactly(profileResponse);
+        assertThat(controller.createRetrievalProfile(kbId, profileRequest)).isSameAs(profileResponse);
+        assertThat(controller.activateRetrievalProfile(kbId, profileResponse.getId())).isSameAs(profileResponse);
+        assertThat(controller.rollbackRetrievalProfile(kbId, profileResponse.getId())).isSameAs(profileResponse);
+        assertThat(controller.listSparseMigrations(kbId)).containsExactly(migrationResponse);
+        assertThat(controller.startSparseMigration(kbId, profileResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.backfillSparseMigration(kbId, migrationResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.beginSparseShadowValidation(kbId, migrationResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.validateSparseMigration(kbId, migrationResponse.getId(),
+                new SparseMigrationValidationRequest())).isSameAs(migrationResponse);
+        assertThat(controller.cutoverSparseMigration(kbId, migrationResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.completeSparseMigration(kbId, migrationResponse.getId())).isSameAs(migrationResponse);
+        assertThat(controller.setLegacySparseFallback(kbId, migrationResponse.getId(), true)).isSameAs(migrationResponse);
 
         verify(kbService).delete(kbId);
-        verify(ingestJobService, times(1)).reindexKnowledgeBase(kbId);
         verify(chatService).cancel("s1");
         verify(chatService, never()).cancel(null);
         verify(chatSessionService).delete(kbId, sessionId);
@@ -309,6 +413,7 @@ class ControllerLayerTest {
         MultipartProperties multipartProperties = new MultipartProperties();
         multipartProperties.setMaxFileSize(DataSize.ofMegabytes(32));
         OpsNotificationService opsNotificationService = mock(OpsNotificationService.class);
+        GovernanceOpsService governanceOpsService = mock(GovernanceOpsService.class);
         OpsController controller = new OpsController(
                 service,
                 auditLogService,
@@ -319,12 +424,13 @@ class ControllerLayerTest {
                 redisQueueProperties,
                 auditProperties,
                 multipartProperties,
-                opsNotificationService
+                opsNotificationService,
+                governanceOpsService
         );
         UUID taskId = UUID.randomUUID();
         VectorCleanupTaskResponse response = VectorCleanupTaskResponse.builder()
                 .id(taskId)
-                .targetType(com.dupi.rag.domain.enums.VectorCleanupTargetType.PROFILE_DOCUMENT)
+                .targetType(com.dupi.rag.domain.enums.VectorCleanupTargetType.DOCUMENT)
                 .targetId(UUID.randomUUID())
                 .status(com.dupi.rag.domain.enums.VectorCleanupStatus.PENDING)
                 .attemptCount(1)
@@ -363,6 +469,33 @@ class ControllerLayerTest {
                 .count(1)
                 .threshold(0)
                 .build()));
+        GovernanceSummaryResponse governanceSummary = GovernanceSummaryResponse.builder()
+                .generatedAt(Instant.parse("2026-07-18T10:15:30Z"))
+                .uploadQuota(GovernanceSummaryResponse.UploadQuota.builder()
+                        .pendingReservations(1)
+                        .committedReservations(2)
+                        .activeReservedBytes(300)
+                        .build())
+                .ingestJobs(GovernanceSummaryResponse.IngestJobs.builder()
+                        .pendingJobs(3)
+                        .processingJobs(4)
+                        .build())
+                .ingestOutbox(GovernanceSummaryResponse.IngestOutbox.builder()
+                        .pendingEvents(5)
+                        .failedEvents(6)
+                        .build())
+                .failureNotifications(GovernanceSummaryResponse.FailureNotifications.builder()
+                        .pending(7)
+                        .exhausted(8)
+                        .build())
+                .vectorCleanup(GovernanceSummaryResponse.VectorCleanup.builder()
+                        .pendingTasks(9)
+                        .failedTasks(10)
+                        .openTasks(19)
+                        .build())
+                .alerts(List.of())
+                .build();
+        when(governanceOpsService.summarize()).thenReturn(governanceSummary);
         when(accountService.listUsers()).thenReturn(List.of(AccountResponse.builder()
                 .username("admin")
                 .tenantId("ops")
@@ -420,6 +553,7 @@ class ControllerLayerTest {
                 .contains("createdAt,tenantId");
         assertThat(controller.listAuditAlerts()).extracting(AuditAlertResponse::getCode)
                 .containsExactly("AUDIT_FAILED_SPIKE", "INGEST_FAILURES_OPEN", "VECTOR_CLEANUP_FAILURES_OPEN");
+        assertThat(controller.governanceSummary()).isSameAs(governanceSummary);
         assertThat(controller.notifyAuditAlerts()).isSameAs(notification);
         assertThat(controller.listAccounts()).extracting(AccountResponse::getUsername)
                 .containsExactly("admin");
@@ -478,6 +612,7 @@ class ControllerLayerTest {
         verify(auditLogService, times(2)).summarizeAlerts();
         verify(ingestJobService, times(2)).summarizeAlerts();
         verify(service, times(2)).summarizeAlerts();
+        verify(governanceOpsService).summarize();
         verify(opsNotificationService).notifyAlerts(any());
         verify(auditLogService).recordSuccess(eq("AUDIT_ALERT_NOTIFY"), eq("AUDIT_ALERT"), isNull(), anyString());
         verify(accountService).listUsers();
@@ -502,11 +637,7 @@ class ControllerLayerTest {
         DocumentRepository documentRepository = mock(DocumentRepository.class);
         QaGenerationService qaGenerationService = mock(QaGenerationService.class);
         InternalController controller = new InternalController(
-                kbService,
-                chunkRepository,
-                documentRepository,
-                qaGenerationService
-        );
+                kbService, chunkRepository, documentRepository, qaGenerationService);
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         UUID chunkId = UUID.randomUUID();
@@ -523,10 +654,6 @@ class ControllerLayerTest {
         when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
                 Chunk.builder().id(chunkId).kbId(kbId).docId(docId).chunkIndex(0).content("content").metadata(null).build()
         ));
-        QaCandidatesRequest qaRequest = new QaCandidatesRequest();
-        qaRequest.setDocId(docId);
-        QaCandidatesResponse qaResponse = QaCandidatesResponse.builder().candidates(List.of()).build();
-        when(qaGenerationService.generate(kbId, qaRequest)).thenReturn(qaResponse);
 
         List<Map<String, Object>> chunks = controller.listChunks(kbId);
 
@@ -536,7 +663,6 @@ class ControllerLayerTest {
                 .containsEntry("file_name", "doc.md")
                 .containsEntry("content", "content")
                 .containsEntry("metadata", Map.of());
-        assertThat(controller.generateQaCandidates(kbId, qaRequest)).isSameAs(qaResponse);
         verify(kbService).findSystemOrThrow(kbId);
     }
 

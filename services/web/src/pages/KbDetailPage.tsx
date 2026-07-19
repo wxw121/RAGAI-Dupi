@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   getKnowledgeBase,
+  cancelIngestJob,
   listIngestJobs,
   listOpsMetadata,
   listVectorCleanupTasks,
@@ -10,14 +11,21 @@ import {
   retryVectorCleanupTask,
   updateKnowledgeBaseRetrievalProfile,
 } from '@/api/knowledgeBase'
-import { deleteDocument, getDocumentIndexDetail, getIngestJob, listDocuments, uploadDocuments } from '@/api/documents'
+import {
+  deleteDocument,
+  getDocumentIndexDetail,
+  getUploadQuota,
+  listDocuments,
+  uploadDocumentsGoverned,
+} from '@/api/documents'
 import type {
   Document,
   DocumentIndexDetail,
   IngestJob,
   KnowledgeBase,
   OpsGuardrails,
-  RetrievalProfile,
+  RetrievalIndexMode,
+  UploadQuota,
   VectorCleanupTask,
 } from '@/types'
 import { AppLayout } from '@/components/AppLayout'
@@ -25,11 +33,15 @@ import { ChatPanel } from '@/components/ChatPanel'
 import { DocTable } from '@/components/DocTable'
 import { DocumentIndexDetailPanel } from '@/components/DocumentIndexDetailPanel'
 import { RagEvalPanel } from '@/components/RagEvalPanel'
+import { RetrievalProfilePanel } from '@/components/RetrievalProfilePanel'
+import { RecoveryPanel } from '@/components/RecoveryPanel'
+import { SparseMigrationPanel } from '@/components/SparseMigrationPanel'
 import { UploadZone } from '@/components/UploadZone'
 import { useToast } from '@/components/Toast'
 import { Button } from '@/components/ui/button'
 import { Badge, statusBadgeVariant } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
+import { createSerialPoller } from '@/lib/serialPoller'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -40,11 +52,13 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  ShieldCheck,
+  XCircle,
 } from 'lucide-react'
 
-type Tab = 'documents' | 'chat' | 'eval'
+type Tab = 'documents' | 'chat' | 'eval' | 'recovery'
 
-const RETRIEVAL_PROFILE_OPTIONS: Array<{ value: RetrievalProfile; label: string }> = [
+const RETRIEVAL_PROFILE_OPTIONS: Array<{ value: RetrievalIndexMode; label: string }> = [
   { value: 'CLASSIC', label: 'Classic' },
   { value: 'PARENT_CHILD', label: 'Parent-child' },
   { value: 'QA_ASSISTED', label: 'QA-assisted' },
@@ -59,24 +73,26 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const [ingestJobs, setIngestJobs] = useState<IngestJob[]>([])
   const [vectorCleanupTasks, setVectorCleanupTasks] = useState<VectorCleanupTask[]>([])
   const [guardrails, setGuardrails] = useState<OpsGuardrails | null>(null)
+  const [uploadQuota, setUploadQuota] = useState<UploadQuota | null>(null)
   const [jobStages, setJobStages] = useState<Record<string, string | null>>({})
   const [tab, setTab] = useState<Tab>(() => {
     const initialTab = searchParams.get('tab')
-    return initialTab === 'chat' || initialTab === 'eval' ? initialTab : 'documents'
+    return initialTab === 'chat' || initialTab === 'eval' || initialTab === 'recovery' ? initialTab : 'documents'
   })
   const [loading, setLoading] = useState(true)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [reindexing, setReindexing] = useState(false)
-  const [retrievalProfile, setRetrievalProfile] = useState<RetrievalProfile>('CLASSIC')
+  const [retrievalProfile, setRetrievalProfile] = useState<RetrievalIndexMode>('CLASSIC')
   const [savingRetrievalProfile, setSavingRetrievalProfile] = useState(false)
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
+  const [cancellingJobId, setCancellingJobId] = useState<string | null>(null)
   const [retryingCleanupTaskId, setRetryingCleanupTaskId] = useState<string | null>(null)
   const [indexDetail, setIndexDetail] = useState<DocumentIndexDetail | null>(null)
   const [indexDetailLoadingId, setIndexDetailLoadingId] = useState<string | null>(null)
+  const notifiedFailureKeys = useRef(new Set<string>())
   const { showError, showSuccess } = useToast()
 
   const completedCount = documents.filter((d) => d.status === 'COMPLETED').length
-  const gateDecisions = kb?.retrievalProfileGateDecisions ?? {}
 
   const loadKb = useCallback(async () => {
     if (!kbId) return
@@ -89,41 +105,41 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
     }
   }, [kbId, showError])
 
-  const loadDocs = useCallback(async () => {
+  const loadDocs = useCallback(async (signal?: AbortSignal) => {
     if (!kbId) return
     try {
-      const docs = await listDocuments(kbId)
+      const docs = await listDocuments(kbId, signal)
       setDocuments(docs)
 
-      const stages: Record<string, string | null> = {}
-      await Promise.all(
-        docs
-          .filter((d) => d.status !== 'COMPLETED' && d.status !== 'FAILED')
-          .map(async (d) => {
-            try {
-              const job = await getIngestJob(kbId, d.id)
-              stages[d.id] = job.stage
-            } catch {
-              stages[d.id] = null
-            }
-          }),
-      )
-      setJobStages(stages)
+      setJobStages(Object.fromEntries(
+        docs.map((document) => [document.id, document.currentJob?.stage ?? null]),
+      ))
     } catch (e) {
+      if (isAbortError(e)) return
       showError(e instanceof Error ? e.message : '加载文档失败')
     }
   }, [kbId, showError])
 
-  const loadJobs = useCallback(async () => {
+  const loadJobs = useCallback(async (signal?: AbortSignal) => {
     if (!kbId) return
     try {
-      const jobs = await listIngestJobs(kbId)
+      const jobs = await listIngestJobs(kbId, signal)
       setIngestJobs(jobs)
       setJobStages((current) => ({
         ...current,
         ...Object.fromEntries(jobs.map((job) => [job.docId, job.stage])),
       }))
+      jobs
+        .filter((job) => job.status === 'FAILED' || job.status === 'DEAD_LETTER')
+        .forEach((job) => {
+          const key = `${job.id}:${job.executionId ?? 'legacy'}:${job.status}`
+          if (!notifiedFailureKeys.current.has(key)) {
+            notifiedFailureKeys.current.add(key)
+            showError(job.errorMessage ?? `Ingest job ${job.id.slice(0, 8)} failed`)
+          }
+        })
     } catch (e) {
+      if (isAbortError(e)) return
       showError(e instanceof Error ? e.message : '加载摄入任务失败')
     }
   }, [kbId, showError])
@@ -145,6 +161,15 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
     }
   }, [])
 
+  const loadUploadQuota = useCallback(async (signal?: AbortSignal) => {
+    try {
+      setUploadQuota(await getUploadQuota(signal))
+    } catch (e) {
+      if (isAbortError(e)) return
+      setUploadQuota(null)
+    }
+  }, [])
+
   useEffect(() => {
     const init = async () => {
       setLoading(true)
@@ -153,14 +178,15 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       await loadJobs()
       await loadVectorCleanupTasks()
       await loadGuardrails()
+      await loadUploadQuota()
       setLoading(false)
     }
     init()
-  }, [loadGuardrails, loadKb, loadDocs, loadJobs, loadVectorCleanupTasks])
+  }, [loadGuardrails, loadKb, loadDocs, loadJobs, loadUploadQuota, loadVectorCleanupTasks])
 
   useEffect(() => {
     const urlTab = searchParams.get('tab')
-    if (urlTab === 'chat' || urlTab === 'eval') {
+    if (urlTab === 'chat' || urlTab === 'eval' || urlTab === 'recovery') {
       setTab(urlTab)
     }
   }, [searchParams])
@@ -169,20 +195,27 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
     const hasPending = documents.some(
       (d) => d.status === 'PENDING' || d.status === 'PROCESSING',
     )
-    const hasRunningJob = ingestJobs.some((job) => job.status === 'PENDING' || job.status === 'PROCESSING')
+    const hasRunningJob = ingestJobs.some(
+      (job) => job.status === 'PENDING'
+        || job.status === 'PROCESSING'
+        || job.status === 'CANCEL_REQUESTED',
+    )
     if ((!hasPending && !hasRunningJob) || !kbId) return
 
-    const id = setInterval(() => {
-      loadDocs()
-      loadJobs()
-      loadVectorCleanupTasks()
+    const poller = createSerialPoller(async (signal) => {
+      await Promise.all([
+        loadDocs(signal),
+        loadJobs(signal),
+        loadUploadQuota(signal),
+      ])
     }, 3000)
-    return () => clearInterval(id)
-  }, [documents, ingestJobs, kbId, loadDocs, loadJobs, loadVectorCleanupTasks])
+    poller.start()
+    return poller.stop
+  }, [documents, ingestJobs, kbId, loadDocs, loadJobs, loadUploadQuota])
 
   const switchTab = (next: Tab) => {
     setTab(next)
-    if (next === 'chat' || next === 'eval') {
+    if (next === 'chat' || next === 'eval' || next === 'recovery') {
       setSearchParams({ tab: next }, { replace: true })
     } else {
       setSearchParams({}, { replace: true })
@@ -191,7 +224,15 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
 
   const handleUpload = async (
     files: File[],
-    onProgress?: (current: number, total: number, fileName: string) => void,
+    onProgress?: (
+      current: number,
+      total: number,
+      file: File,
+      status?: 'uploading' | 'uploaded' | 'failed',
+      errorMessage?: string,
+    ) => void,
+    signal?: AbortSignal,
+    batchId?: string,
   ) => {
     if (!kbId || files.length === 0) return
 
@@ -199,12 +240,12 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
     let failed = 0
 
     try {
-      onProgress?.(
-        1,
-        files.length,
-        files.length === 1 ? files[0].name : `${files.length} 个文件`,
-      )
-      const batch = await uploadDocuments(kbId, files)
+      const batch = await uploadDocumentsGoverned(kbId, files, {
+        batchId,
+        concurrency: 3,
+        signal,
+        onProgress,
+      })
       failed = batch.failed
       succeeded = batch.succeeded
       batch.results
@@ -217,6 +258,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
 
     await loadDocs()
     await loadJobs()
+    await loadUploadQuota()
 
     if (failed === 0) {
       showSuccess(
@@ -226,6 +268,20 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       )
     } else if (succeeded > 0) {
       showSuccess(`成功 ${succeeded} 个，失败 ${failed} 个`)
+    }
+  }
+
+  const handleCancelJob = async (job: IngestJob) => {
+    if (!kbId) return
+    setCancellingJobId(job.id)
+    try {
+      await cancelIngestJob(kbId, job.id)
+      showSuccess('Ingest cancellation requested')
+      await Promise.all([loadDocs(), loadJobs(), loadUploadQuota()])
+    } catch (e) {
+      showError(e instanceof Error ? e.message : 'Failed to cancel ingest job')
+    } finally {
+      setCancellingJobId(null)
     }
   }
 
@@ -274,22 +330,6 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
     }
   }
 
-  const handleRetrievalProfileUpdate = async () => {
-    if (!kbId) return
-    setSavingRetrievalProfile(true)
-    try {
-      const updatedKb = await updateKnowledgeBaseRetrievalProfile(kbId, retrievalProfile)
-      setKb(updatedKb)
-      setRetrievalProfile(updatedKb.retrievalProfile)
-      await Promise.all([loadDocs(), loadJobs()])
-      showSuccess('检索 Profile 已更新')
-    } catch (e) {
-      showError(e instanceof Error ? e.message : '更新索引模式失败')
-    } finally {
-      setSavingRetrievalProfile(false)
-    }
-  }
-
   const handleRetryJob = async (job: IngestJob) => {
     if (!kbId) return
     setRetryingJobId(job.id)
@@ -315,6 +355,22 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       showError(e instanceof Error ? e.message : '重试向量清理任务失败')
     } finally {
       setRetryingCleanupTaskId(null)
+    }
+  }
+
+  const handleRetrievalProfileUpdate = async () => {
+    if (!kbId) return
+    setSavingRetrievalProfile(true)
+    try {
+      const updatedKb = await updateKnowledgeBaseRetrievalProfile(kbId, retrievalProfile)
+      setKb(updatedKb)
+      setRetrievalProfile(updatedKb.retrievalProfile ?? 'CLASSIC')
+      showSuccess('索引模式已更新')
+      await Promise.all([loadDocs(), loadJobs()])
+    } catch (e) {
+      showError(e instanceof Error ? e.message : '索引模式更新失败')
+    } finally {
+      setSavingRetrievalProfile(false)
     }
   }
 
@@ -394,13 +450,66 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
               <BarChart3 className="h-4 w-4" />
               RAG 评估
             </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                'flex-1 rounded-lg px-3 md:flex-none',
+                tab === 'recovery' && 'bg-background shadow-sm',
+              )}
+              onClick={() => switchTab('recovery')}
+            >
+              <ShieldCheck className="h-4 w-4" />
+              Recovery
+            </Button>
           </div>
         </div>
       </div>
 
-      {tab === 'documents' ? (
+      {tab === 'recovery' ? (
+        <RecoveryPanel kbId={kbId!} />
+      ) : tab === 'documents' ? (
         <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 md:px-8">
           <div className="rounded-3xl border border-border bg-background p-4">
+            <div className="mb-4 border-b border-border pb-4">
+              <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                <div className="min-w-0 flex-1">
+                  <label htmlFor="retrieval-profile" className="text-sm font-semibold">索引模式</label>
+                  <select
+                    id="retrieval-profile"
+                    name="retrievalProfile"
+                    value={retrievalProfile}
+                    onChange={(event) => setRetrievalProfile(event.target.value as RetrievalIndexMode)}
+                    className="mt-2 h-9 w-full rounded-md border border-input bg-background px-3 text-sm md:max-w-xs"
+                  >
+                    {RETRIEVAL_PROFILE_OPTIONS.map((option) => {
+                      const decision = kb.retrievalProfileGateDecisions?.[option.value]
+                      const blocked = option.value !== 'CLASSIC'
+                        && option.value !== kb.retrievalProfile
+                        && decision?.status !== 'PASSED'
+                      return <option key={option.value} value={option.value} disabled={blocked}>{option.label}</option>
+                    })}
+                  </select>
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                    <span>Profile index: {kb.profileIndexReady ? 'Ready' : 'Not ready'}</span>
+                    <span>Revision {kb.indexRevision ?? 0}</span>
+                    {RETRIEVAL_PROFILE_OPTIONS.filter((option) => option.value !== 'CLASSIC').map((option) => (
+                      <span key={option.value}>
+                        {option.label} {kb.retrievalProfileGateDecisions?.[option.value]?.status ?? 'NOT_EVALUATED'}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  disabled={savingRetrievalProfile || retrievalProfile === (kb.retrievalProfile ?? 'CLASSIC')}
+                  onClick={() => void handleRetrievalProfileUpdate()}
+                >
+                  {savingRetrievalProfile ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                  保存索引模式
+                </Button>
+              </div>
+            </div>
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
                 <h2 className="text-sm font-semibold">索引维护</h2>
@@ -420,61 +529,6 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
                   <RefreshCw className="h-4 w-4" />
                 )}
                 重建索引
-              </Button>
-            </div>
-
-            <div className="mt-4 flex flex-col gap-3 border-t border-border pt-4 md:flex-row md:items-end">
-              <div className="min-w-0 flex-1">
-                <label htmlFor="retrieval-profile" className="mb-1 block text-sm font-medium">
-                  索引模式
-                </label>
-                <select
-                  id="retrieval-profile"
-                  name="retrievalProfile"
-                  value={retrievalProfile}
-                  onChange={(event) => setRetrievalProfile(event.target.value as RetrievalProfile)}
-                  className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                >
-                  {RETRIEVAL_PROFILE_OPTIONS.map((option) => {
-                    const decision = gateDecisions[option.value]
-                    const blocked = option.value !== 'CLASSIC'
-                      && option.value !== kb.retrievalProfile
-                      && decision?.status !== 'PASSED'
-                    return (
-                      <option key={option.value} value={option.value} disabled={blocked}>
-                        {option.label}
-                      </option>
-                    )
-                  })}
-                </select>
-                <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                  <span>Profile index: {kb.profileIndexReady ? 'Ready' : 'Not ready'}</span>
-                  <span>Revision {kb.indexRevision ?? 0}</span>
-                  <span>Schema v{kb.indexSchemaVersion ?? 1}</span>
-                </div>
-                <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                  {RETRIEVAL_PROFILE_OPTIONS.filter((option) => option.value !== 'CLASSIC').map((option) => {
-                    const decision = gateDecisions[option.value]
-                    return (
-                      <span key={option.value} className="rounded-full border border-border px-2 py-1">
-                        {option.label} {decision?.status ?? 'NOT_EVALUATED'}
-                      </span>
-                    )
-                  })}
-                </div>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={savingRetrievalProfile || retrievalProfile === kb.retrievalProfile}
-                onClick={handleRetrievalProfileUpdate}
-              >
-                {savingRetrievalProfile ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Save className="h-4 w-4" />
-                )}
-                保存索引模式
               </Button>
             </div>
 
@@ -507,6 +561,24 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
                         <td className="py-2 pr-4 text-muted-foreground">{job.stage ?? '—'}</td>
                         <td className="py-2 pr-4 text-muted-foreground">{job.retryCount}</td>
                         <td className="py-2 text-right">
+                          {(job.status === 'PENDING'
+                            || job.status === 'PROCESSING'
+                            || job.status === 'CANCEL_REQUESTED') && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              disabled={cancellingJobId === job.id || job.status === 'CANCEL_REQUESTED'}
+                              onClick={() => handleCancelJob(job)}
+                              title="Cancel ingest"
+                            >
+                              {cancellingJobId === job.id ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <XCircle className="h-4 w-4" />
+                              )}
+                              Cancel
+                            </Button>
+                          )}
                           {(job.status === 'FAILED' || job.status === 'DEAD_LETTER') && (
                             <Button
                               variant="ghost"
@@ -589,7 +661,11 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
               </div>
             )}
           </div>
-          <UploadZone onUpload={handleUpload} guardrails={guardrails} />
+          <UploadZone
+            onUpload={handleUpload}
+            guardrails={guardrails}
+            quota={uploadQuota}
+          />
           <DocTable
             documents={documents}
             jobStages={jobStages}
@@ -609,8 +685,12 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       ) : tab === 'chat' ? (
         <ChatPanel kbId={kbId!} completedDocCount={completedCount} />
       ) : (
-        <RagEvalPanel kbId={kbId!} />
+        <><RagEvalPanel kbId={kbId!} /><RetrievalProfilePanel kbId={kbId!} /><SparseMigrationPanel kbId={kbId!} /></>
       )}
     </AppLayout>
   )
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
 }

@@ -43,6 +43,8 @@ class KnowledgeBaseServiceTest {
     ProfileIndexStateService profileIndexStateService;
     @Mock
     RetrievalProfileGateService retrievalProfileGateService;
+    @Mock
+    KnowledgeBaseMaintenanceService maintenanceService;
 
     LlmProperties llmProperties;
     KnowledgeBaseService service;
@@ -59,7 +61,8 @@ class KnowledgeBaseServiceTest {
                 vectorCleanupTaskService,
                 auditLogService,
                 profileIndexStateService,
-                retrievalProfileGateService
+                retrievalProfileGateService,
+                maintenanceService
         );
     }
 
@@ -155,6 +158,12 @@ class KnowledgeBaseServiceTest {
         verify(retrievalProfileGateService).assertCanActivate(id, RetrievalProfile.PARENT_CHILD);
         verify(repository).findByIdAndTenantIdForUpdate(id, "default");
         verify(repository).save(argThat(saved -> saved.getRetrievalProfile() == RetrievalProfile.PARENT_CHILD));
+        verify(maintenanceService).assertMutationAllowed(id);
+        verify(auditLogService).recordSuccessInCurrentTransaction(
+                eq("KNOWLEDGE_BASE_RETRIEVAL_PROFILE_UPDATE"),
+                eq("KNOWLEDGE_BASE"),
+                eq(id),
+                contains("PARENT_CHILD"));
     }
 
     @Test

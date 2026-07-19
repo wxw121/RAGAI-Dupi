@@ -13,6 +13,7 @@ import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.exception.RetrievalProfileConflictException;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
+import com.dupi.rag.repository.SparseMigrationRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -47,6 +48,8 @@ class RetrievalServiceTest {
     @Mock ChunkRepository chunkRepository;
     @Mock DocumentRepository documentRepository;
     @Mock ProfileIndexStateService profileIndexStateService;
+    @Mock RetrievalProfileService retrievalProfileService;
+    @Mock SparseMigrationRepository sparseMigrationRepository;
 
     RetrievalService service(RagProperties properties) {
         return service(properties, WebClient.builder());
@@ -62,7 +65,9 @@ class RetrievalServiceTest {
                 properties,
                 builder,
                 profileIndexStateService,
-                new WeightedRrfFusion()
+                new WeightedRrfFusion(),
+                retrievalProfileService,
+                sparseMigrationRepository
         );
     }
 

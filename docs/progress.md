@@ -1,5 +1,48 @@
 # 进展记录
 
+## V1.4.2 governance ops stabilization (2026-07-18)
+
+- Added a read-only GET /api/v1/ops/governance-summary surface for OPS_ADMIN operators.
+- The summary includes generatedAt, uploadQuota, ingestJobs, ingestOutbox, failureNotifications, vectorCleanup, and alerts.
+- Added scripts/smoke-governance-summary.ps1 and Pester coverage for endpoint path, safe parameters, schema validation, sample mode, and redacted evidence.
+- Focused validation so far: API GovernanceOpsServiceTest and ControllerLayerTest passed; Pester smoke test passed 4 of 4.
+- .npm-cache is ignored for local Web dependency setup.
+- Local Web validation must use npm scripts so services/web/scripts/node16-webcrypto.cjs loads the Node 16 WebCrypto shim; do not run raw vite or vitest directly on this workstation.
+- This entry records in-progress V1.4.2 development only; it is not a merge, tag, or release record.
+
+## V1.4.1 upload governance (2026-07-18)
+
+- Version metadata is aligned to API `1.4.1-SNAPSHOT` and Web `1.4.1`; Flyway advances to V17.
+- Added persisted retained-byte/document and rolling-window upload accounting, explicit quota reservations, per-file idempotency replay/conflict handling, `GET /api/v1/upload-quota`, and 409/413/429 mappings with Retry-After.
+- Added ingest execution IDs, claims, leases, monotonic callback sequences, queued/running cancellation states, stale callback acknowledgement, and terminal-state protection.
+- Added a separate deduplicated terminal-failure notification table/service with optional webhook delivery, bounded backoff retry, and explicit `EXHAUSTED`; cancellation does not create failure events.
+- Worker uses a ready-to-processing Redis move, acknowledges processing payloads only after terminal handling, claims executions before work, refreshes leases, checks cancellation, and cleans vectors when cancellation arrives after indexing starts. The release image uses CPU-only torch `2.13.0+cpu`, removing the fixable `PYSEC-2025-194` finding.
+- Web uses bounded per-file uploads with stable idempotency keys, quota display, Retry-After messages, transport abort/retry, ingest cancel, explicit `currentJob`, failure-notice dedupe, and serialized polling.
+- Focused verification passed: ingest failure notification webhook delivery/retry 5/5, API document/current-job and ingest endpoint suites, Web governed upload suites, and Worker reliable queue suites.
+- Final local gates passed: API `mvn clean verify` 430/430 with JaCoCo 95.1306%, Worker pytest 75/75, Web Vitest 78/78, Web production build (1,794 modules), Pester release policy 14/14, Compose config exit 0, and `git diff --check` exit 0.
+- The final release scan passed with no Python findings, a 640,389,450-byte non-root CPU Worker image, digest `sha256:eec613fab9cdd1d873b95172f98d42ade5989238e2b0f76761b6b4f63b86515a`, and 22 exact upstream-unfixed OS exceptions (19 HIGH, 3 CRITICAL) expiring 2026-08-15. Evidence: `artifacts/v1.4.1-release-scan/summary.md`, dependency lock, both SBOM formats, pip-audit JSON, and Trivy JSON.
+
+## V1.3 RAG quality and Sparse migration (2026-07-15)
+
+## V1.4.0 verifiable recovery (2026-07-16)
+
+- Implemented private deterministic archives for records, original objects, dense vectors, active sparse vectors, and a manifest written last.
+- Implemented hidden-target restore with deterministic identifiers, retry, abandon, and readiness only after verification.
+- Added `KB_RECOVERY`, audited bounded background commands, tenant/KB-scoped routes, streaming ZIP download, and the Recovery operator panel.
+- Real Compose rehearsal passed on 2026-07-16 with 2 documents, 9 archive items, 10,946 bytes, matching object/vector checksums, matching restored record counts and retrieval hits, canonical-object corruption rejection, and scoped cleanup. Evidence: `artifacts/v1.4-recovery/rehearsal.json`.
+- Credentialed Chromium passed 1/1 against `http://localhost:8080`, including the Recovery panel and successful E2E cleanup.
+- The real rehearsal exposed and fixed managed-entity timestamp loss, dense-vector `Double`/`Float` conversion, strong read-after-write verification, terminal async failure recording, and V15/V16 archive-evidence cleanup constraints.
+- V1.4.0 recovery scope is complete: the final artifact records `corruptionBlocked=true`.
+- The formal release scan passed on 2026-07-17 with a 634,098,035-byte non-root CPU Worker image and 23 exact upstream-unfixed exceptions expiring on 2026-08-15. Evidence: `artifacts/v1.4-release-scan/summary.md`, image dependency lock, SBOM, pip-audit, and Trivy JSON.
+- Final local gates passed: API 351 tests with JaCoCo checks, Worker 45 tests, Web 68 tests plus production build, and Pester 26 tests. V1.4.1 starts after V1.4.0 publication.
+
+- 已完成质量策略、baseline、不可变评测证据和门禁。
+- 已完成 Retrieval Profile 控制台、激活和受 PASS 证据约束的 rollback。
+- 已完成 Milvus 2.5.4 原生 BM25、回填、双写、Shadow、Cutover、完成态持续写入和全版本删除同步。
+- 真实 Milvus 已验证 v1/v2/v3 完整迁移、v2 -> v1 rollback、Sparse 删除同步；浏览器 E2E 1/1 通过，Web 全量 62/62 通过。
+- 最终真实语料热态结果为 VECTOR P95 55 ms、HYBRID P95 99 ms、HYBRID+RERANK P95 434 ms，三组 PASS 1/1、fallback 0，重排组 `rerankRank=1`。
+- API 全量 288 项通过并满足 95% JaCoCo 行覆盖率门禁；Worker 全量 41 项、Web 全量 62 项通过，Web 生产构建成功。
+
 ## 当前状态
 
 V1.5.0 RAG Quality Upgrade P2 is complete: existing VECTOR / HYBRID / RERANK modes and CLASSIC defaults remain compatible, with a filterable profile v2 index superset, Combined weighted fusion, revision-bound RAG quality gates, and Web readiness/gate comparison now added.
@@ -186,3 +229,11 @@ V1.5.0 RAG Quality Upgrade P2 is complete: existing VECTOR / HYBRID / RERANK mod
 - [M2] — 向量检索 API、RAG Chat SSE 流式、citations
 - [M3] — 健康检查、错误处理、摄入重试
 - [V2 骨架] — BM25 混合检索、Rerank、语义分块、Excel 解析、生成中断端点
+# 2026-07-15 V1.3 发布硬化
+
+- 已新增 30 条、六分类检索清单，支持幂等同步、冷/热三模式基准和 fallback/排名证据门禁。
+- 已新增 Rerank 启动预热、脱敏健康状态和 `hf_model_cache` 持久卷；默认模型保持 `BAAI/bge-reranker-base`。
+- 已新增 Milvus 2.4.1 到 2.5.4 备份/恢复演练脚本及生产确认、备份先行、校验清单策略测试。
+- 已新增 pip-audit、Syft、Trivy、许可证 deny list 和 3 GB Worker 镜像门禁脚本。
+- 已新增 Sparse Migration Web 运维面板、Cutover 证据对话框和浏览器 Gate 流程。
+- 已通过新增的 Worker、API DTO、Web 组件、Pester 策略测试和 Web 构建；生产同规格演练、真实环境 30 Case 基准、完整扫描和真实浏览器 Gate 待发布环境执行。

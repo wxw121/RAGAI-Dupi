@@ -114,10 +114,10 @@ def test_process_ingest_job_success_uses_canonical_pipeline(monkeypatch):
             self.dimension = dimension
             self.profile_schema = profile_schema
 
-        def delete_by_doc(self, doc_id):
+        def delete_by_doc(self, doc_id, **kwargs):
             index_calls.append(("profile-delete" if self.profile_schema else "legacy-delete", doc_id))
 
-        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors, **kwargs):
             index_calls.append(("legacy-index", [chunk.id for chunk in chunks_arg]))
             chunks_arg[0].milvus_id = "m1"
             return ["m1"]
@@ -255,10 +255,10 @@ def test_process_ingest_job_parent_child_indexes_children_and_reports_parents(mo
         def __init__(self, dimension, collection_name=None, profile_schema=False):
             self.dimension = dimension
 
-        def delete_by_doc(self, doc_id):
+        def delete_by_doc(self, doc_id, **kwargs):
             pass
 
-        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors, **kwargs):
             pass
 
         def index_profile_chunks(self, kb_id, doc_id, chunks_arg, vectors):
@@ -327,10 +327,10 @@ def test_process_ingest_job_qa_assisted_indexes_original_and_qa_chunks(monkeypat
         def __init__(self, dimension, collection_name=None, profile_schema=False):
             self.dimension = dimension
 
-        def delete_by_doc(self, doc_id):
+        def delete_by_doc(self, doc_id, **kwargs):
             pass
 
-        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors, **kwargs):
             pass
 
         def index_profile_chunks(self, kb_id, doc_id, chunks_arg, vectors):
@@ -391,10 +391,10 @@ def test_process_ingest_job_combined_uses_parents_as_qa_sources(monkeypatch):
         def __init__(self, dimension, collection_name=None, profile_schema=False):
             self.dimension = dimension
 
-        def delete_by_doc(self, doc_id):
+        def delete_by_doc(self, doc_id, **kwargs):
             pass
 
-        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors, **kwargs):
             pass
 
         def index_profile_chunks(self, kb_id, doc_id, chunks_arg, vectors):
@@ -447,10 +447,10 @@ def test_process_ingest_job_qa_failure_still_completes_original_index(monkeypatc
             self.dimension = dimension
             indexer_modes.append(profile_schema)
 
-        def delete_by_doc(self, doc_id):
+        def delete_by_doc(self, doc_id, **kwargs):
             pass
 
-        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors, **kwargs):
             pass
 
         def index_profile_chunks(self, kb_id, doc_id, chunks_arg, vectors):

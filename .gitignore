@@ -8,6 +8,7 @@
 # Build outputs
 target/
 **/target/
+.m2/
 dist/
 build/
 coverage/
@@ -16,12 +17,19 @@ coverage/
 
 # Node
 node_modules/
+.npm-cache/
+**/.npm-cache/
 
 # Python
 __pycache__/
 *.pyc
 .coverage
 **/.coverage
+testResults.xml
+.pytest_cache/
+**/.pytest_cache/
+.pytest-tmp*/
+**/.pytest-tmp*/
 .venv/
 venv/
 *.egg-info/
@@ -36,6 +44,11 @@ Thumbs.db
 *.log
 scripts/e2e-last-run.json
 scripts/e2e-chat-session-history-last-run.json
+artifacts/
+evidence/
+.docker-release-config/
+**/playwright-report/
+**/test-results/
 handoff.md
 .superpowers/
 .m2/

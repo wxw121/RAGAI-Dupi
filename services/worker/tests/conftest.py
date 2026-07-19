@@ -18,8 +18,9 @@ sys.modules.setdefault("tiktoken", fake_tiktoken)
 
 
 class _FakeBM25:
-    def __init__(self, tokenized):
+    def __init__(self, tokenized, **kwargs):
         self.tokenized = tokenized
+        self.options = kwargs
 
     def get_scores(self, query_tokens):
         query = set(query_tokens)
@@ -110,8 +111,12 @@ sys.modules.setdefault("pymupdf4llm", fake_pymupdf4llm)
 fake_pymilvus = types.ModuleType("pymilvus")
 fake_pymilvus.Collection = object
 fake_pymilvus.CollectionSchema = object
-fake_pymilvus.DataType = types.SimpleNamespace(VARCHAR="varchar", FLOAT_VECTOR="float_vector")
+fake_pymilvus.DataType = types.SimpleNamespace(
+    VARCHAR="varchar", FLOAT_VECTOR="float_vector", SPARSE_FLOAT_VECTOR="sparse_float_vector"
+)
 fake_pymilvus.FieldSchema = object
+fake_pymilvus.Function = object
+fake_pymilvus.FunctionType = types.SimpleNamespace(BM25="bm25")
 fake_pymilvus.connections = types.SimpleNamespace(connect=lambda **kwargs: None)
 fake_pymilvus.utility = types.SimpleNamespace(has_collection=lambda name: False)
 sys.modules.setdefault("pymilvus", fake_pymilvus)

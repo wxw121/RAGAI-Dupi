@@ -1,5 +1,6 @@
 package com.dupi.rag.service;
 
+import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.config.LlmProperties;
 import com.dupi.rag.config.RedisQueueProperties;
 import com.dupi.rag.domain.entity.Chunk;
@@ -10,6 +11,7 @@ import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
 import com.dupi.rag.domain.enums.IngestStage;
 import com.dupi.rag.dto.AuditAlertResponse;
+import com.dupi.rag.dto.IngestCallbackAckResponse;
 import com.dupi.rag.dto.IngestDiagnosisResponse;
 import com.dupi.rag.dto.IngestJobResponse;
 import com.dupi.rag.dto.IngestStatusUpdate;
@@ -26,6 +28,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -44,8 +48,10 @@ public class IngestJobService {
     private final DocumentTombstoneService documentTombstoneService;
     private final RedisQueueProperties redisQueueProperties;
     private final LlmProperties llmProperties;
+    private final MilvusVectorService milvusVectorService;
     private final VectorCleanupTaskService vectorCleanupTaskService;
     private final AuditLogService auditLogService;
+    private final IngestFailureNotificationService failureNotificationService;
     private final ProfileIndexStateService profileIndexStateService;
 
     public IngestJobResponse getLatestByDoc(UUID docId) {
@@ -80,16 +86,15 @@ public class IngestJobService {
     }
 
     @Transactional
-    public void handleStatusUpdate(IngestStatusUpdate update) {
+    public IngestCallbackAckResponse handleStatusUpdate(IngestStatusUpdate update) {
         UUID jobId = UUID.fromString(update.getJobId());
         UUID docId = UUID.fromString(update.getDocId());
+        boolean completedUpdate = "COMPLETED".equalsIgnoreCase(update.getStatus());
         if (documentTombstoneService.isDeleted(docId)) {
             log.info("Ignored ingest status update for tombstoned document {}, job {}", docId, jobId);
-            return;
+            return IngestCallbackAckResponse.ignored("document_tombstoned");
         }
-        boolean completedUpdate = "COMPLETED".equalsIgnoreCase(update.getStatus());
-        IngestJob job = ingestJobRepository.findById(jobId)
-                .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
+        IngestJob job = findJobForUpdate(jobId);
 
         Document doc = documentRepository.findById(docId)
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
@@ -99,11 +104,40 @@ public class IngestJobService {
         boolean wasV2Ready = completedUpdate && profileIndexStateService.isV2Ready(doc.getKbId());
         boolean wasV2Activated = completedUpdate && profileIndexStateService.isV2Activated(doc.getKbId());
 
+        UUID callbackExecutionId = parseUuid(update.getExecutionId());
+        if (job.getExecutionId() != null && callbackExecutionId == null) {
+            return IngestCallbackAckResponse.ignored("missing_execution");
+        }
+        if (callbackExecutionId != null && job.getExecutionId() != null && !callbackExecutionId.equals(job.getExecutionId())) {
+            return IngestCallbackAckResponse.ignored("stale_execution");
+        }
+        if (job.getExecutionId() != null && update.getSequence() == null) {
+            return IngestCallbackAckResponse.ignored("missing_sequence");
+        }
+        if (update.getSequence() != null && update.getSequence() <= safeCallbackSequence(job)) {
+            return IngestCallbackAckResponse.ignored("stale_sequence");
+        }
+
+        IngestJobStatus nextStatus = parseStatus(update.getStatus());
+        if (isTerminal(job.getStatus())) {
+            return IngestCallbackAckResponse.ignored("terminal_state");
+        }
+        if (job.getStatus() == IngestJobStatus.CANCEL_REQUESTED
+                && nextStatus != IngestJobStatus.CANCELLED) {
+            return IngestCallbackAckResponse.ignored("cancel_requested");
+        }
+        if (!isLegalCallbackTransition(job.getStatus(), nextStatus)) {
+            return IngestCallbackAckResponse.ignored("illegal_transition");
+        }
+
         if (update.getStage() != null) {
             job.setStage(IngestStage.valueOf(update.getStage().toUpperCase()));
         }
-        if (update.getStatus() != null) {
-            job.setStatus(IngestJobStatus.valueOf(update.getStatus().toUpperCase()));
+        if (nextStatus != null) {
+            job.setStatus(nextStatus);
+        }
+        if (update.getSequence() != null) {
+            job.setCallbackSequence(update.getSequence());
         }
         job.setErrorMessage(update.getErrorMessage());
 
@@ -131,11 +165,19 @@ public class IngestJobService {
                 doc.setIndexSchemaVersion(update.getIndexSchemaVersion());
             }
             job.setStage(IngestStage.COMPLETED);
+            job.setCompletedAt(Instant.now());
+        } else if ("CANCELLED".equalsIgnoreCase(update.getStatus())) {
+            doc.setStatus(DocumentStatus.CANCELLED);
+            doc.setIndexSchemaVersion(1);
+            doc.setErrorMessage(null);
+            job.setStage(IngestStage.CANCELLED);
+            job.setCompletedAt(Instant.now());
         } else if ("FAILED".equalsIgnoreCase(update.getStatus())) {
             doc.setStatus(DocumentStatus.FAILED);
             doc.setIndexSchemaVersion(1);
             doc.setErrorMessage(update.getErrorMessage());
             job.setStage(IngestStage.FAILED);
+            failureNotificationService.recordTerminalFailure(job, doc);
         } else {
             doc.setStatus(DocumentStatus.PROCESSING);
             doc.setIndexSchemaVersion(1);
@@ -151,12 +193,114 @@ public class IngestJobService {
                 vectorCleanupTaskService.enqueueLegacyKnowledgeBase(doc.getKbId());
             }
         }
+        return IngestCallbackAckResponse.ok();
+    }
+
+    @Transactional
+    public IngestJobResponse claim(UUID jobId, UUID executionId, String workerId, Duration leaseDuration) {
+        IngestJob job = findJobForUpdate(jobId);
+        UUID currentExecutionId = ensureExecutionId(job);
+        if (!currentExecutionId.equals(executionId)) {
+            throw new IllegalStateException("Ingest execution mismatch");
+        }
+        if (job.getStatus() != IngestJobStatus.PENDING || job.getStage() != IngestStage.QUEUED) {
+            throw new IllegalStateException("Ingest job is not claimable");
+        }
+        Instant now = Instant.now();
+        job.setStatus(IngestJobStatus.PROCESSING);
+        job.setStage(IngestStage.PARSING);
+        job.setClaimedBy(workerId);
+        job.setStartedAt(now);
+        job.setLeaseExpiresAt(now.plus(leaseDuration == null ? Duration.ofSeconds(60) : leaseDuration));
+        job.setErrorMessage(null);
+        ingestJobRepository.save(job);
+        return toResponse(job);
+    }
+
+    @Transactional
+    public IngestJobResponse refreshLease(UUID jobId, UUID executionId, String workerId, Duration leaseDuration) {
+        IngestJob job = findJobForUpdate(jobId);
+        if (!ensureExecutionId(job).equals(executionId)) {
+            throw new IllegalStateException("Ingest execution mismatch");
+        }
+        if (job.getStatus() != IngestJobStatus.PROCESSING && job.getStatus() != IngestJobStatus.CANCEL_REQUESTED) {
+            throw new IllegalStateException("Ingest job is not running");
+        }
+        if (job.getClaimedBy() != null && !job.getClaimedBy().equals(workerId)) {
+            throw new IllegalStateException("Ingest job is claimed by another worker");
+        }
+        job.setClaimedBy(workerId);
+        job.setLeaseExpiresAt(Instant.now().plus(leaseDuration == null ? Duration.ofSeconds(60) : leaseDuration));
+        ingestJobRepository.save(job);
+        return toResponse(job);
+    }
+
+    @Transactional(readOnly = true)
+    public boolean isCancellationRequested(UUID jobId, UUID executionId) {
+        IngestJob job = ingestJobRepository.findById(jobId)
+                .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
+        if (job.getExecutionId() == null || !job.getExecutionId().equals(executionId)) {
+            return true;
+        }
+        return job.getStatus() == IngestJobStatus.CANCEL_REQUESTED || isTerminal(job.getStatus());
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Object> getExecutionState(UUID jobId, UUID executionId) {
+        IngestJob job = ingestJobRepository.findById(jobId)
+                .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
+        boolean executionCurrent = executionId.equals(job.getExecutionId());
+        boolean running = job.getStatus() == IngestJobStatus.PROCESSING
+                || job.getStatus() == IngestJobStatus.CANCEL_REQUESTED;
+        boolean leaseExpired = executionCurrent
+                && running
+                && job.getLeaseExpiresAt() != null
+                && !job.getLeaseExpiresAt().isAfter(Instant.now());
+        boolean requeueEligible = executionCurrent
+                && job.getStatus() == IngestJobStatus.PENDING
+                && job.getStage() == IngestStage.QUEUED;
+        return Map.of(
+                "status", job.getStatus(),
+                "executionCurrent", executionCurrent,
+                "terminal", isTerminal(job.getStatus()),
+                "leaseExpired", leaseExpired,
+                "requeueEligible", requeueEligible
+        );
+    }
+
+    @Transactional
+    public IngestJobResponse cancelForKnowledgeBase(UUID kbId, UUID jobId) {
+        knowledgeBaseService.findOrThrow(kbId);
+        IngestJob job = findJobForUpdate(jobId);
+        if (!job.getKbId().equals(kbId)) {
+            throw new IllegalArgumentException("Ingest job does not belong to knowledge base: " + kbId);
+        }
+        Document doc = documentRepository.findById(job.getDocId())
+                .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
+        if (job.getStatus() == IngestJobStatus.PENDING) {
+            job.setStatus(IngestJobStatus.CANCELLED);
+            job.setStage(IngestStage.CANCELLED);
+            job.setCompletedAt(Instant.now());
+            job.setErrorMessage(null);
+            doc.setStatus(DocumentStatus.CANCELLED);
+            doc.setErrorMessage(null);
+            ingestOutboxService.cancelPendingForJob(jobId, "ingest cancelled by user");
+        } else if (job.getStatus() == IngestJobStatus.PROCESSING) {
+            job.setStatus(IngestJobStatus.CANCEL_REQUESTED);
+            job.setCancelRequestedAt(Instant.now());
+            doc.setStatus(DocumentStatus.PROCESSING);
+        } else if (!isTerminal(job.getStatus())) {
+            job.setStatus(IngestJobStatus.CANCEL_REQUESTED);
+            job.setCancelRequestedAt(Instant.now());
+        }
+        ingestJobRepository.save(job);
+        documentRepository.save(doc);
+        return toResponse(job, doc);
     }
 
     @Transactional
     public IngestJobResponse retry(UUID jobId) {
-        IngestJob job = ingestJobRepository.findById(jobId)
-                .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
+        IngestJob job = findJobForUpdate(jobId);
         KnowledgeBase kb = knowledgeBaseService.findSystemOrThrow(job.getKbId());
         return retryJob(job, kb);
     }
@@ -164,8 +308,7 @@ public class IngestJobService {
     @Transactional
     public IngestJobResponse retryForKnowledgeBase(UUID kbId, UUID jobId) {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
-        IngestJob job = ingestJobRepository.findById(jobId)
-                .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
+        IngestJob job = findJobForUpdate(jobId);
         if (!job.getKbId().equals(kbId)) {
             throw new IllegalArgumentException("Ingest job does not belong to knowledge base: " + kbId);
         }
@@ -173,6 +316,10 @@ public class IngestJobService {
     }
 
     private IngestJobResponse retryJob(IngestJob job, KnowledgeBase kb) {
+        if (job.getStatus() != IngestJobStatus.FAILED
+                && job.getStatus() != IngestJobStatus.DEAD_LETTER) {
+            throw new IllegalStateException("Only failed or dead-letter ingest jobs can be retried");
+        }
         if (job.getStatus() != IngestJobStatus.DEAD_LETTER && job.getRetryCount() >= maxRecoveryAttempts()) {
             throw new IllegalStateException("Max retries exceeded");
         }
@@ -180,6 +327,7 @@ public class IngestJobService {
         job.setStatus(IngestJobStatus.PENDING);
         job.setStage(IngestStage.QUEUED);
         job.setErrorMessage(null);
+        rotateExecution(job);
         ingestJobRepository.save(job);
 
         Document doc = documentRepository.findById(job.getDocId())
@@ -241,7 +389,7 @@ public class IngestJobService {
     public int recoverQueuedJobs() {
         List<IngestJob> jobs = ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED);
-        int recovered = 0;
+        int recovered = recoverExpiredProcessingJobs();
         for (IngestJob job : jobs) {
             Document doc = documentRepository.findById(job.getDocId()).orElse(null);
             if (doc == null || doc.getStatus() != DocumentStatus.PENDING) {
@@ -262,6 +410,58 @@ public class IngestJobService {
             }
         }
         return recovered;
+    }
+
+    private int recoverExpiredProcessingJobs() {
+        Instant now = Instant.now();
+        List<IngestJob> jobs = ingestJobRepository.findTop20ByStatusAndLeaseExpiresAtBeforeOrderByUpdatedAtAsc(
+                IngestJobStatus.PROCESSING, now);
+        int recovered = 0;
+        for (IngestJob job : jobs) {
+            Document doc = documentRepository.findById(job.getDocId()).orElse(null);
+            if (doc == null || doc.getStatus() != DocumentStatus.PROCESSING) {
+                continue;
+            }
+            try {
+                KnowledgeBase kb = knowledgeBaseService.findSystemOrThrow(job.getKbId());
+                rotateExecution(job);
+                job.setStatus(IngestJobStatus.PENDING);
+                job.setStage(IngestStage.QUEUED);
+                job.setErrorMessage(null);
+                doc.setStatus(DocumentStatus.PENDING);
+                doc.setErrorMessage(null);
+                ingestJobRepository.save(job);
+                documentRepository.save(doc);
+                ingestOutboxService.record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+                recovered++;
+            } catch (Exception e) {
+                log.warn("Failed to recover expired processing ingest job {}", job.getId(), e);
+                markRecoveryFailure(job, doc, e);
+            }
+        }
+        return recovered + finalizeExpiredCancellations(now);
+    }
+
+    private int finalizeExpiredCancellations(Instant now) {
+        List<IngestJob> jobs = ingestJobRepository.findTop20ByStatusAndLeaseExpiresAtBeforeOrderByUpdatedAtAsc(
+                IngestJobStatus.CANCEL_REQUESTED, now);
+        for (IngestJob job : jobs) {
+            vectorCleanupTaskService.enqueueDocument(job.getDocId());
+            job.setStatus(IngestJobStatus.CANCELLED);
+            job.setStage(IngestStage.CANCELLED);
+            job.setCompletedAt(now);
+            job.setClaimedBy(null);
+            job.setLeaseExpiresAt(null);
+            job.setErrorMessage(null);
+            ingestJobRepository.save(job);
+
+            documentRepository.findById(job.getDocId()).ifPresent(doc -> {
+                doc.setStatus(DocumentStatus.CANCELLED);
+                doc.setErrorMessage(null);
+                documentRepository.save(doc);
+            });
+        }
+        return jobs.size();
     }
 
     private IngestJobResponse requeueDocumentForReindex(KnowledgeBase kb, Document doc) {
@@ -295,6 +495,7 @@ public class IngestJobService {
             job.setErrorMessage("Ingest recovery dead-letter after " + attempts + " attempts: " + reason);
             doc.setStatus(DocumentStatus.FAILED);
             doc.setErrorMessage("Ingest job moved to dead-letter after " + attempts + " recovery attempts: " + reason);
+            failureNotificationService.recordTerminalFailure(job, doc);
             ingestJobRepository.save(job);
             documentRepository.save(doc);
             return;
@@ -314,6 +515,71 @@ public class IngestJobService {
         return job.getRetryCount() == null ? 0 : job.getRetryCount();
     }
 
+    private long safeCallbackSequence(IngestJob job) {
+        return job.getCallbackSequence() == null ? 0L : job.getCallbackSequence();
+    }
+
+    private UUID ensureExecutionId(IngestJob job) {
+        if (job.getExecutionId() == null) {
+            job.setExecutionId(UUID.randomUUID());
+        }
+        return job.getExecutionId();
+    }
+
+    private IngestJob findJobForUpdate(UUID jobId) {
+        Optional<IngestJob> locked = ingestJobRepository.findByIdForUpdate(jobId);
+        if (locked != null && locked.isPresent()) {
+            return locked.get();
+        }
+        return ingestJobRepository.findById(jobId)
+                .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
+    }
+
+    private void rotateExecution(IngestJob job) {
+        job.setExecutionId(UUID.randomUUID());
+        job.setCallbackSequence(0L);
+        job.setClaimedBy(null);
+        job.setLeaseExpiresAt(null);
+        job.setStartedAt(null);
+        job.setCompletedAt(null);
+        job.setCancelRequestedAt(null);
+    }
+
+    private UUID parseUuid(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return UUID.fromString(value);
+    }
+
+    private IngestJobStatus parseStatus(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return IngestJobStatus.valueOf(value.toUpperCase());
+    }
+
+    private boolean isTerminal(IngestJobStatus status) {
+        return status == IngestJobStatus.COMPLETED
+                || status == IngestJobStatus.FAILED
+                || status == IngestJobStatus.DEAD_LETTER
+                || status == IngestJobStatus.CANCELLED;
+    }
+
+    private boolean isLegalCallbackTransition(IngestJobStatus current, IngestJobStatus next) {
+        if (current == IngestJobStatus.PENDING) {
+            return next == IngestJobStatus.PROCESSING;
+        }
+        if (current == IngestJobStatus.PROCESSING) {
+            return next == IngestJobStatus.PROCESSING
+                    || next == IngestJobStatus.COMPLETED
+                    || next == IngestJobStatus.FAILED
+                    || next == IngestJobStatus.CANCELLED;
+        }
+        return current == IngestJobStatus.CANCEL_REQUESTED
+                && next == IngestJobStatus.CANCELLED;
+    }
+
     private String errorReason(Exception e) {
         return e.getMessage() == null || e.getMessage().isBlank()
                 ? e.getClass().getSimpleName()
@@ -328,6 +594,7 @@ public class IngestJobService {
     public IngestJobResponse toResponse(IngestJob job, Document doc) {
         return IngestJobResponse.builder()
                 .id(job.getId())
+                .executionId(job.getExecutionId())
                 .kbId(job.getKbId())
                 .docId(job.getDocId())
                 .documentFileName(doc == null ? null : doc.getFileName())
@@ -335,7 +602,9 @@ public class IngestJobService {
                 .status(job.getStatus())
                 .stage(job.getStage())
                 .retryCount(job.getRetryCount())
+                .callbackSequence(job.getCallbackSequence())
                 .errorMessage(job.getErrorMessage())
+                .cancelRequestedAt(job.getCancelRequestedAt())
                 .diagnosis(diagnose(job, doc))
                 .createdAt(job.getCreatedAt())
                 .updatedAt(job.getUpdatedAt())

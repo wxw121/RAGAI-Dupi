@@ -369,6 +369,31 @@ public class MilvusVectorService {
         }
     }
 
+    public void deleteSparseByDocId(UUID kbId, UUID docId, java.util.Collection<Integer> profileVersions) {
+        for (Integer version : profileVersions) {
+            DeleteParam param = DeleteParam.newBuilder()
+                    .withCollectionName(sparseCollection(kbId, version))
+                    .withExpr("doc_id == \"" + docId + "\"")
+                    .build();
+            deleteStrict(param);
+        }
+    }
+
+    public void deleteSparseByKbId(UUID kbId, java.util.Collection<Integer> profileVersions) {
+        for (Integer version : profileVersions) {
+            DeleteParam param = DeleteParam.newBuilder()
+                    .withCollectionName(sparseCollection(kbId, version))
+                    .withExpr("kb_id == \"" + kbId + "\"")
+                    .build();
+            deleteStrict(param);
+        }
+    }
+
+    private String sparseCollection(UUID kbId, Integer version) {
+        return properties.getCollection() + "_sparse_" + kbId.toString().replace("-", "").toLowerCase()
+                + "_v" + version;
+    }
+
     public void deleteByKbId(UUID kbId) {
         deleteLegacyByKbId(kbId);
     }

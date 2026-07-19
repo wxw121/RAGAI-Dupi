@@ -1,5 +1,38 @@
 # 架构概览
 
+## V1.4.2 Governance Ops Summary
+
+V1.4.2 adds GovernanceOpsService and GET /api/v1/ops/governance-summary as a read-only OPS_ADMIN summary of the V1.4.1 governance state. It aggregates upload quota reservations, ingest jobs, ingest outbox events, ingest failure notifications, vector cleanup tasks, and existing audit, ingest, and vector alert summaries without mutating any of those records.
+
+The response sections are generatedAt, uploadQuota, ingestJobs, ingestOutbox, failureNotifications, vectorCleanup, and alerts. V1.4.2 can append open-condition alert codes for stale upload attempts, expired processing leases, failed outbox rows, and exhausted failure notifications while preserving the existing AuditAlertResponse shape.
+
+The smoke layer is outside the app runtime. scripts/smoke-governance-summary.ps1 calls the endpoint, validates the JSON shape, and writes redacted evidence. Its Pester test currently passes 4 of 4. Local Web verification on Node 16 must go through npm scripts so services/web/scripts/node16-webcrypto.cjs loads the shim; raw vite and vitest are not the supported local path.
+
+## V1.4.1 Upload and Ingest Governance
+
+PostgreSQL owns both upload capacity and ingest execution state. `upload_quota_reservations` provides durable retained-byte/document reservations with `PENDING`, `COMMITTED`, and `RELEASED` states; active retained usage is `PENDING` + `COMMITTED`, and `RELEASED` reservations are excluded. In-flight attempts are leased with `attempt_id` and `attempt_expires_at`; the stale-upload reconciler uses `FOR UPDATE SKIP LOCKED` to either promote durable doc/job/outbox attempts to `COMMITTED` or clean partial MinIO/job/outbox/document work before `RELEASED`. `upload_window_events` records accepted bytes for the rolling window; retrying a released idempotency key rechecks retained quota but does not double-charge those rolling-window bytes. The optional `Idempotency-Key` is unique within tenant, user, and knowledge base; a matching replay returns the original document/current job, while a different file fingerprint returns 409.
+
+The ingest transport uses two Redis lists:
+
+```text
+ready list -> atomic move -> processing list
+    -> PostgreSQL claim(executionId, workerId, lease)
+    -> parse/chunk/embed/index with cancellation checks
+    -> heartbeat + state check (`terminal`, `leaseExpired`, `requeueEligible`)
+    -> executionId + monotonic sequence callback
+    -> terminal callback acknowledgement -> processing ACK
+```
+
+`ingest_jobs` stores `execution_id`, callback sequence, claim owner, lease expiry, start/completion time, and cancellation request time. Retry rotates the execution ID. The API ignores stale execution IDs, non-increasing sequences, terminal regressions, and non-cancel callbacks after `CANCEL_REQUESTED`. `GET /api/v1/internal/ingest/jobs/{jobId}/executions/{executionId}/state` returns `status`, `executionCurrent`, `terminal`, `leaseExpired`, and `requeueEligible` so the Worker reaper only requeues eligible processing payloads. Queued cancellation becomes `CANCELLED` immediately; running cancellation remains `CANCEL_REQUESTED` until Worker cleanup and acknowledgement.
+
+Terminal `FAILED` and `DEAD_LETTER` transitions create a deduplicated `ingest_failure_notifications` record keyed by `jobId:executionId:status`; user cancellation creates no failure event. When `INGEST_FAILURE_NOTIFICATION_WEBHOOK_URL` is configured, the API dispatches event id/key, tenant/kb/doc/job/execution/status/stage/error payloads. Due `PENDING`/`FAILED` rows use bounded retry/backoff, 2xx responses become `DELIVERED`, and rows at the attempt limit become `EXHAUSTED`. Webhook delivery defaults to HTTPS-only, blocks local/metadata hosts unless `INGEST_FAILURE_NOTIFICATION_ALLOW_INSECURE_WEBHOOK=true`, can include `X-Dupi-Webhook-Secret`, and sanitizes/truncates error messages. The Web also deduplicates terminal failure notices with the same identity.
+
+The Web no longer uses the batch upload route for its main workflow. It schedules independent single-file requests with concurrency 3, stable idempotency keys, per-file errors, Retry-After handling, transport abort, and retry. Retrying a failed file keeps that item batch ID and therefore reuses its stable `Idempotency-Key`; a new batch generates a new batch ID. `GET /api/v1/upload-quota` requires `DOCUMENT_UPLOAD`. Document responses include `currentJob`, and serialized AbortController-backed polling prevents overlapping or stale updates.
+
+Worker vector mutation is fenced by a per-document Redis lock plus execution-scoped deterministic chunk IDs. Dense and sparse cleanup uses exact `delete_by_ids`, so a stale execution cannot delete or overwrite a newer execution's vectors; legacy messages without `executionId` retain the previous doc-wide behavior for compatibility.
+
+Recovery restore writes restored documents with `COMMITTED` quota reservations, and abandon releases the linked reservations with the `Recovery restore abandoned` reason so restored quota can reconcile with the normal upload-governance ledger.
+
 ## 项目简介
 
 dupi-RAG 是企业级 RAG（检索增强生成）知识库引擎，类似 Dify/扣子底层知识库模块：支持私有文档上传、解析、向量化，并结合大模型进行精准问答。
@@ -128,6 +161,14 @@ API 启动会校验已有 collection schema，但以 `syncLoad=false` 异步请�
 摄入任务携带知识库级 `embeddingModel` / `embeddingDimension`（见 `IngestJobProducer`）；**旧库**若仍为 OpenAI 模型名，向智谱请求会 400。知识库详情响应会标记 `embeddingConfigCurrent`，当库内配置与当前运行配置不一致时返回 `embeddingConfigWarning`，用户可通过 `POST /api/v1/knowledge-bases/{kbId}/reindex` 将旧库按当前运行配置重建索引。Milvus collection 级别的维度不一致属于启动前置错误：需要删除/重建 collection，或把 `MILVUS_COLLECTION` 指向与当前 embedding 维度匹配的新集合。
 
 公共知识库、文档、检索与会话入口使用 `X-Dupi-Tenant-Id` 进行租户隔离，未传时默认为 `default`；租户 ID 仅允许安全字符，防止路径/注入类输入。登录用户的 token 租户优先于请求头租户。账号可通过 `knowledgeBaseIds` 限定可访问知识库范围，文档、会话和清理任务等实例级操作会先解析实例归属的 kbId，再执行资源级授权。Worker 回调、摄入补偿、internal chunks 拉取等内部路径使用系统级查询，不受请求租户头误伤。
+
+## V1.4 Application Recovery
+
+PostgreSQL owns archive/job/item state and the `READY`/`RESTORING` visibility boundary. A dedicated private MinIO bucket owns canonical archive objects. Milvus dense and active sparse collections are exported as deterministic paged NDJSON. The Worker provisions a sparse target through its existing backfill boundary.
+
+Archive flow: acquire the KB maintenance boundary, wait for ingest/evaluation/sparse migration activity to quiesce, capture deterministic records and original objects, page vectors, verify every item, then write `manifest.json` last. Restore flow: validate before allocating one target, deterministically remap identifiers, restore idempotently, verify counts/schema/model/dimension/payload checksums, then change the target to `READY`.
+
+The V1.2 JSON export remains a metadata migration format. It does not contain original object bytes or complete vector evidence and is not a disaster-recovery archive.
 
 ## Web 与 CORS
 

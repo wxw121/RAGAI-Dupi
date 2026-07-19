@@ -9,6 +9,7 @@ import com.dupi.rag.dto.AccountUpsertRequest;
 import com.dupi.rag.dto.AuditAlertResponse;
 import com.dupi.rag.dto.AuditLogQuery;
 import com.dupi.rag.dto.AuditLogResponse;
+import com.dupi.rag.dto.GovernanceSummaryResponse;
 import com.dupi.rag.dto.OpsGuardrailsResponse;
 import com.dupi.rag.dto.OpsMetadataResponse;
 import com.dupi.rag.dto.OpsNotificationResponse;
@@ -19,6 +20,7 @@ import com.dupi.rag.dto.VectorCleanupTaskResponse;
 import jakarta.validation.Valid;
 import com.dupi.rag.service.AccountService;
 import com.dupi.rag.service.AuditLogService;
+import com.dupi.rag.service.GovernanceOpsService;
 import com.dupi.rag.service.IngestJobService;
 import com.dupi.rag.service.OpsNotificationService;
 import com.dupi.rag.service.RoleService;
@@ -54,6 +56,7 @@ public class OpsController {
     private final AuditProperties auditProperties;
     private final MultipartProperties multipartProperties;
     private final OpsNotificationService opsNotificationService;
+    private final GovernanceOpsService governanceOpsService;
 
     @GetMapping("/vector-cleanup-tasks")
     public List<VectorCleanupTaskResponse> listVectorCleanupTasks() {
@@ -99,6 +102,11 @@ public class OpsController {
         alerts.addAll(ingestJobService.summarizeAlerts());
         alerts.addAll(vectorCleanupTaskService.summarizeAlerts());
         return alerts;
+    }
+
+    @GetMapping("/governance-summary")
+    public GovernanceSummaryResponse governanceSummary() {
+        return governanceOpsService.summarize();
     }
 
     @PostMapping("/audit-alerts/notify")

@@ -16,6 +16,7 @@ import {
   reindexKnowledgeBase,
   rotateAccountToken,
   retryIngestJob,
+  cancelIngestJob,
   retryVectorCleanupTask,
   updateAccount,
   disableAccount,
@@ -233,5 +234,13 @@ describe('resource API wrappers', () => {
     expect(apiClient.apiPost).toHaveBeenNthCalledWith(2, '/api/v1/knowledge-bases/kb/chat-sessions/batch-delete', {
       sessionIds: ['s1', 's2'],
     })
+  })
+
+  it('builds ingest cancel API path', async () => {
+    apiClient.apiPost.mockResolvedValue({ id: 'job1', status: 'CANCEL_REQUESTED' })
+
+    await expect(cancelIngestJob('kb', 'job1')).resolves.toMatchObject({ status: 'CANCEL_REQUESTED' })
+
+    expect(apiClient.apiPost).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb/ingest-jobs/job1/cancel')
   })
 })

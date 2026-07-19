@@ -29,6 +29,7 @@ public class RoleService {
             "KB_READ",
             "KB_WRITE",
             "KB_DELETE",
+            "KB_RECOVERY",
             "DOCUMENT_UPLOAD",
             "DOCUMENT_DELETE",
             "CHAT_WRITE",
@@ -37,6 +38,10 @@ public class RoleService {
     );
 
     public static final List<PermissionMetadataResponse> DEFAULT_PERMISSION_DETAILS = List.of(
+            permission("KB_RECOVERY", "Knowledge base recovery",
+                    "Create, verify, download, restore, retry, and delete recovery archives.",
+                    List.of("Create recovery archives", "Restore into a new knowledge base", "Retry failed recovery jobs"),
+                    List.of("Cannot overwrite an existing knowledge base", "Cannot access another tenant")),
             permission("*", "超级管理员", "绕过权限点检查，拥有系统内全部操作能力。",
                     List.of("访问和操作全部运维、账号、角色、知识库、文档、会话与维护功能"),
                     List.of("不受知识库范围限制")),

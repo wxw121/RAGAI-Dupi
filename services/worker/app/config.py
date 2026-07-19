@@ -1,4 +1,5 @@
 import os
+import socket
 from dataclasses import dataclass
 
 
@@ -11,6 +12,22 @@ class Settings:
     redis_host: str = os.getenv("REDIS_HOST", "localhost")
     redis_port: int = int(os.getenv("REDIS_PORT", "6379"))
     ingest_queue: str = os.getenv("INGEST_QUEUE", "dupi:ingest:jobs")
+    ingest_processing_queue: str = os.getenv(
+        "INGEST_PROCESSING_QUEUE",
+        f"{os.getenv('INGEST_QUEUE', 'dupi:ingest:jobs')}:processing",
+    )
+    ingest_lease_seconds: int = int(os.getenv("INGEST_LEASE_SECONDS", "60"))
+    ingest_heartbeat_interval_seconds: float = float(
+        os.getenv("INGEST_HEARTBEAT_INTERVAL_SECONDS", "15")
+    )
+    ingest_processing_reap_interval_seconds: float = float(
+        os.getenv("INGEST_PROCESSING_REAP_INTERVAL_SECONDS", "60")
+    )
+    ingest_processing_reap_batch_size: int = int(
+        os.getenv("INGEST_PROCESSING_REAP_BATCH_SIZE", "100")
+    )
+    redis_retry_delay_seconds: float = float(os.getenv("REDIS_RETRY_DELAY_SECONDS", "1"))
+    worker_id: str = os.getenv("WORKER_ID", f"{socket.gethostname()}-{os.getpid()}")
 
     minio_endpoint: str = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
     minio_access_key: str = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
@@ -27,6 +44,8 @@ class Settings:
     combined_child_weight: float = float(os.getenv("COMBINED_CHILD_WEIGHT", "1.0"))
     combined_qa_weight: float = float(os.getenv("COMBINED_QA_WEIGHT", "0.8"))
     rrf_k: int = int(os.getenv("RRF_K", "60"))
+    sparse_dual_write_profile_version: int = int(os.getenv("SPARSE_DUAL_WRITE_PROFILE_VERSION", "0"))
+    allow_legacy_bm25_fallback: bool = os.getenv("ALLOW_LEGACY_BM25_FALLBACK", "false").lower() == "true"
 
     api_base_url: str = os.getenv("API_BASE_URL", "http://localhost:8080")
     dupi_internal_key: str = os.getenv("DUPI_INTERNAL_KEY", "")
@@ -36,6 +55,12 @@ class Settings:
     embedding_model: str = _env("EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
     embedding_dimension: int = int(_env("EMBEDDING_DIMENSION", "OPENAI_EMBEDDING_DIMENSION", "1536"))
     embedding_batch_size: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
+
+    rerank_model: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-base")
+    rerank_warmup_enabled: bool = os.getenv("RERANK_WARMUP_ENABLED", "true").lower() == "true"
+    rerank_cache_dir: str = os.getenv(
+        "SENTENCE_TRANSFORMERS_HOME", os.getenv("HF_HOME", "/models/huggingface")
+    )
 
     worker_host: str = os.getenv("WORKER_HOST", "0.0.0.0")
     worker_port: int = int(os.getenv("WORKER_PORT", "8000"))

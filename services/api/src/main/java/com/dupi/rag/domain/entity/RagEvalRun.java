@@ -1,6 +1,7 @@
 package com.dupi.rag.domain.entity;
 
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
+import com.dupi.rag.domain.enums.RagQualityGateStatus;
 import com.dupi.rag.domain.enums.RetrievalProfile;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -68,6 +69,28 @@ public class RagEvalRun {
 
     @Column(name = "failure_message", columnDefinition = "TEXT")
     private String failureMessage;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "gate_status")
+    private RagQualityGateStatus gateStatus;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(nullable = false, columnDefinition = "jsonb")
+    @Builder.Default
+    private Map<String, Object> metrics = Map.of();
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "profile_snapshot", nullable = false, columnDefinition = "jsonb")
+    @Builder.Default
+    private Map<String, Object> profileSnapshot = Map.of();
+
+    @Column(name = "baseline_run_id")
+    private UUID baselineRunId;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "policy_snapshot", nullable = false, columnDefinition = "jsonb")
+    @Builder.Default
+    private Map<String, Object> policySnapshot = Map.of();
 
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;

@@ -216,10 +216,28 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
         if (uri.startsWith("/api/v1/ops/")) {
             return List.of("OPS_ADMIN");
         }
+        if (uri.contains("/recovery/")) {
+            return List.of("KB_RECOVERY", "KB_READ");
+        }
         if ("POST".equalsIgnoreCase(method) && "/api/v1/knowledge-bases/import".equals(uri)) {
             return List.of("KB_WRITE");
         }
+        if (uri.contains("/retrieval-profiles")) {
+            if ("POST".equalsIgnoreCase(method)
+                    && (uri.endsWith("/activate") || uri.endsWith("/rollback"))) {
+                return List.of("OPS_ADMIN", "KB_READ");
+            }
+            if ("POST".equalsIgnoreCase(method)) {
+                return List.of("KB_WRITE");
+            }
+        }
+        if (uri.contains("/sparse-migrations") && "POST".equalsIgnoreCase(method)) {
+            return List.of("OPS_ADMIN", "KB_READ");
+        }
         if (uri.contains("/rag-eval/")) {
+            if ("POST".equalsIgnoreCase(method) && uri.endsWith("/baseline")) {
+                return List.of("OPS_ADMIN", "KB_READ");
+            }
             if ("POST".equalsIgnoreCase(method) && uri.endsWith("/runs")) {
                 return List.of("MAINTENANCE", "KB_READ");
             }
@@ -241,11 +259,17 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
         if ("POST".equalsIgnoreCase(method) && uri.matches(".*/ingest-jobs/[^/]+/retry$")) {
             return List.of("MAINTENANCE");
         }
+        if ("POST".equalsIgnoreCase(method) && uri.matches(".*/ingest-jobs/[^/]+/cancel$")) {
+            return List.of("DOCUMENT_UPLOAD");
+        }
         if ("POST".equalsIgnoreCase(method) && uri.endsWith("/reindex")) {
             return List.of("MAINTENANCE");
         }
         if ("PATCH".equalsIgnoreCase(method) && uri.endsWith("/retrieval-profile")) {
             return List.of("MAINTENANCE");
+        }
+        if ("GET".equalsIgnoreCase(method) && "/api/v1/upload-quota".equals(uri)) {
+            return List.of("DOCUMENT_UPLOAD");
         }
         if ("POST".equalsIgnoreCase(method) && uri.contains("/documents")) {
             return List.of("DOCUMENT_UPLOAD");

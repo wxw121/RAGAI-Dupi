@@ -152,6 +152,10 @@ public class VectorCleanupTaskService {
         }
         try {
             switch (task.getTargetType()) {
+                case KNOWLEDGE_BASE ->
+                        milvusVectorService.deleteLegacyByKbIdForCleanup(task.getTargetId());
+                case DOCUMENT ->
+                        milvusVectorService.deleteLegacyByDocIdForCleanup(task.getTargetId());
                 case PROFILE_KNOWLEDGE_BASE ->
                         milvusVectorService.deleteProfileByKbIdForCleanup(task.getTargetId());
                 case PROFILE_DOCUMENT ->
@@ -186,7 +190,8 @@ public class VectorCleanupTaskService {
         if (SecurityContext.hasPermission("*") || SecurityContext.getPrincipal() == null) {
             return true;
         }
-        if (task.getTargetType() == VectorCleanupTargetType.PROFILE_KNOWLEDGE_BASE
+        if (task.getTargetType() == VectorCleanupTargetType.KNOWLEDGE_BASE
+                || task.getTargetType() == VectorCleanupTargetType.PROFILE_KNOWLEDGE_BASE
                 || task.getTargetType() == VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE) {
             return SecurityContext.canAccessKnowledgeBase(task.getTargetId().toString());
         }

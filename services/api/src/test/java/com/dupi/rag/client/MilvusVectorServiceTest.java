@@ -281,6 +281,28 @@ class MilvusVectorServiceTest {
     }
 
     @Test
+    void sparseDeletesTargetEveryVersionedKnowledgeBaseCollection() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        when(client.delete(any(DeleteParam.class))).thenReturn(R.success());
+        UUID kbId = UUID.fromString("12345678-1234-1234-1234-123456789abc");
+        UUID docId = UUID.randomUUID();
+
+        service(client).deleteSparseByDocId(kbId, docId, List.of(1, 3));
+        service(client).deleteSparseByKbId(kbId, List.of(1, 3));
+
+        ArgumentCaptor<DeleteParam> deletes = ArgumentCaptor.forClass(DeleteParam.class);
+        verify(client, times(4)).delete(deletes.capture());
+        assertThat(deletes.getAllValues()).extracting(DeleteParam::getCollectionName)
+                .containsExactly("chunks_sparse_12345678123412341234123456789abc_v1",
+                        "chunks_sparse_12345678123412341234123456789abc_v3",
+                        "chunks_sparse_12345678123412341234123456789abc_v1",
+                        "chunks_sparse_12345678123412341234123456789abc_v3");
+        assertThat(deletes.getAllValues()).extracting(DeleteParam::getExpr)
+                .containsExactly("doc_id == \"" + docId + "\"", "doc_id == \"" + docId + "\"",
+                        "kb_id == \"" + kbId + "\"", "kb_id == \"" + kbId + "\"");
+    }
+
+    @Test
     void cleanupDeleteThrowsWhenMilvusDeleteFails() {
         MilvusServiceClient client = mock(MilvusServiceClient.class);
         when(client.delete(any(DeleteParam.class)))

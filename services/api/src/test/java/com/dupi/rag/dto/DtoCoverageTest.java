@@ -24,6 +24,61 @@ import static org.assertj.core.api.Assertions.assertThat;
 class DtoCoverageTest {
 
     @Test
+    void uploadQuotaResponseExposesAllFieldsAndValueSemantics() {
+        Instant retryAfter = Instant.parse("2026-07-18T01:00:00Z");
+        UploadQuotaResponse first = UploadQuotaResponse.builder()
+                .tenantId("tenant-a")
+                .userId("alice")
+                .retainedBytesUsed(10L)
+                .retainedBytesLimit(100L)
+                .retainedDocumentsUsed(2L)
+                .retainedDocumentsLimit(10L)
+                .windowBytesUsed(20L)
+                .windowBytesLimit(200L)
+                .windowSeconds(60L)
+                .retryAfter(retryAfter)
+                .build();
+        UploadQuotaResponse second = UploadQuotaResponse.builder()
+                .tenantId("tenant-a")
+                .userId("alice")
+                .retainedBytesUsed(10L)
+                .retainedBytesLimit(100L)
+                .retainedDocumentsUsed(2L)
+                .retainedDocumentsLimit(10L)
+                .windowBytesUsed(20L)
+                .windowBytesLimit(200L)
+                .windowSeconds(60L)
+                .retryAfter(retryAfter)
+                .build();
+
+        assertThat(first.getTenantId()).isEqualTo("tenant-a");
+        assertThat(first.getUserId()).isEqualTo("alice");
+        assertThat(first.getRetainedBytesUsed()).isEqualTo(10L);
+        assertThat(first.getRetainedBytesLimit()).isEqualTo(100L);
+        assertThat(first.getRetainedDocumentsUsed()).isEqualTo(2L);
+        assertThat(first.getRetainedDocumentsLimit()).isEqualTo(10L);
+        assertThat(first.getWindowBytesUsed()).isEqualTo(20L);
+        assertThat(first.getWindowBytesLimit()).isEqualTo(200L);
+        assertThat(first.getWindowSeconds()).isEqualTo(60L);
+        assertThat(first.getRetryAfter()).isEqualTo(retryAfter);
+        assertThat(first).isEqualTo(second);
+        assertThat(first.hashCode()).isEqualTo(second.hashCode());
+        assertThat(first.toString()).contains("tenant-a", "retainedBytesLimit=100");
+
+        second.setTenantId("tenant-b");
+        second.setUserId("bob");
+        second.setRetainedBytesUsed(11L);
+        second.setRetainedBytesLimit(101L);
+        second.setRetainedDocumentsUsed(3L);
+        second.setRetainedDocumentsLimit(11L);
+        second.setWindowBytesUsed(21L);
+        second.setWindowBytesLimit(201L);
+        second.setWindowSeconds(61L);
+        second.setRetryAfter(null);
+        assertThat(second).isNotEqualTo(first);
+    }
+
+    @Test
     void responseDtosExposeAllBuilderFields() {
         UUID id = UUID.randomUUID();
         Instant now = Instant.now();

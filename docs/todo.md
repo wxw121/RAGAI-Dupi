@@ -1,5 +1,47 @@
 # 待办清单
 
+## V1.4.2 governance ops stabilization
+
+- [x] Add read-only GET /api/v1/ops/governance-summary for OPS_ADMIN operators.
+- [x] Aggregate upload quota, ingest jobs, ingest outbox, failure notifications, vector cleanup, and existing alerts.
+- [x] Add smoke script scripts/smoke-governance-summary.ps1 and Pester test coverage.
+- [x] Ignore local .npm-cache artifacts.
+- [x] Document the Node 16 local Web validation constraint: use npm scripts so services/web/scripts/node16-webcrypto.cjs loads; do not run raw vite or vitest.
+- [ ] Run the full V1.4.2 gate before any merge, tag, or release claim.
+
+## V1.4.1 upload governance
+
+- [x] Persist tenant/user retained byte, document, and rolling-window upload quota.
+- [x] Add per-file idempotency reservations, replay, conflict, quota, and payload-size responses.
+- [x] Add execution IDs, claim/lease state, cancellation, callback sequence guards, and terminal immutability.
+- [x] Move Worker consumption through a processing list and add cancellation cleanup checkpoints.
+- [x] Persist deduplicated FAILED/DEAD_LETTER notification events with webhook dispatch/retry/exhaustion and without notifying on cancellation.
+- [x] Replace the Web batch workflow with bounded per-file upload, quota, abort/retry, ingest cancel, and serialized polling.
+- [x] Align API/Web versions and synchronize the release documentation.
+- [x] Pass the complete API/Worker/Web/Pester/Compose/release-scan gate, then create the local V1.4.1 release commit and tag.
+
+## V1.3 release closure
+
+## V1.4.0 verifiable recovery
+
+- [x] Persist archive/restore state and hide `RESTORING` targets.
+- [x] Capture and verify records, objects, dense vectors, sparse vectors, and sealed manifests.
+- [x] Restore idempotently into one hidden target with retry and abandon.
+- [x] Add `KB_RECOVERY`, audit events, bounded execution, scoped API, and Recovery UI.
+- [x] Add Pester policy gates and deterministic Recovery browser flow.
+- [x] Retain a real `artifacts/v1.4-recovery/rehearsal.json` with two fixtures, 9 items / 10,946 bytes, object/vector checksums, restored record counts, retrieval equivalence, corruption blocking, and scoped cleanup.
+- [x] Run the credentialed Playwright gate against the full Compose stack (`1 passed`).
+- [x] Inject canonical-object corruption and retain a rehearsal artifact with `corruptionBlocked=true` before closing V1.4.0.
+- [x] Pass the dependency/SBOM/license/CVE/image-size scan with the non-root CPU Worker image and dated structured exceptions.
+- [x] Start V1.4.1 upload quotas, cancellation, and notification after V1.4.0 closes.
+
+- [x] Milvus Sparse 回填、双写、Shadow、Cutover、Rollback 和删除同步。
+- [x] 质量策略、baseline 和 Retrieval Profile 控制台。
+- [x] 真实 Milvus 2.5.4 迁移演练和真实浏览器 E2E。
+- [x] CPU reranker 镜像和带非空 `rerankRank` 的最终 benchmark artifact。
+- [x] API JaCoCo 行覆盖率达到项目 95% 门禁，未降低阈值。
+- [x] 在同一最终 diff 上重跑 API/Worker/Web/build/benchmark/E2E 全部门禁。
+
 ## 进行中
 
 （无）
@@ -7,7 +49,7 @@
 ## 待办
 
 - [ ] 生产级鉴权增强：SSO/OIDC、外部身份源同步、密钥轮换审批流
-- [ ] 上传保护升级：按租户/用户配额、上传取消与告警
+- [x] 上传保护升级：按租户/用户配额、上传取消与告警
 - [ ] 运维面板增强：任务高级筛选、邮件/IM 等更多通知渠道与审计归档对接
 - [ ] 完整灾备恢复：MinIO 原始二进制、文档主记录与 Milvus 向量的一致性导入/校验
 - [ ] Milvus BM25 sparse 字段生产调优与索引参数压测
@@ -78,3 +120,12 @@
 - [x] M3：健康检查、重试、结构化日志 — 2026-06-19
 - [x] V2 骨架：混合检索、Rerank、语义分块、Excel、生成中断 — 2026-06-19
 - [x] Docker Compose 本地全栈启动（含镜像加速、pip 镜像、依赖修复） — 2026-06-19
+# V1.3 正式发布前
+
+- [x] 30 条、六分类 RAG 基准清单与发布门禁自动化 — 2026-07-15
+- [x] Rerank 启动预热、持久化模型缓存和健康状态 — 2026-07-15
+- [x] PostgreSQL、etcd、MinIO、Milvus 备份/升级/Cutover/Rollback 演练脚本 — 2026-07-15
+- [x] PyTorch、sentence-transformers 和 Worker 镜像的 CVE/许可证/体积扫描门禁 — 2026-07-15
+- [x] Sparse Migration Web 运维页面与受保护 Cutover — 2026-07-15
+- [ ] 在生产同规格环境执行 30 Case 基准、完整供应链扫描和升级/回滚演练，并归档脱敏报告
+- [ ] 基于真实业务查询将基准从 30 条扩展到 100 条

@@ -1,6 +1,7 @@
 package com.dupi.rag.dto;
 
 import com.dupi.rag.domain.enums.RetrievalProfile;
+import com.dupi.rag.domain.enums.RagEvalComparisonStatus;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -33,4 +34,12 @@ public class RagEvalRunResultResponse {
     private String embeddingModel;
     private Integer embeddingDimension;
     private Integer topK;
+    private Integer matchedRank;
+    private Integer vectorRank;
+    private Integer sparseRank;
+    private Integer fusionRank;
+    private Integer rerankRank;
+    private String caseFingerprint;
+    private RagEvalComparisonStatus comparisonStatus;
+    private Long latencyMs;
 }

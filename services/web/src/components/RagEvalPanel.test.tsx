@@ -10,6 +10,9 @@ const api = vi.hoisted(() => ({
   deleteRagEvalCase: vi.fn(),
   listRagEvalRuns: vi.fn(),
   runRagEval: vi.fn(),
+  getRagQualityPolicy: vi.fn(),
+  updateRagQualityPolicy: vi.fn(),
+  promoteRagEvalBaseline: vi.fn(),
 }))
 
 vi.mock('@/api/knowledgeBase', () => api)
@@ -35,6 +38,10 @@ describe('RagEvalPanel', () => {
   })
 
   it('manages persisted cases and renders run history', async () => {
+    api.getRagQualityPolicy.mockResolvedValue({
+      id: 'policy-1', kbId: 'kb-1', minimumPassRate: 80, maximumPassRateDrop: 5,
+      maximumNewFailures: 0, blockWhenUnbaselined: true, baselineRunId: null,
+    })
     api.listRagEvalCases.mockResolvedValue([
       {
         id: 'case-id-1',
@@ -257,7 +264,7 @@ describe('RagEvalPanel', () => {
     expect(container.textContent).toContain('PARENT_CHILD BLOCKED')
     expect(container.textContent).toContain('Hit 66.7%')
     expect(container.textContent).toContain('Citation 50.0%')
-    expect(container.textContent).toContain('? -33.3%')
+    expect(container.textContent).toContain('Hit delta -33.3%')
     expect(container.textContent).toContain('hit_rate_regressed')
   })
 

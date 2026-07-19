@@ -1,6 +1,6 @@
-export type RetrievalProfile = 'CLASSIC' | 'PARENT_CHILD' | 'QA_ASSISTED' | 'COMBINED'
+export type RetrievalIndexMode = 'CLASSIC' | 'PARENT_CHILD' | 'QA_ASSISTED' | 'COMBINED'
 
-export type RagEvalGateStatus =
+export type RagEvalProfileGateStatus =
   | 'PASSED'
   | 'BLOCKED'
   | 'INSUFFICIENT_DATA'
@@ -9,7 +9,7 @@ export type RagEvalGateStatus =
   | 'NOT_EVALUATED'
 
 export interface RagEvalProfileMetrics {
-  profile: RetrievalProfile
+  profile: RetrievalIndexMode
   totalCases: number
   passedCount: number
   hitPassedCount: number
@@ -21,9 +21,9 @@ export interface RagEvalProfileMetrics {
 }
 
 export interface RagEvalGateDecision {
-  candidate: RetrievalProfile
-  baseline?: RetrievalProfile
-  status: RagEvalGateStatus
+  candidate: RetrievalIndexMode
+  baseline?: RetrievalIndexMode
+  status: RagEvalProfileGateStatus
   reason: string
   metrics?: RagEvalProfileMetrics
   classicMetrics?: RagEvalProfileMetrics
@@ -48,11 +48,11 @@ export interface KnowledgeBase {
   embeddingConfigWarning: string | null
   chunkStrategy: string
   retrievalMode: string
-  retrievalProfile: RetrievalProfile
+  retrievalProfile?: RetrievalIndexMode
   indexSchemaVersion?: number
   profileIndexReady?: boolean
   indexRevision?: number
-  retrievalProfileGateDecisions?: Partial<Record<RetrievalProfile, RagEvalGateDecision>>
+  retrievalProfileGateDecisions?: Partial<Record<RetrievalIndexMode, RagEvalGateDecision>>
   createdAt: string
   updatedAt: string
 }
@@ -64,7 +64,7 @@ export interface CreateKnowledgeBaseRequest {
   chunkOverlap?: number
   topK?: number
   retrievalMode?: 'VECTOR' | 'HYBRID'
-  retrievalProfile?: RetrievalProfile
+  retrievalProfile?: RetrievalIndexMode
 }
 
 export interface Document {
@@ -73,8 +73,9 @@ export interface Document {
   fileName: string
   mimeType: string
   fileSize: number
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED'
+  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
   errorMessage: string | null
+  currentJob?: IngestJob | null
   createdAt: string
   updatedAt: string
 }
@@ -95,11 +96,12 @@ export interface BatchDocumentUploadResponse {
 
 export interface IngestJob {
   id: string
+  executionId?: string | null
   kbId: string
   docId: string
   documentFileName?: string | null
   documentStatus?: Document['status'] | null
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'DEAD_LETTER'
+  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'DEAD_LETTER' | 'CANCEL_REQUESTED' | 'CANCELLED'
   stage: string | null
   retryCount: number
   errorMessage: string | null
@@ -121,6 +123,8 @@ export interface IngestDiagnosis {
 export interface VectorCleanupTask {
   id: string
   targetType:
+    | 'KNOWLEDGE_BASE'
+    | 'DOCUMENT'
     | 'PROFILE_KNOWLEDGE_BASE'
     | 'PROFILE_DOCUMENT'
     | 'LEGACY_KNOWLEDGE_BASE'
@@ -285,7 +289,6 @@ export interface RetrieveRequest {
   query: string
   topK?: number
   useRerank?: boolean
-  retrievalProfile?: RetrievalProfile
 }
 
 export interface RetrieveResponse {
@@ -332,7 +335,7 @@ export interface RagEvalResult {
   matchedFileName: string | null
   matchedToken: string | null
   retrievalMode: string | null
-  retrievalProfile?: RetrievalProfile | null
+  retrievalProfile?: RetrievalIndexMode | null
   fallbackReason: string | null
   embeddingModel: string | null
   embeddingDimension: number | null
@@ -343,20 +346,91 @@ export interface RagEvalRun {
   id: string
   kbId: string
   useRerank: boolean
-  profileSet?: RetrievalProfile[]
+  profileSet?: RetrievalIndexMode[]
   indexRevision?: number | null
-  gateSummary?: Partial<Record<RetrievalProfile, RagEvalGateDecision>>
+  gateSummary?: Partial<Record<RetrievalIndexMode, RagEvalGateDecision>>
   passedCount: number
   totalCount: number
   status: 'RUNNING' | 'COMPLETED' | 'FAILED'
   failureMessage: string | null
   createdAt: string
   results: RagEvalResult[]
+  gateStatus?: 'PASS' | 'WARN' | 'BLOCKED' | 'UNBASELINED'
+  metrics?: Record<string, number>
+  baselineRunId?: string | null
+}
+
+export interface UploadQuota {
+  tenantId: string
+  userId: string
+  retainedBytesUsed: number
+  retainedBytesLimit: number
+  retainedDocumentsUsed: number
+  retainedDocumentsLimit: number
+  windowBytesUsed: number
+  windowBytesLimit: number
+  windowSeconds: number
+  retryAfter: string | null
 }
 
 export interface RagEvalRunRequest {
   useRerank?: boolean
-  profiles?: RetrievalProfile[]
+  profileId?: string
+  profiles?: RetrievalIndexMode[]
+}
+
+export interface RagQualityPolicy {
+  id: string
+  kbId: string
+  minimumPassRate: number
+  maximumPassRateDrop: number
+  maximumNewFailures: number
+  blockWhenUnbaselined: boolean
+  baselineRunId: string | null
+}
+
+export type RagQualityPolicyRequest = Pick<RagQualityPolicy,
+  'minimumPassRate' | 'maximumPassRateDrop' | 'maximumNewFailures' | 'blockWhenUnbaselined'>
+
+export interface RetrievalProfile {
+  id: string
+  kbId: string
+  name: string
+  version: number
+  vectorCandidateCount: number
+  sparseCandidateCount: number
+  rrfConstant: number
+  sparseIndexParams: Record<string, unknown>
+  sparseSearchParams: Record<string, unknown>
+  rerankEnabled: boolean
+  rerankCandidateLimit: number
+  finalTopK: number
+  active: boolean
+  createdAt: string
+}
+
+export type RetrievalProfileRequest = Omit<RetrievalProfile, 'id' | 'kbId' | 'version' | 'active' | 'createdAt'>
+
+export type SparseMigrationState = 'PREPARING' | 'BACKFILLING' | 'DUAL_WRITING' |
+  'SHADOW_VALIDATING' | 'CUTOVER' | 'COMPLETED' | 'FAILED'
+
+export interface SparseMigration {
+  id: string
+  kbId: string
+  profileId: string
+  state: SparseMigrationState
+  sourceChunkCount: number
+  indexedChunkCount: number
+  expectedDimension: number | null
+  actualDimension: number | null
+  baselineP95Ms: number | null
+  candidateP95Ms: number | null
+  baselineFallbackRate: number | null
+  candidateFallbackRate: number | null
+  legacyBm25Enabled: boolean
+  errorMessage: string | null
+  createdAt: string
+  updatedAt: string
 }
 
 export interface DocumentIndexDetail {
@@ -388,7 +462,6 @@ export interface KnowledgeBaseSnapshot {
   embeddingDimension: number
   chunkStrategy: 'RECURSIVE' | 'SEMANTIC' | 'MARKDOWN'
   retrievalMode: 'VECTOR' | 'HYBRID'
-  retrievalProfile?: RetrievalProfile
 }
 
 export interface DocumentSnapshot {
@@ -445,7 +518,6 @@ export interface KnowledgeBaseImport {
     embeddingDimension?: number
     chunkStrategy?: KnowledgeBaseSnapshot['chunkStrategy']
     retrievalMode?: KnowledgeBaseSnapshot['retrievalMode']
-    retrievalProfile?: RetrievalProfile
   }
   evalCases?: RagEvalCaseRequest[]
 }
@@ -506,4 +578,18 @@ export interface ApiError {
   suggestion?: string
   requestId?: string
   timestamp?: string
+}
+
+export type RecoveryArchiveStatus = 'PREPARING' | 'CAPTURING' | 'VERIFYING' | 'COMPLETED' | 'FAILED'
+export type RecoveryRestoreStatus = 'VALIDATING' | 'RESTORING_OBJECTS' | 'RESTORING_RECORDS' |
+  'RESTORING_VECTORS' | 'VERIFYING' | 'COMPLETED' | 'FAILED'
+export interface RecoveryArchive {
+  id: string; sourceKnowledgeBaseId: string; status: RecoveryArchiveStatus; schemaVersion: number
+  itemCount: number; totalBytes: number; manifestChecksum: string | null; errorCode: string | null
+  errorMessage: string | null; createdBy: string; createdAt: string; updatedAt: string
+}
+export interface RecoveryRestore {
+  id: string; archiveId: string; targetKnowledgeBaseId: string | null; status: RecoveryRestoreStatus
+  completedItems: number; totalItems: number; errorCode: string | null; errorMessage: string | null
+  createdBy: string; createdAt: string; updatedAt: string
 }

@@ -1,6 +1,7 @@
 package com.dupi.rag.domain.entity;
 
 import com.dupi.rag.domain.enums.RetrievalProfile;
+import com.dupi.rag.domain.enums.RagEvalComparisonStatus;
 import jakarta.persistence.Column;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
@@ -96,6 +97,32 @@ public class RagEvalRunResult {
 
     @Column(name = "top_k")
     private Integer topK;
+
+    @Column(name = "matched_rank")
+    private Integer matchedRank;
+
+    @Column(name = "vector_rank")
+    private Integer vectorRank;
+
+    @Column(name = "sparse_rank")
+    private Integer sparseRank;
+
+    @Column(name = "fusion_rank")
+    private Integer fusionRank;
+
+    @Column(name = "rerank_rank")
+    private Integer rerankRank;
+
+    @Column(name = "case_fingerprint", length = 128)
+    private String caseFingerprint;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "comparison_status")
+    private RagEvalComparisonStatus comparisonStatus;
+
+    @Column(name = "latency_ms", nullable = false)
+    @Builder.Default
+    private Long latencyMs = 0L;
 
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;

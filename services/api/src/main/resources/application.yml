@@ -33,6 +33,11 @@ dupi:
     access-key: ${MINIO_ACCESS_KEY:minioadmin}
     secret-key: ${MINIO_SECRET_KEY:minioadmin}
     bucket: ${MINIO_BUCKET:dupi-documents}
+  recovery:
+    bucket: ${DUPI_RECOVERY_BUCKET:dupi-recovery}
+    quiescence-timeout-seconds: ${DUPI_RECOVERY_QUIESCENCE_TIMEOUT_SECONDS:300}
+    page-size: ${DUPI_RECOVERY_PAGE_SIZE:500}
+    max-concurrent-jobs: ${DUPI_RECOVERY_MAX_CONCURRENT_JOBS:2}
   milvus:
     host: ${MILVUS_HOST:localhost}
     port: ${MILVUS_PORT:19530}
@@ -46,6 +51,14 @@ dupi:
   ingest:
     recovery-cron: ${INGEST_RECOVERY_CRON:0 */2 * * * *}
     outbox-dispatch-cron: ${INGEST_OUTBOX_DISPATCH_CRON:*/10 * * * * *}
+    notifications:
+      webhook-url: ${INGEST_FAILURE_NOTIFICATION_WEBHOOK_URL:}
+      webhook-secret: ${INGEST_FAILURE_NOTIFICATION_WEBHOOK_SECRET:}
+      timeout-seconds: ${INGEST_FAILURE_NOTIFICATION_TIMEOUT_SECONDS:10}
+      max-attempts: ${INGEST_FAILURE_NOTIFICATION_MAX_ATTEMPTS:5}
+      max-error-message-length: ${INGEST_FAILURE_NOTIFICATION_MAX_ERROR_MESSAGE_LENGTH:512}
+      allow-insecure-webhook: ${INGEST_FAILURE_NOTIFICATION_ALLOW_INSECURE_WEBHOOK:false}
+      dispatch-cron: ${INGEST_FAILURE_NOTIFICATION_DISPATCH_CRON:*/30 * * * * *}
   llm:
     chat:
       base-url: ${CHAT_BASE_URL:${OPENAI_BASE_URL:https://api.deepseek.com}}
@@ -75,6 +88,15 @@ dupi:
     enabled: ${UPLOAD_RATE_LIMIT_ENABLED:true}
     requests: ${UPLOAD_RATE_LIMIT_REQUESTS:20}
     window-seconds: ${UPLOAD_RATE_LIMIT_WINDOW_SECONDS:60}
+  upload-quota:
+    enabled: ${UPLOAD_QUOTA_ENABLED:true}
+    retained-bytes-limit: ${UPLOAD_QUOTA_RETAINED_BYTES_LIMIT:1073741824}
+    retained-documents-limit: ${UPLOAD_QUOTA_RETAINED_DOCUMENTS_LIMIT:1000}
+    window-bytes-limit: ${UPLOAD_QUOTA_WINDOW_BYTES_LIMIT:268435456}
+    window-seconds: ${UPLOAD_QUOTA_WINDOW_SECONDS:3600}
+    attempt-lease-seconds: ${UPLOAD_QUOTA_ATTEMPT_LEASE_SECONDS:300}
+    reconciliation-batch-size: ${UPLOAD_QUOTA_RECONCILIATION_BATCH_SIZE:50}
+    reconciliation-cron: ${UPLOAD_QUOTA_RECONCILIATION_CRON:0 */5 * * * *}
   cleanup:
     orphan-vectors-cron: ${ORPHAN_VECTOR_CLEANUP_CRON:0 30 3 * * *}
   audit:
