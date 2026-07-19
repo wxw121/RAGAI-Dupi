@@ -1,6 +1,6 @@
 # dupi-RAG
 
-> V1.5.0 is the current release candidate. It adds Parent-Child and QA-assisted indexing, a filterable Profile V2 Milvus superset, Combined weighted RRF, revision-bound quality gates, and Web readiness/gate comparisons. API and Web version: `1.5.0`.
+> V1.5.0 is the current release. It adds Parent-Child and QA-assisted indexing, a filterable Profile V2 Milvus superset, Combined weighted RRF, revision-bound quality gates, and Web readiness/gate comparisons. API and Web version: `1.5.0`.
 
 See the [V1.5.0 release notes](docs/v1.5-release-notes.md) and [release runbook](docs/v1.5-release-runbook.md) before upgrading an existing deployment. Keep `CLASSIC` as the default until the current index revision passes the candidate-vs-classic quality gate.
 

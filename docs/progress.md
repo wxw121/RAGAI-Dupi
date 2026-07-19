@@ -6,7 +6,7 @@
 - Added V1.5.0 release notes and `docs/v1.5-release-runbook.md` for Flyway V18-V20, Profile V2 rollout, revision-bound evaluation, activation, monitoring, and rollback.
 - Final local product gates passed on the release diff: API 482/482 with the 95% JaCoCo gate, Worker 96/96, Web 82/82, and the 1,794-module production build.
 - Compose redacted config and the V1.5.0 release scan passed. The scan records image digest `sha256:74043096b1740cad517a78f0792d79ea25a6bed99d17c1d8c96a7af98b05121c`, size 640,310,825 bytes, no Python findings, and 22 exact upstream-unfixed OS exceptions expiring 2026-08-15.
-- The release tag remains blocked until GitHub runs the repository's pinned Pester 4.10.1 contracts and every other CI job on the release commit, then repeats green on merged `main`.
+- Release branch push CI #30 and PR CI #31 passed API, Worker, Web, the repository's pinned Pester 4.10.1 contracts, and Docker Compose. The annotated tag remains blocked until this final documentation commit and merged `main` repeat green.
 
 ## V1.4.2 governance ops stabilization (2026-07-18)
 
