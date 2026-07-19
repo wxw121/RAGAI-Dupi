@@ -2,6 +2,7 @@ package com.dupi.rag.client;
 
 import com.dupi.rag.config.MilvusProperties;
 import com.dupi.rag.config.LlmProperties;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.grpc.CollectionSchema;
 import io.milvus.grpc.DataType;
@@ -35,18 +36,38 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class MilvusVectorService {
 
+    private static final Map<RetrievalProfile, String> PROFILE_FIELDS = Map.of(
+            RetrievalProfile.CLASSIC, "profile_classic",
+            RetrievalProfile.PARENT_CHILD, "profile_parent_child",
+            RetrievalProfile.QA_ASSISTED, "profile_qa_assisted",
+            RetrievalProfile.COMBINED, "profile_combined"
+    );
+    private static final Set<String> ENTRY_KINDS = Set.of("original", "child", "qa");
+
     private final MilvusServiceClient client;
     private final MilvusProperties properties;
     private final LlmProperties llmProperties;
 
     @PostConstruct
+    public void initializeCollections() {
+        ensureCollection();
+        ensureProfileCollection();
+    }
+
     public void ensureCollection() {
-        String collection = properties.getCollection();
+        ensureCollection(properties.getCollection(), false);
+    }
+
+    public void ensureProfileCollection() {
+        ensureCollection(properties.getProfileCollection(), true);
+    }
+
+    private void ensureCollection(String collection, boolean profileSchema) {
         R<Boolean> has = client.hasCollection(HasCollectionParam.newBuilder()
                 .withCollectionName(collection)
                 .build());
         if (Boolean.TRUE.equals(has.getData())) {
-            validateExistingCollectionSchema(collection);
+            validateExistingCollectionSchema(collection, profileSchema);
             client.loadCollection(LoadCollectionParam.newBuilder()
                     .withCollectionName(collection)
                     .withSyncLoad(false)
@@ -76,20 +97,29 @@ public class MilvusVectorService {
                 .withDataType(DataType.VarChar)
                 .withMaxLength(65535)
                 .build();
+        List<FieldType> fields = new ArrayList<>(List.of(chunkId, kbId, docId, content));
+        if (profileSchema) {
+            fields.add(FieldType.newBuilder()
+                    .withName("entry_kind")
+                    .withDataType(DataType.VarChar)
+                    .withMaxLength(32)
+                    .build());
+            fields.add(booleanField("profile_classic"));
+            fields.add(booleanField("profile_parent_child"));
+            fields.add(booleanField("profile_qa_assisted"));
+            fields.add(booleanField("profile_combined"));
+        }
         FieldType vector = FieldType.newBuilder()
                 .withName("embedding")
                 .withDataType(DataType.FloatVector)
                 .withDimension(dim)
                 .build();
+        fields.add(vector);
 
-        CreateCollectionParam create = CreateCollectionParam.newBuilder()
-                .withCollectionName(collection)
-                .addFieldType(chunkId)
-                .addFieldType(kbId)
-                .addFieldType(docId)
-                .addFieldType(content)
-                .addFieldType(vector)
-                .build();
+        CreateCollectionParam.Builder createBuilder = CreateCollectionParam.newBuilder()
+                .withCollectionName(collection);
+        fields.forEach(createBuilder::addFieldType);
+        CreateCollectionParam create = createBuilder.build();
         R<RpcStatus> created = client.createCollection(create);
         if (created.getStatus() != R.Status.Success.getCode()) {
             log.warn("Milvus create collection: {}", created.getMessage());
@@ -110,7 +140,14 @@ public class MilvusVectorService {
         log.info("Milvus collection {} load requested asynchronously", collection);
     }
 
-    private void validateExistingCollectionSchema(String collection) {
+    private FieldType booleanField(String name) {
+        return FieldType.newBuilder()
+                .withName(name)
+                .withDataType(DataType.Bool)
+                .build();
+    }
+
+    private void validateExistingCollectionSchema(String collection, boolean profileSchema) {
         R<DescribeCollectionResponse> described = client.describeCollection(DescribeCollectionParam.newBuilder()
                 .withCollectionName(collection)
                 .build());
@@ -123,6 +160,21 @@ public class MilvusVectorService {
         }
 
         CollectionSchema schema = described.getData().getSchema();
+        if (profileSchema) {
+            Set<String> actualFields = schema.getFieldsList().stream()
+                    .map(FieldSchema::getName)
+                    .collect(Collectors.toSet());
+            Set<String> expectedFields = new LinkedHashSet<>(List.of(
+                    "chunk_id", "kb_id", "doc_id", "content", "entry_kind",
+                    "profile_classic", "profile_parent_child",
+                    "profile_qa_assisted", "profile_combined", "embedding"
+            ));
+            expectedFields.removeAll(actualFields);
+            if (!expectedFields.isEmpty()) {
+                throw new IllegalStateException("Milvus collection schema is missing profile fields: collection="
+                        + collection + " fields=" + expectedFields);
+            }
+        }
         FieldSchema vectorField = schema.getFieldsList().stream()
                 .filter(field -> "embedding".equals(field.getName()))
                 .findFirst()
@@ -158,13 +210,53 @@ public class MilvusVectorService {
     }
 
     public List<SearchResult> search(UUID kbId, List<Float> queryVector, int topK) {
-        ensureSearchableCollection();
+        return searchLegacy(kbId, queryVector, topK);
+    }
+
+    public List<SearchResult> searchLegacy(UUID kbId, List<Float> queryVector, int topK) {
+        return searchCollection(
+                properties.getCollection(),
+                kbId,
+                queryVector,
+                topK,
+                "kb_id == \"" + kbId + "\""
+        );
+    }
+
+    public List<SearchResult> searchProfile(
+            UUID kbId,
+            List<Float> queryVector,
+            int topK,
+            RetrievalProfile profile,
+            String entryKind
+    ) {
+        String profileField = PROFILE_FIELDS.get(profile);
+        if (profileField == null) {
+            throw new IllegalArgumentException("Unsupported retrieval profile: " + profile);
+        }
+        if (entryKind != null && !ENTRY_KINDS.contains(entryKind)) {
+            throw new IllegalArgumentException("Unsupported entry kind: " + entryKind);
+        }
+        String expr = "kb_id == \"" + kbId + "\" and " + profileField + " == true";
+        if (entryKind != null) {
+            expr += " and entry_kind == \"" + entryKind + "\"";
+        }
+        return searchCollection(properties.getProfileCollection(), kbId, queryVector, topK, expr);
+    }
+
+    private List<SearchResult> searchCollection(
+            String collection,
+            UUID kbId,
+            List<Float> queryVector,
+            int topK,
+            String expr
+    ) {
+        ensureSearchableCollection(collection);
 
         List<String> outputFields = List.of("chunk_id", "doc_id", "content");
-        String expr = "kb_id == \"" + kbId + "\"";
 
         SearchParam param = SearchParam.newBuilder()
-                .withCollectionName(properties.getCollection())
+                .withCollectionName(collection)
                 .withMetricType(MetricType.COSINE)
                 .withTopK(topK)
                 .withVectors(List.of(queryVector))
@@ -201,8 +293,7 @@ public class MilvusVectorService {
         return results;
     }
 
-    private void ensureSearchableCollection() {
-        String collection = properties.getCollection();
+    private void ensureSearchableCollection(String collection) {
         R<GetLoadStateResponse> loadState = client.getLoadState(GetLoadStateParam.newBuilder()
                 .withCollectionName(collection)
                 .build());

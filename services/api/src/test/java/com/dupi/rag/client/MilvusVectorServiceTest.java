@@ -2,6 +2,7 @@ package com.dupi.rag.client;
 
 import com.dupi.rag.config.LlmProperties;
 import com.dupi.rag.config.MilvusProperties;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.grpc.CollectionSchema;
 import io.milvus.grpc.DataType;
@@ -58,6 +59,65 @@ class MilvusVectorServiceTest {
         verify(client).createCollection(any(CreateCollectionParam.class));
         verify(client).createIndex(any());
         verify(client).loadCollection(any());
+    }
+
+    @Test
+    void ensureProfileCollectionCreatesFilterableSupersetSchema() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        when(client.hasCollection(any())).thenReturn(R.success(false));
+        when(client.createCollection(any(CreateCollectionParam.class))).thenReturn(R.success());
+
+        service(client).ensureProfileCollection();
+
+        ArgumentCaptor<CreateCollectionParam> create = ArgumentCaptor.forClass(CreateCollectionParam.class);
+        verify(client).createCollection(create.capture());
+        assertThat(create.getValue().getCollectionName()).isEqualTo("chunks_profiles_v2");
+        assertThat(create.getValue().getFieldTypes()).extracting(field -> field.getName())
+                .containsExactly(
+                        "chunk_id",
+                        "kb_id",
+                        "doc_id",
+                        "content",
+                        "entry_kind",
+                        "profile_classic",
+                        "profile_parent_child",
+                        "profile_qa_assisted",
+                        "profile_combined",
+                        "embedding"
+                );
+    }
+
+    @Test
+    void searchProfileBuildsOnlyWhitelistedCollectionAndExpression() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        when(client.getLoadState(any(GetLoadStateParam.class)))
+                .thenReturn(R.success(loadState(LoadState.LoadStateLoaded)));
+        when(client.search(any(SearchParam.class)))
+                .thenReturn(R.failed(R.Status.Unknown, "boom"));
+        UUID kbId = UUID.randomUUID();
+        MilvusVectorService service = service(client);
+
+        assertThatThrownBy(() -> service.searchProfile(
+                kbId,
+                List.of(0.1f),
+                3,
+                RetrievalProfile.COMBINED,
+                "qa"
+        )).isInstanceOf(IllegalStateException.class);
+
+        ArgumentCaptor<SearchParam> search = ArgumentCaptor.forClass(SearchParam.class);
+        verify(client).search(search.capture());
+        assertThat(search.getValue().getCollectionName()).isEqualTo("chunks_profiles_v2");
+        assertThat(search.getValue().getExpr()).isEqualTo(
+                "kb_id == \"" + kbId + "\" and profile_combined == true and entry_kind == \"qa\""
+        );
+        assertThatThrownBy(() -> service.searchProfile(
+                kbId,
+                List.of(0.1f),
+                3,
+                RetrievalProfile.COMBINED,
+                "qa or true"
+        )).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

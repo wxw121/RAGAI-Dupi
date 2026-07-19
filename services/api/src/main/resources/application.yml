@@ -59,6 +59,9 @@ dupi:
   rag:
     default-top-k: 5
     max-context-chars: 12000
+    combined-child-weight: ${COMBINED_CHILD_WEIGHT:1.0}
+    combined-qa-weight: ${COMBINED_QA_WEIGHT:0.8}
+    rrf-k: ${RRF_K:60}
   worker:
     base-url: ${WORKER_BASE_URL:http://localhost:8000}
   security:

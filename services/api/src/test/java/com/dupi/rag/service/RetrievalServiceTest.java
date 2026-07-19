@@ -10,6 +10,7 @@ import com.dupi.rag.domain.enums.RetrievalMode;
 import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
+import com.dupi.rag.exception.RetrievalProfileConflictException;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import org.junit.jupiter.api.Test;
@@ -45,6 +46,7 @@ class RetrievalServiceTest {
     @Mock MilvusVectorService milvusVectorService;
     @Mock ChunkRepository chunkRepository;
     @Mock DocumentRepository documentRepository;
+    @Mock ProfileIndexStateService profileIndexStateService;
 
     RetrievalService service(RagProperties properties) {
         return service(properties, WebClient.builder());
@@ -58,8 +60,31 @@ class RetrievalServiceTest {
                 chunkRepository,
                 documentRepository,
                 properties,
-                builder
+                builder,
+                profileIndexStateService,
+                new WeightedRrfFusion()
         );
+    }
+
+    @Test
+    void nonClassicProfileRequiresReadyV2Index() {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(5)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .retrievalProfile(RetrievalProfile.PARENT_CHILD)
+                .build();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(false);
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("query");
+
+        assertThatThrownBy(() -> service(new RagProperties()).retrieve(kbId, request))
+                .isInstanceOf(RetrievalProfileConflictException.class)
+                .hasMessageContaining("not ready");
+        verifyNoInteractions(llmClient, milvusVectorService);
     }
 
     @Test
@@ -79,7 +104,9 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("hello", "embed")).thenReturn(List.of(0.1f, 0.2f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(5)))
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.PARENT_CHILD), eq("child")))
                 .thenReturn(List.of(new MilvusVectorService.SearchResult(chunkId.toString(), docId.toString(), "chunk", 0.9)));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findById(chunkId)).thenReturn(Optional.empty());
@@ -110,7 +137,9 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("child query", "embed")).thenReturn(List.of(0.1f, 0.2f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(5)))
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.PARENT_CHILD), eq("child")))
                 .thenReturn(List.of(new MilvusVectorService.SearchResult(childId.toString(), docId.toString(), "child snippet", 0.9)));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findById(childId)).thenReturn(Optional.of(Chunk.builder()
@@ -161,7 +190,9 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("child query", "embed")).thenReturn(List.of(0.1f, 0.2f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(5)))
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.PARENT_CHILD), eq("child")))
                 .thenReturn(List.of(new MilvusVectorService.SearchResult(childId.toString(), docId.toString(), "child snippet", 0.9)));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findById(childId)).thenReturn(Optional.of(Chunk.builder()
@@ -209,7 +240,9 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("shared parent", "embed")).thenReturn(List.of(0.1f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(5))).thenReturn(List.of(
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.PARENT_CHILD), eq("child"))).thenReturn(List.of(
                 new MilvusVectorService.SearchResult(
                         firstChildId.toString(), docId.toString(), "first child", 0.9),
                 new MilvusVectorService.SearchResult(
@@ -267,7 +300,9 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("install query", "embed")).thenReturn(List.of(0.1f, 0.2f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(5)))
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.QA_ASSISTED), isNull()))
                 .thenReturn(List.of(new MilvusVectorService.SearchResult(
                         qaId.toString(), docId.toString(), "Question: How?\nAnswer: Use the command.", 0.9)));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
@@ -328,7 +363,12 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("combined query", "embed")).thenReturn(List.of(0.1f, 0.2f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(5)))
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.COMBINED), eq("child")))
+                .thenReturn(List.of());
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.COMBINED), eq("qa")))
                 .thenReturn(List.of(new MilvusVectorService.SearchResult(
                         qaId.toString(), docId.toString(), "Question: Why?\nAnswer: Because.", 0.9)));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
@@ -396,7 +436,9 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("foreign source", "embed")).thenReturn(List.of(0.1f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(5)))
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.QA_ASSISTED), isNull()))
                 .thenReturn(List.of(new MilvusVectorService.SearchResult(
                         qaId.toString(), docId.toString(), "Question: Q?\nAnswer: A.", 0.9)));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
@@ -444,7 +486,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("hello", "embed")).thenReturn(List.of(0.1f, 0.2f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(50)))
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(50)))
                 .thenReturn(List.of(new MilvusVectorService.SearchResult(chunkId.toString(), docId.toString(), "chunk", 0.9)));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findById(chunkId)).thenReturn(Optional.of(Chunk.builder()
@@ -481,7 +523,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("hello", "embed")).thenReturn(List.of(0.1f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(7)))
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(7)))
                 .thenReturn(List.of(new MilvusVectorService.SearchResult(chunkId.toString(), docId.toString(), "chunk", 0.9)));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of());
         when(chunkRepository.findById(chunkId)).thenReturn(Optional.empty());
@@ -512,7 +554,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("asyncio 并发", "embed")).thenReturn(List.of(0.1f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(1)))
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(1)))
                 .thenThrow(new IllegalStateException("Milvus collection is not ready for search"));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
@@ -565,7 +607,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("本地兜底检索", "embed")).thenReturn(List.of(0.1f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(1)))
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(1)))
                 .thenThrow(new IllegalStateException("Milvus search failed: fail to search on QueryNode 7: Timestamp lag too large"));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
@@ -656,7 +698,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("虚拟环境怎么创建", "embed")).thenReturn(List.of(0.1f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(3)))
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(3)))
                 .thenThrow(new IllegalStateException("Milvus collection is not ready for search"));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
@@ -706,7 +748,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("这个知识库讲了什么", "embed")).thenReturn(List.of(0.1f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(2)))
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(2)))
                 .thenThrow(new IllegalStateException("Milvus collection is not ready for search"));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
@@ -755,7 +797,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("hello", "embed")).thenReturn(List.of(0.1f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(1)))
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(1)))
                 .thenReturn(List.of(new MilvusVectorService.SearchResult(chunkId.toString(), docId.toString(), "chunk", 0.9)));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findById(chunkId)).thenReturn(Optional.empty());
@@ -766,7 +808,7 @@ class RetrievalServiceTest {
         var response = service(rag).retrieve(kbId, request);
 
         assertThat(response.getHits()).hasSize(1);
-        verify(milvusVectorService).search(eq(kbId), anyList(), eq(1));
+        verify(milvusVectorService).searchLegacy(eq(kbId), anyList(), eq(1));
     }
 
     @Test

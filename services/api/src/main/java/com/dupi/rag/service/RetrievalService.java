@@ -11,6 +11,7 @@ import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.dto.RetrieveResponse;
+import com.dupi.rag.exception.RetrievalProfileConflictException;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import lombok.RequiredArgsConstructor;
@@ -58,6 +59,8 @@ public class RetrievalService {
     private final DocumentRepository documentRepository;
     private final RagProperties ragProperties;
     private final WebClient.Builder webClientBuilder;
+    private final ProfileIndexStateService profileIndexStateService;
+    private final WeightedRrfFusion weightedRrfFusion;
 
     @Value("${dupi.worker.base-url:http://worker:8000}")
     private String workerBaseUrl;
@@ -66,9 +69,20 @@ public class RetrievalService {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
         int topK = clampTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK());
         RetrievalProfile retrievalProfile = resolveProfile(kb, request);
+        boolean profileIndexReady = profileIndexStateService.isV2Ready(kbId);
+        if (!profileIndexReady && retrievalProfile != RetrievalProfile.CLASSIC) {
+            throw RetrievalProfileConflictException.indexNotReady();
+        }
 
         if (kb.getRetrievalMode() == RetrievalMode.HYBRID || Boolean.TRUE.equals(request.getUseRerank())) {
-            return hybridRetrieve(kb, request.getQuery(), topK, Boolean.TRUE.equals(request.getUseRerank()), retrievalProfile);
+            return hybridRetrieve(
+                    kb,
+                    request.getQuery(),
+                    topK,
+                    Boolean.TRUE.equals(request.getUseRerank()),
+                    retrievalProfile,
+                    profileIndexReady
+            );
         }
 
         List<Float> vector;
@@ -79,28 +93,68 @@ public class RetrievalService {
                 throw ex;
             }
             log.warn("Embedding retrieval unavailable; falling back to local chunk text search for kb {}", kbId, ex);
-            return localTextFallbackResponse(kb, request.getQuery(), topK, retrievalProfile, "embedding_unavailable");
+            return localTextFallbackResponse(
+                    kb, request.getQuery(), topK, retrievalProfile, profileIndexReady, "embedding_unavailable");
         }
         try {
-            List<MilvusVectorService.SearchResult> results = milvusVectorService.search(kbId, vector, topK);
+            List<MilvusVectorService.SearchResult> results;
+            Map<String, Object> routeDiagnostics = Map.of();
+            if (!profileIndexReady) {
+                results = milvusVectorService.searchLegacy(kbId, vector, topK);
+            } else if (retrievalProfile == RetrievalProfile.COMBINED) {
+                List<MilvusVectorService.SearchResult> childHits = milvusVectorService.searchProfile(
+                        kbId, vector, topK, retrievalProfile, "child");
+                List<MilvusVectorService.SearchResult> qaHits = milvusVectorService.searchProfile(
+                        kbId, vector, topK, retrievalProfile, "qa");
+                results = weightedRrfFusion.fuse(List.of(
+                        new WeightedRrfFusion.Route(ragProperties.getCombinedChildWeight(), childHits),
+                        new WeightedRrfFusion.Route(ragProperties.getCombinedQaWeight(), qaHits)
+                ), ragProperties.getRrfK());
+                routeDiagnostics = Map.of(
+                        "combinedChildWeight", ragProperties.getCombinedChildWeight(),
+                        "combinedQaWeight", ragProperties.getCombinedQaWeight(),
+                        "rrfK", ragProperties.getRrfK(),
+                        "combinedChildHits", childHits.size(),
+                        "combinedQaHits", qaHits.size()
+                );
+            } else {
+                String entryKind = retrievalProfile == RetrievalProfile.PARENT_CHILD ? "child" : null;
+                results = milvusVectorService.searchProfile(
+                        kbId, vector, topK, retrievalProfile, entryKind);
+            }
             List<RetrievalHit> hits = expandHitsForProfile(kbId, mapHits(kbId, results), retrievalProfile);
+            Map<String, Object> diagnostics = diagnostics(
+                    kb, "vector", retrievalProfile, topK, hits.size(), null);
+            diagnostics.putAll(routeDiagnostics);
             return RetrieveResponse.builder()
                     .query(request.getQuery())
                     .retrievalMode("vector")
                     .hits(hits)
-                    .diagnostics(diagnostics(kb, "vector", retrievalProfile, topK, hits.size(), null))
+                    .diagnostics(diagnostics)
                     .build();
         } catch (IllegalStateException ex) {
             if (!isMilvusUnavailable(ex)) {
                 throw ex;
             }
             log.warn("Milvus vector retrieval unavailable; falling back to local chunk text search for kb {}", kbId, ex);
-            return localTextFallbackResponse(kb, request.getQuery(), topK, retrievalProfile, "milvus_unavailable");
+            return localTextFallbackResponse(
+                    kb, request.getQuery(), topK, retrievalProfile, profileIndexReady, "milvus_unavailable");
         }
     }
 
-    private RetrieveResponse localTextFallbackResponse(KnowledgeBase kb, String query, int topK, RetrievalProfile retrievalProfile, String fallbackReason) {
-        List<RetrievalHit> hits = expandHitsForProfile(kb.getId(), localTextFallback(kb.getId(), query, topK), retrievalProfile);
+    private RetrieveResponse localTextFallbackResponse(
+            KnowledgeBase kb,
+            String query,
+            int topK,
+            RetrievalProfile retrievalProfile,
+            boolean profileIndexReady,
+            String fallbackReason
+    ) {
+        List<RetrievalHit> hits = expandHitsForProfile(
+                kb.getId(),
+                localTextFallback(kb.getId(), query, topK, retrievalProfile, profileIndexReady),
+                retrievalProfile
+        );
         return RetrieveResponse.builder()
                 .query(query)
                 .retrievalMode("local_text_fallback")
@@ -109,13 +163,21 @@ public class RetrievalService {
                 .build();
     }
 
-    private RetrieveResponse hybridRetrieve(KnowledgeBase kb, String query, int topK, boolean useRerank, RetrievalProfile retrievalProfile) {
+    private RetrieveResponse hybridRetrieve(
+            KnowledgeBase kb,
+            String query,
+            int topK,
+            boolean useRerank,
+            RetrievalProfile retrievalProfile,
+            boolean profileIndexReady
+    ) {
         Map<String, Object> body = Map.of(
                 "kb_id", kb.getId().toString(),
                 "query", query,
                 "top_k", topK,
                 "use_rerank", useRerank,
                 "retrieval_profile", retrievalProfile.wireValue(),
+                "profile_index_ready", profileIndexReady,
                 "embedding_model", kb.getEmbeddingModel(),
                 "embedding_dimension", kb.getEmbeddingDimension()
         );
@@ -362,12 +424,20 @@ public class RetrievalService {
         );
     }
 
-    private List<RetrievalHit> localTextFallback(UUID kbId, String query, int topK) {
+    private List<RetrievalHit> localTextFallback(
+            UUID kbId,
+            String query,
+            int topK,
+            RetrievalProfile retrievalProfile,
+            boolean profileIndexReady
+    ) {
         Map<UUID, String> fileNames = documentRepository.findByKbIdOrderByCreatedAtDesc(kbId).stream()
                 .collect(Collectors.toMap(Document::getId, Document::getFileName));
         List<String> terms = tokenizeQuery(query);
 
-        List<Chunk> chunks = chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId);
+        List<Chunk> chunks = chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId).stream()
+                .filter(chunk -> matchesProfile(chunk, retrievalProfile, profileIndexReady))
+                .toList();
         // Milvus 不可用时使用已持久化的 chunk 文本做兜底召回。
         // 中文查询通常没有空格分词，所以 tokenizeQuery 会补充关键词和 bigram，避免问答拿到空上下文。
         List<RetrievalHit> scoredHits = chunks.stream()
@@ -406,6 +476,34 @@ public class RetrievalService {
                         .metadata(chunk.getMetadata() != null ? chunk.getMetadata() : Map.of())
                         .build())
                 .toList();
+    }
+
+    private boolean matchesProfile(
+            Chunk chunk,
+            RetrievalProfile retrievalProfile,
+            boolean profileIndexReady
+    ) {
+        Map<String, Object> metadata = chunk.getMetadata() == null ? Map.of() : chunk.getMetadata();
+        String entryKind = String.valueOf(metadata.getOrDefault(
+                "entry_kind",
+                metadata.getOrDefault("chunk_role", "original")
+        ));
+        if (!profileIndexReady) {
+            return retrievalProfile == RetrievalProfile.CLASSIC
+                    && ("original".equals(entryKind) || "original_chunk".equals(entryKind));
+        }
+        Object rawScope = metadata.get("profile_scope");
+        boolean inScope = rawScope instanceof List<?> scope
+                && scope.stream().map(String::valueOf).anyMatch(retrievalProfile.wireValue()::equals);
+        if (!inScope) {
+            return false;
+        }
+        return switch (retrievalProfile) {
+            case CLASSIC -> "original".equals(entryKind);
+            case PARENT_CHILD -> "child".equals(entryKind);
+            case QA_ASSISTED -> "original".equals(entryKind) || "qa".equals(entryKind);
+            case COMBINED -> "child".equals(entryKind) || "qa".equals(entryKind);
+        };
     }
 
     private boolean isOverviewQuery(String query) {
