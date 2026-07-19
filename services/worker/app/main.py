@@ -23,6 +23,7 @@ class HybridRetrieveRequest(BaseModel):
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = 1536
     retrieval_profile: str = "classic"
+    profile_index_ready: bool = False
 
 
 def normalize_ingest_job(job: dict) -> dict:
@@ -87,6 +88,7 @@ def retrieve_hybrid(req: HybridRetrieveRequest):
         embedding_dimension=req.embedding_dimension,
         use_rerank=req.use_rerank,
         retrieval_profile=req.retrieval_profile,
+        profile_index_ready=req.profile_index_ready,
     )
     return {"query": req.query, "retrieval_mode": "hybrid_rerank" if req.use_rerank else "hybrid", "hits": hits}
 
