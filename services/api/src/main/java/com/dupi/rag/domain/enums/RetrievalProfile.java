@@ -9,4 +9,13 @@ public enum RetrievalProfile {
     public String wireValue() {
         return name().toLowerCase(java.util.Locale.ROOT).replace('_', '-');
     }
+
+    public static RetrievalProfile fromWireValue(String value) {
+        for (RetrievalProfile profile : values()) {
+            if (profile.wireValue().equals(value) || profile.name().equalsIgnoreCase(value)) {
+                return profile;
+            }
+        }
+        throw new IllegalArgumentException("Unsupported retrieval profile: " + value);
+    }
 }

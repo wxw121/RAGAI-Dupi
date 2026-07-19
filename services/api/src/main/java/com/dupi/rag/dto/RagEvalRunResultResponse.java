@@ -20,6 +20,9 @@ public class RagEvalRunResultResponse {
     private String query;
     private boolean passed;
     private List<String> failureReasons;
+    private boolean hitPassed;
+    private boolean citationEligible;
+    private boolean citationPassed;
     private Integer hitCount;
     private String expectedFileName;
     private String matchedFileName;

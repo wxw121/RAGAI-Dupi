@@ -3,10 +3,13 @@ package com.dupi.rag.service;
 import com.dupi.rag.domain.entity.RagEvalCase;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.entity.RagEvalRunResult;
+import com.dupi.rag.domain.enums.RagEvalGateStatus;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
 import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.RagEvalCaseRequest;
 import com.dupi.rag.dto.RagEvalCaseResponse;
+import com.dupi.rag.dto.RagEvalGateDecisionResponse;
+import com.dupi.rag.dto.RagEvalProfileMetricsResponse;
 import com.dupi.rag.dto.RagEvalRunResponse;
 import com.dupi.rag.dto.RagEvalRunResultResponse;
 import com.dupi.rag.dto.RetrievalHit;
@@ -22,6 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -37,6 +41,8 @@ public class RagEvalService {
     private final RagEvalRunRepository runRepository;
     private final RagEvalRunResultRepository resultRepository;
     private final RagEvalCaseCoordinator caseCoordinator;
+    private final ProfileIndexStateService profileIndexStateService;
+    private final RetrievalProfileGateService retrievalProfileGateService;
 
     @Transactional
     public List<RagEvalCaseResponse> listCases(UUID kbId) {
@@ -82,10 +88,12 @@ public class RagEvalService {
     public RagEvalRunResponse run(UUID kbId, boolean useRerank, List<RetrievalProfile> requestedProfiles) {
         List<RagEvalCase> cases = caseCoordinator.loadOrSeed(kbId);
         List<RetrievalProfile> profiles = normalizeProfiles(requestedProfiles);
+        long runRevision = profileIndexStateService.currentRevision(kbId);
         RagEvalRun run = RagEvalRun.builder()
                 .kbId(kbId)
                 .useRerank(useRerank)
                 .profileSet(profiles)
+                .indexRevision(runRevision)
                 .totalCount(cases.size() * profiles.size())
                 .passedCount(0)
                 .status(RagEvalRunStatus.RUNNING)
@@ -102,11 +110,20 @@ public class RagEvalService {
                     results.add(saved == null ? result : saved);
                 }
             }
+            long currentRevision = profileIndexStateService.currentRevision(kbId);
+            boolean indexReady = profileIndexStateService.isV2Ready(kbId);
+            Map<RetrievalProfile, RagEvalGateDecisionResponse> decisions = retrievalProfileGateService.calculate(
+                    results,
+                    runRevision,
+                    currentRevision,
+                    indexReady
+            );
             int passed = (int) results.stream().filter(RagEvalRunResult::isPassed).count();
             run.setPassedCount(passed);
             run.setTotalCount(results.size());
             run.setStatus(RagEvalRunStatus.COMPLETED);
             run.setFailureMessage(null);
+            run.setGateSummary(toGateSummaryMap(decisions));
             run = runRepository.save(run);
             return toRunResponse(run, results);
         } catch (Exception ex) {
@@ -130,7 +147,19 @@ public class RagEvalService {
                 .filter(java.util.Objects::nonNull)
                 .distinct()
                 .toList();
-        return profiles.isEmpty() ? List.of(RetrievalProfile.CLASSIC) : profiles;
+        if (profiles.isEmpty()) {
+            return List.of(RetrievalProfile.CLASSIC);
+        }
+        boolean hasCandidate = profiles.stream().anyMatch(profile -> profile != RetrievalProfile.CLASSIC);
+        if (!hasCandidate) {
+            return List.of(RetrievalProfile.CLASSIC);
+        }
+        List<RetrievalProfile> normalized = new ArrayList<>();
+        normalized.add(RetrievalProfile.CLASSIC);
+        profiles.stream()
+                .filter(profile -> profile != RetrievalProfile.CLASSIC)
+                .forEach(normalized::add);
+        return normalized;
     }
 
     private RagEvalRunResult evaluate(UUID kbId, UUID runId, RagEvalCase evalCase, boolean useRerank, RetrievalProfile retrievalProfile) {
@@ -139,6 +168,9 @@ public class RagEvalService {
         List<RetrievalHit> hits = List.of();
         String matchedFile = null;
         String matchedToken = null;
+        boolean hitPassed = false;
+        boolean citationEligible = hasExpectedFile(evalCase);
+        boolean citationPassed = false;
 
         try {
             RetrieveRequest request = new RetrieveRequest();
@@ -148,10 +180,12 @@ public class RagEvalService {
             request.setRetrievalProfile(retrievalProfile);
             response = retrievalService.retrieve(kbId, request);
             hits = response.getHits() == null ? List.of() : response.getHits();
-            if (hits.size() < safeMinHits(evalCase)) {
+            hitPassed = hits.size() >= safeMinHits(evalCase);
+            if (!hitPassed) {
                 failureReasons.add("expected at least " + safeMinHits(evalCase) + " hits, got " + hits.size());
             }
             matchedFile = matchFile(evalCase, hits, failureReasons);
+            citationPassed = citationEligible && matchedFile != null;
             matchedToken = matchToken(evalCase, hits, failureReasons);
         } catch (Exception ex) {
             failureReasons.add(ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage());
@@ -166,6 +200,9 @@ public class RagEvalService {
                 .caseKey(evalCase.getCaseKey())
                 .query(evalCase.getQuery())
                 .passed(failureReasons.isEmpty())
+                .hitPassed(hitPassed)
+                .citationEligible(citationEligible)
+                .citationPassed(citationPassed)
                 .failureReasons(failureReasons)
                 .hitCount(hits.size())
                 .expectedFileName(evalCase.getExpectedFileName())
@@ -182,7 +219,7 @@ public class RagEvalService {
     }
 
     private String matchFile(RagEvalCase evalCase, List<RetrievalHit> hits, List<String> failureReasons) {
-        if (evalCase.getExpectedFileName() == null || evalCase.getExpectedFileName().isBlank()) {
+        if (!hasExpectedFile(evalCase)) {
             return null;
         }
         return hits.stream()
@@ -234,6 +271,10 @@ public class RagEvalService {
         return evalCase.getMinHits() == null ? 1 : evalCase.getMinHits();
     }
 
+    private boolean hasExpectedFile(RagEvalCase evalCase) {
+        return evalCase.getExpectedFileName() != null && !evalCase.getExpectedFileName().isBlank();
+    }
+
     private RagEvalCase findCase(UUID kbId, UUID caseId) {
         return caseRepository.findByIdAndKbId(caseId, kbId)
                 .orElseThrow(() -> new ResourceNotFoundException("RAG eval case not found: " + caseId));
@@ -280,6 +321,8 @@ public class RagEvalService {
                 .kbId(run.getKbId())
                 .useRerank(Boolean.TRUE.equals(run.getUseRerank()))
                 .profileSet(run.getProfileSet())
+                .indexRevision(run.getIndexRevision())
+                .gateSummary(toGateSummaryResponse(run.getGateSummary()))
                 .passedCount(run.getPassedCount())
                 .totalCount(run.getTotalCount())
                 .status(run.getStatus())
@@ -297,6 +340,9 @@ public class RagEvalService {
                 .query(result.getQuery())
                 .passed(result.isPassed())
                 .failureReasons(result.getFailureReasons())
+                .hitPassed(result.isHitPassed())
+                .citationEligible(result.isCitationEligible())
+                .citationPassed(result.isCitationPassed())
                 .hitCount(result.getHitCount())
                 .expectedFileName(result.getExpectedFileName())
                 .matchedFileName(result.getMatchedFileName())
@@ -308,6 +354,95 @@ public class RagEvalService {
                 .embeddingDimension(result.getEmbeddingDimension())
                 .topK(result.getTopK())
                 .build();
+    }
+
+    private Map<String, Object> toGateSummaryMap(Map<RetrievalProfile, RagEvalGateDecisionResponse> decisions) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        decisions.forEach((profile, decision) -> summary.put(profile.wireValue(), decision));
+        return summary;
+    }
+
+    private Map<RetrievalProfile, RagEvalGateDecisionResponse> toGateSummaryResponse(Map<String, Object> rawSummary) {
+        if (rawSummary == null || rawSummary.isEmpty()) {
+            return Map.of();
+        }
+        Map<RetrievalProfile, RagEvalGateDecisionResponse> summary = new LinkedHashMap<>();
+        rawSummary.forEach((key, value) -> {
+            RetrievalProfile profile = RetrievalProfile.fromWireValue(key);
+            summary.put(profile, toGateDecision(value, profile));
+        });
+        return summary;
+    }
+
+    private RagEvalGateDecisionResponse toGateDecision(Object value, RetrievalProfile fallbackCandidate) {
+        if (value instanceof RagEvalGateDecisionResponse decision) {
+            return decision;
+        }
+        if (!(value instanceof Map<?, ?> map)) {
+            return RagEvalGateDecisionResponse.builder()
+                    .candidate(fallbackCandidate)
+                    .baseline(RetrievalProfile.CLASSIC)
+                    .status(RagEvalGateStatus.NOT_EVALUATED)
+                    .reason("not_evaluated")
+                    .build();
+        }
+        return RagEvalGateDecisionResponse.builder()
+                .candidate(profileValue(map.get("candidate"), fallbackCandidate))
+                .baseline(profileValue(map.get("baseline"), RetrievalProfile.CLASSIC))
+                .status(statusValue(map.get("status")))
+                .reason(stringValue(map.get("reason")))
+                .metrics(metricsValue(map.get("metrics"), fallbackCandidate))
+                .classicMetrics(metricsValue(map.get("classicMetrics"), RetrievalProfile.CLASSIC))
+                .hitRateDelta(doubleValue(map.get("hitRateDelta")))
+                .citationPassRateDelta(doubleValue(map.get("citationPassRateDelta")))
+                .runRevision(longValue(map.get("runRevision")))
+                .currentRevision(longValue(map.get("currentRevision")))
+                .indexReady(Boolean.TRUE.equals(map.get("indexReady")))
+                .build();
+    }
+
+    private RagEvalProfileMetricsResponse metricsValue(Object value, RetrievalProfile fallbackProfile) {
+        if (value instanceof RagEvalProfileMetricsResponse metrics) {
+            return metrics;
+        }
+        if (!(value instanceof Map<?, ?> map)) {
+            return RagEvalProfileMetricsResponse.builder().profile(fallbackProfile).build();
+        }
+        return RagEvalProfileMetricsResponse.builder()
+                .profile(profileValue(map.get("profile"), fallbackProfile))
+                .totalCases(intValue(map.get("totalCases")))
+                .passedCount(intValue(map.get("passedCount")))
+                .hitPassedCount(intValue(map.get("hitPassedCount")))
+                .citationEligibleCount(intValue(map.get("citationEligibleCount")))
+                .citationPassedCount(intValue(map.get("citationPassedCount")))
+                .passRate(doubleValue(map.get("passRate")))
+                .hitRate(doubleValue(map.get("hitRate")))
+                .citationPassRate(doubleValue(map.get("citationPassRate")))
+                .build();
+    }
+
+    private RetrievalProfile profileValue(Object value, RetrievalProfile fallback) {
+        return value == null ? fallback : RetrievalProfile.fromWireValue(String.valueOf(value));
+    }
+
+    private RagEvalGateStatus statusValue(Object value) {
+        return value == null ? RagEvalGateStatus.NOT_EVALUATED : RagEvalGateStatus.valueOf(String.valueOf(value));
+    }
+
+    private String stringValue(Object value) {
+        return value == null ? null : String.valueOf(value);
+    }
+
+    private int intValue(Object value) {
+        return value instanceof Number number ? number.intValue() : 0;
+    }
+
+    private double doubleValue(Object value) {
+        return value instanceof Number number ? number.doubleValue() : 0.0;
+    }
+
+    private Long longValue(Object value) {
+        return value instanceof Number number ? number.longValue() : null;
     }
 
 }

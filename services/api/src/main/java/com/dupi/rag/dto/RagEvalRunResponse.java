@@ -9,6 +9,7 @@ import lombok.NoArgsConstructor;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Data
@@ -20,6 +21,8 @@ public class RagEvalRunResponse {
     private UUID kbId;
     private boolean useRerank;
     private List<RetrievalProfile> profileSet;
+    private Long indexRevision;
+    private Map<RetrievalProfile, RagEvalGateDecisionResponse> gateSummary;
     private Integer passedCount;
     private Integer totalCount;
     private RagEvalRunStatus status;

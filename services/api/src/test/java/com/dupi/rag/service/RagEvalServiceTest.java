@@ -2,8 +2,12 @@ package com.dupi.rag.service;
 
 import com.dupi.rag.domain.entity.RagEvalCase;
 import com.dupi.rag.domain.entity.RagEvalRun;
+import com.dupi.rag.domain.entity.RagEvalRunResult;
+import com.dupi.rag.domain.enums.RagEvalGateStatus;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
 import com.dupi.rag.domain.enums.RetrievalProfile;
+import com.dupi.rag.dto.RagEvalGateDecisionResponse;
+import com.dupi.rag.dto.RagEvalProfileMetricsResponse;
 import com.dupi.rag.dto.RagEvalCaseRequest;
 import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
@@ -43,6 +47,8 @@ class RagEvalServiceTest {
     @Mock RagEvalRunRepository runRepository;
     @Mock RagEvalRunResultRepository resultRepository;
     @Mock RagEvalCaseCoordinator caseCoordinator;
+    @Mock ProfileIndexStateService profileIndexStateService;
+    @Mock RetrievalProfileGateService retrievalProfileGateService;
 
     @Test
     void listCasesSeedsBuiltInCasesWhenKnowledgeBaseHasNoPersistedCases() {
@@ -126,7 +132,7 @@ class RagEvalServiceTest {
 
 
     @Test
-    void runEvaluatesEveryCaseAgainstEveryRequestedProfile() {
+    void runPrependsClassicWhenEvaluatingCandidateProfile() {
         UUID kbId = UUID.randomUUID();
         UUID caseId = UUID.randomUUID();
         UUID runId = UUID.randomUUID();
@@ -161,10 +167,13 @@ class RagEvalServiceTest {
             return run;
         });
 
-        var response = service().run(kbId, false, List.of(RetrievalProfile.CLASSIC, RetrievalProfile.PARENT_CHILD));
+        when(profileIndexStateService.currentRevision(kbId)).thenReturn(11L);
+
+        var response = service().run(kbId, false, List.of(RetrievalProfile.PARENT_CHILD));
 
         assertThat(response.getTotalCount()).isEqualTo(2);
         assertThat(response.getProfileSet()).containsExactly(RetrievalProfile.CLASSIC, RetrievalProfile.PARENT_CHILD);
+        assertThat(response.getIndexRevision()).isEqualTo(11L);
         assertThat(response.getResults()).extracting(result -> result.getRetrievalProfile())
                 .containsExactly(RetrievalProfile.CLASSIC, RetrievalProfile.PARENT_CHILD);
         ArgumentCaptor<RetrieveRequest> requestCaptor = ArgumentCaptor.forClass(RetrieveRequest.class);
@@ -210,17 +219,27 @@ class RagEvalServiceTest {
             run.setId(runId);
             return run;
         });
+        when(profileIndexStateService.currentRevision(kbId)).thenReturn(5L);
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(retrievalProfileGateService.calculate(any(), ArgumentMatchers.eq(5L), ArgumentMatchers.eq(5L), ArgumentMatchers.eq(true)))
+                .thenReturn(Map.of(RetrievalProfile.PARENT_CHILD, gate(RetrievalProfile.PARENT_CHILD)));
 
-        var response = service().run(kbId, true);
+        var response = service().run(kbId, true, List.of(RetrievalProfile.PARENT_CHILD));
 
         assertThat(response.getId()).isEqualTo(runId);
-        assertThat(response.getPassedCount()).isEqualTo(1);
-        assertThat(response.getTotalCount()).isEqualTo(1);
+        assertThat(response.getPassedCount()).isEqualTo(2);
+        assertThat(response.getTotalCount()).isEqualTo(2);
+        assertThat(response.getIndexRevision()).isEqualTo(5L);
+        assertThat(response.getGateSummary().get(RetrievalProfile.PARENT_CHILD).getStatus())
+                .isEqualTo(RagEvalGateStatus.PASSED);
         assertThat(response.getStatus()).isEqualTo(RagEvalRunStatus.COMPLETED);
         assertThat(response.getFailureMessage()).isNull();
         assertThat(savedStatuses).containsExactly(RagEvalRunStatus.RUNNING, RagEvalRunStatus.COMPLETED);
-        assertThat(response.getResults()).singleElement().satisfies(result -> {
+        assertThat(response.getResults()).allSatisfy(result -> {
             assertThat(result.isPassed()).isTrue();
+            assertThat(result.isHitPassed()).isTrue();
+            assertThat(result.isCitationEligible()).isTrue();
+            assertThat(result.isCitationPassed()).isTrue();
             assertThat(result.getMatchedFileName()).isEqualTo("guide.md");
             assertThat(result.getMatchedToken()).isEqualTo("install");
             assertThat(result.getRetrievalMode()).isEqualTo("hybrid_rerank");
@@ -228,9 +247,14 @@ class RagEvalServiceTest {
         });
         ArgumentCaptor<RagEvalRun> runCaptor = ArgumentCaptor.forClass(RagEvalRun.class);
         verify(runRepository, times(2)).save(runCaptor.capture());
-        assertThat(runCaptor.getAllValues().get(1).getPassedCount()).isEqualTo(1);
-        verify(resultRepository).save(argThat(result ->
+        assertThat(runCaptor.getAllValues().get(0).getIndexRevision()).isEqualTo(5L);
+        assertThat(runCaptor.getAllValues().get(1).getPassedCount()).isEqualTo(2);
+        assertThat(runCaptor.getAllValues().get(1).getGateSummary()).containsKey("parent-child");
+        verify(resultRepository, times(2)).save(argThat(result ->
                 result.isPassed()
+                        && result.isHitPassed()
+                        && result.isCitationEligible()
+                        && result.isCitationPassed()
                         && "guide.md".equals(result.getMatchedFileName())
                         && "install".equals(result.getMatchedToken())
         ));
@@ -268,8 +292,34 @@ class RagEvalServiceTest {
                 caseRepository,
                 runRepository,
                 resultRepository,
-                caseCoordinator
+                caseCoordinator,
+                profileIndexStateService,
+                retrievalProfileGateService
         );
+    }
+
+    private static RagEvalGateDecisionResponse gate(RetrievalProfile candidate) {
+        RagEvalProfileMetricsResponse metrics = RagEvalProfileMetricsResponse.builder()
+                .profile(candidate)
+                .totalCases(3)
+                .passedCount(3)
+                .hitPassedCount(3)
+                .citationEligibleCount(3)
+                .citationPassedCount(3)
+                .passRate(1.0)
+                .hitRate(1.0)
+                .citationPassRate(1.0)
+                .build();
+        return RagEvalGateDecisionResponse.builder()
+                .candidate(candidate)
+                .baseline(RetrievalProfile.CLASSIC)
+                .status(RagEvalGateStatus.PASSED)
+                .reason("passed")
+                .metrics(metrics)
+                .classicMetrics(metrics.toBuilder().profile(RetrievalProfile.CLASSIC).build())
+                .hitRateDelta(0.0)
+                .citationPassRateDelta(0.0)
+                .build();
     }
 
     private static RagEvalCase builtInCase(UUID kbId, String caseKey) {
