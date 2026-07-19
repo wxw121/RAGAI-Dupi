@@ -10,6 +10,7 @@ from app.canonical.xlsx_to_md import xlsx_to_markdown
 from app.consumer import process_ingest_job
 from app.models import DocumentNode, TextChunk
 from app.parser.document_parser import clean_text, parse_document, parse_excel, parse_text
+from app.profile_index_plan import ProfileIndexPlan
 
 
 def test_sanitize_and_text_to_markdown(tmp_path):
@@ -92,7 +93,10 @@ def test_process_ingest_job_success_uses_canonical_pipeline(monkeypatch):
     monkeypatch.setattr("app.consumer.post_status", lambda payload: statuses.append(payload))
     monkeypatch.setattr("app.consumer.download_object", lambda object_key, dest: Path(dest).write_text("raw", encoding="utf-8"))
     monkeypatch.setattr("app.consumer.canonicalize", lambda path, mime, name: "# Title\nbody")
-    monkeypatch.setattr("app.consumer.chunk_nodes", lambda nodes, **kwargs: chunks)
+    monkeypatch.setattr(
+        "app.consumer.build_profile_index_plan",
+        lambda *args, **kwargs: ProfileIndexPlan(chunks, chunks, chunks),
+    )
 
     class FakeEmbedder:
         def __init__(self, model):
@@ -130,6 +134,7 @@ def test_process_ingest_job_success_uses_canonical_pipeline(monkeypatch):
 
     assert [s.get("stage") for s in statuses if "stage" in s] == ["parsing", "chunking", "embedding", "indexing", "completed"]
     assert statuses[-1]["chunks"][0]["milvusId"] == "m1"
+    assert statuses[-1]["indexSchemaVersion"] == 2
 
 
 def test_process_ingest_job_falls_back_and_reports_failures(monkeypatch):
@@ -138,7 +143,10 @@ def test_process_ingest_job_falls_back_and_reports_failures(monkeypatch):
     monkeypatch.setattr("app.consumer.download_object", lambda object_key, dest: Path(dest).write_text("raw", encoding="utf-8"))
     monkeypatch.setattr("app.consumer.canonicalize", lambda *args: (_ for _ in ()).throw(ValueError("unsupported")))
     monkeypatch.setattr("app.consumer.parse_document", lambda *args: [DocumentNode("raw")])
-    monkeypatch.setattr("app.consumer.chunk_nodes", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "app.consumer.build_profile_index_plan",
+        lambda *args, **kwargs: ProfileIndexPlan([], [], []),
+    )
 
     process_ingest_job({
         "jobId": "j",
@@ -159,7 +167,10 @@ def test_process_ingest_job_reports_embedding_dimension_mismatch(monkeypatch):
     monkeypatch.setattr("app.consumer.post_status", lambda payload: statuses.append(payload))
     monkeypatch.setattr("app.consumer.download_object", lambda object_key, dest: Path(dest).write_text("raw", encoding="utf-8"))
     monkeypatch.setattr("app.consumer.canonicalize", lambda path, mime, name: "body")
-    monkeypatch.setattr("app.consumer.chunk_nodes", lambda nodes, **kwargs: chunks)
+    monkeypatch.setattr(
+        "app.consumer.build_profile_index_plan",
+        lambda *args, **kwargs: ProfileIndexPlan(chunks, chunks, chunks),
+    )
 
     class FakeEmbedder:
         def __init__(self, model):
@@ -207,9 +218,12 @@ def test_process_ingest_job_parent_child_indexes_children_and_reports_parents(mo
     )
     monkeypatch.setattr("app.consumer.canonicalize", lambda path, mime, name: "body")
     monkeypatch.setattr(
-        "app.consumer.build_parent_child_chunks",
-        lambda nodes, **kwargs: ([parent], [child]),
-        raising=False,
+        "app.consumer.build_profile_index_plan",
+        lambda *args, **kwargs: ProfileIndexPlan(
+            [parent, child],
+            [child],
+            [],
+        ),
     )
 
     class FakeEmbedder:
@@ -260,7 +274,6 @@ def test_process_ingest_job_qa_assisted_indexes_original_and_qa_chunks(monkeypat
     statuses = []
     embedded_texts = []
     indexed_chunk_ids = []
-    qa_calls = []
     source = TextChunk("source-1", 0, "source content", 2, {"source": "a.txt"})
     qa_chunk = TextChunk(
         "qa-1",
@@ -273,13 +286,14 @@ def test_process_ingest_job_qa_assisted_indexes_original_and_qa_chunks(monkeypat
     monkeypatch.setattr("app.consumer.post_status", lambda payload: statuses.append(payload))
     monkeypatch.setattr("app.consumer.download_object", lambda key, dest: Path(dest).write_text("raw", encoding="utf-8"))
     monkeypatch.setattr("app.consumer.canonicalize", lambda *args: "body")
-    monkeypatch.setattr("app.consumer.chunk_nodes", lambda nodes, **kwargs: [source])
-
-    def fake_generate(kb_id, doc_id, sources, start_index):
-        qa_calls.append((kb_id, doc_id, [chunk.id for chunk in sources], start_index))
-        return [qa_chunk]
-
-    monkeypatch.setattr("app.consumer.generate_qa_chunks", fake_generate, raising=False)
+    monkeypatch.setattr(
+        "app.consumer.build_profile_index_plan",
+        lambda *args, **kwargs: ProfileIndexPlan(
+            [source, qa_chunk],
+            [source, qa_chunk],
+            [source],
+        ),
+    )
 
     class FakeEmbedder:
         def __init__(self, model):
@@ -318,7 +332,6 @@ def test_process_ingest_job_qa_assisted_indexes_original_and_qa_chunks(monkeypat
         "retrievalProfile": "qa-assisted",
     })
 
-    assert qa_calls == [("kb", "doc", ["source-1"], 1)]
     assert embedded_texts == ["source content", "Question: Q?\nAnswer: A."]
     assert indexed_chunk_ids == ["source-1", "qa-1"]
     assert [chunk["id"] for chunk in statuses[-1]["chunks"]] == ["source-1", "qa-1"]
@@ -328,7 +341,6 @@ def test_process_ingest_job_qa_assisted_indexes_original_and_qa_chunks(monkeypat
 def test_process_ingest_job_combined_uses_parents_as_qa_sources(monkeypatch):
     statuses = []
     indexed_chunk_ids = []
-    qa_calls = []
     parent = TextChunk("parent-1", 0, "parent context", 3, {"chunk_role": "parent"})
     child = TextChunk("child-1", 1, "child content", 2, {"chunk_role": "child", "parent_chunk_id": "parent-1"})
     qa_chunk = TextChunk("qa-1", 2, "Question: Q?\nAnswer: A.", 4, {"chunk_role": "qa", "source_chunk_id": "parent-1"})
@@ -336,13 +348,14 @@ def test_process_ingest_job_combined_uses_parents_as_qa_sources(monkeypatch):
     monkeypatch.setattr("app.consumer.post_status", lambda payload: statuses.append(payload))
     monkeypatch.setattr("app.consumer.download_object", lambda key, dest: Path(dest).write_text("raw", encoding="utf-8"))
     monkeypatch.setattr("app.consumer.canonicalize", lambda *args: "body")
-    monkeypatch.setattr("app.consumer.build_parent_child_chunks", lambda nodes, **kwargs: ([parent], [child]))
-
-    def fake_generate(kb_id, doc_id, sources, start_index):
-        qa_calls.append((kb_id, doc_id, [chunk.id for chunk in sources], start_index))
-        return [qa_chunk]
-
-    monkeypatch.setattr("app.consumer.generate_qa_chunks", fake_generate, raising=False)
+    monkeypatch.setattr(
+        "app.consumer.build_profile_index_plan",
+        lambda *args, **kwargs: ProfileIndexPlan(
+            [parent, child, qa_chunk],
+            [child, qa_chunk],
+            [],
+        ),
+    )
 
     class FakeEmbedder:
         def __init__(self, model):
@@ -378,7 +391,6 @@ def test_process_ingest_job_combined_uses_parents_as_qa_sources(monkeypatch):
         "retrievalProfile": "combined",
     })
 
-    assert qa_calls == [("kb", "doc", ["parent-1"], 2)]
     assert indexed_chunk_ids == ["child-1", "qa-1"]
     assert [chunk["id"] for chunk in statuses[-1]["chunks"]] == ["parent-1", "child-1", "qa-1"]
 
@@ -391,8 +403,10 @@ def test_process_ingest_job_qa_failure_still_completes_original_index(monkeypatc
     monkeypatch.setattr("app.consumer.post_status", lambda payload: statuses.append(payload))
     monkeypatch.setattr("app.consumer.download_object", lambda key, dest: Path(dest).write_text("raw", encoding="utf-8"))
     monkeypatch.setattr("app.consumer.canonicalize", lambda *args: "body")
-    monkeypatch.setattr("app.consumer.chunk_nodes", lambda nodes, **kwargs: [source])
-    monkeypatch.setattr("app.consumer.generate_qa_chunks", lambda *args: [], raising=False)
+    monkeypatch.setattr(
+        "app.consumer.build_profile_index_plan",
+        lambda *args, **kwargs: ProfileIndexPlan([source], [source], [source]),
+    )
 
     class FakeEmbedder:
         def __init__(self, model):

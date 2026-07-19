@@ -52,6 +52,7 @@ def materialize_qa_chunks(
     candidates: list[dict],
     source_chunks: list[TextChunk],
     start_index: int,
+    profile_scope: list[str],
 ) -> list[TextChunk]:
     sources = {source.id: source for source in source_chunks}
     chunks: list[TextChunk] = []
@@ -72,6 +73,8 @@ def materialize_qa_chunks(
         metadata = dict(source.metadata)
         metadata.update({
             "chunk_role": "qa",
+            "entry_kind": "qa",
+            "profile_scope": list(profile_scope),
             "source_chunk_id": source.id,
             "qa_question": question,
             "qa_answer": answer,
@@ -93,12 +96,18 @@ def generate_qa_chunks(
     doc_id: str,
     source_chunks: list[TextChunk],
     start_index: int,
+    profile_scope: list[str],
 ) -> list[TextChunk]:
     if not source_chunks:
         return []
     try:
         candidates = fetch_qa_candidates(kb_id, doc_id, source_chunks)
-        return materialize_qa_chunks(candidates, source_chunks, start_index)
+        return materialize_qa_chunks(
+            candidates,
+            source_chunks,
+            start_index,
+            profile_scope,
+        )
     except Exception as exc:
         logger.warning("QA generation failed for document %s: %s", doc_id, exc)
         return []

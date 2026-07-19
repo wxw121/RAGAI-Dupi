@@ -5,13 +5,11 @@ from pathlib import Path
 
 from app.callback import download_object, post_status
 from app.canonical import canonicalize
-from app.chunker.parent_child_chunker import build_parent_child_chunks
-from app.chunker.recursive_chunker import chunk_nodes
 from app.embedder import Embedder
 from app.indexer import MilvusIndexer
 from app.models import DocumentNode
 from app.parser.document_parser import parse_document
-from app.qa_indexer import generate_qa_chunks
+from app.profile_index_plan import build_profile_index_plan
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +24,17 @@ def process_ingest_job(job: dict):
     chunk_size = job.get("chunkSize", 512)
     chunk_overlap = job.get("chunkOverlap", 64)
     chunk_strategy = job.get("chunkStrategy", "recursive")
-    retrieval_profile = str(job.get("retrievalProfile", "classic")).lower()
     embedding_model = job.get("embeddingModel")
     embedding_dimension = int(job.get("embeddingDimension", 1536))
+    index_schema_version = int(job.get("indexSchemaVersion", 2))
 
-    def update(status: str, stage: str, error: str | None = None, chunks=None):
+    def update(
+        status: str,
+        stage: str,
+        error: str | None = None,
+        chunks=None,
+        completed_schema_version: int | None = None,
+    ):
         payload = {
             "jobId": job_id,
             "docId": doc_id,
@@ -50,6 +54,8 @@ def process_ingest_job(job: dict):
                 }
                 for c in chunks
             ]
+        if completed_schema_version is not None:
+            payload["indexSchemaVersion"] = completed_schema_version
         post_status(payload)
 
     try:
@@ -76,35 +82,16 @@ def process_ingest_job(job: dict):
         update("processing", "chunking")
         embedder = Embedder(model=embedding_model)
         embed_fn = embedder.embed if chunk_strategy == "semantic" else None
-        if retrieval_profile in ("parent-child", "combined"):
-            parent_chunks, index_chunks = build_parent_child_chunks(
-                nodes,
-                child_chunk_size=chunk_size,
-                child_overlap=chunk_overlap,
-                strategy=chunk_strategy,
-                embed_fn=embed_fn,
-            )
-            persisted_chunks = [*parent_chunks, *index_chunks]
-        else:
-            index_chunks = chunk_nodes(
-                nodes,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                strategy=chunk_strategy,
-                embed_fn=embed_fn,
-            )
-            persisted_chunks = index_chunks
-
-        if retrieval_profile in ("qa-assisted", "combined"):
-            qa_sources = parent_chunks if retrieval_profile == "combined" else index_chunks
-            qa_chunks = generate_qa_chunks(
-                kb_id,
-                doc_id,
-                qa_sources,
-                len(persisted_chunks),
-            )
-            persisted_chunks = [*persisted_chunks, *qa_chunks]
-            index_chunks = [*index_chunks, *qa_chunks]
+        plan = build_profile_index_plan(
+            nodes,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            strategy=chunk_strategy,
+            embed_fn=embed_fn,
+            kb_id=kb_id,
+            doc_id=doc_id,
+        )
+        index_chunks = plan.v2_index_chunks
 
         if not index_chunks:
             raise ValueError("No chunks produced from document")
@@ -125,11 +112,16 @@ def process_ingest_job(job: dict):
         indexer.delete_by_doc(doc_id)
         indexer.index_chunks(kb_id, doc_id, index_chunks, vectors)
 
-        update("completed", "completed", chunks=persisted_chunks)
+        update(
+            "completed",
+            "completed",
+            chunks=plan.persisted_chunks,
+            completed_schema_version=index_schema_version,
+        )
         logger.info(
             "Ingest job %s completed with %d persisted chunks and %d indexed chunks",
             job_id,
-            len(persisted_chunks),
+            len(plan.persisted_chunks),
             len(index_chunks),
         )
 

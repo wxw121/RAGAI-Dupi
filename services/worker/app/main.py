@@ -26,6 +26,9 @@ class HybridRetrieveRequest(BaseModel):
 
 
 def normalize_ingest_job(job: dict) -> dict:
+    legacy_write_required = job.get("legacyWriteRequired")
+    if legacy_write_required is None:
+        legacy_write_required = job.get("legacy_write_required", True)
     return {
         "jobId": job.get("jobId") or job.get("job_id"),
         "kbId": job.get("kbId") or job.get("kb_id"),
@@ -39,6 +42,8 @@ def normalize_ingest_job(job: dict) -> dict:
         "retrievalProfile": job.get("retrievalProfile") or job.get("retrieval_profile", "classic"),
         "embeddingModel": job.get("embeddingModel") or job.get("embedding_model"),
         "embeddingDimension": job.get("embeddingDimension") or job.get("embedding_dimension", 1536),
+        "legacyWriteRequired": bool(legacy_write_required),
+        "indexSchemaVersion": job.get("indexSchemaVersion") or job.get("index_schema_version", 2),
     }
 
 

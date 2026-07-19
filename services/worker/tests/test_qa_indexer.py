@@ -71,7 +71,12 @@ def test_materialize_qa_chunks_preserves_source_provenance():
         }
     ]
 
-    chunks = qa_indexer.materialize_qa_chunks(candidates, [source], start_index=4)
+    chunks = qa_indexer.materialize_qa_chunks(
+        candidates,
+        [source],
+        start_index=4,
+        profile_scope=["combined"],
+    )
 
     assert len(chunks) == 1
     chunk = chunks[0]
@@ -81,10 +86,12 @@ def test_materialize_qa_chunks_preserves_source_provenance():
         "heading": "Intro",
         "source": "guide.md",
         "chunk_role": "qa",
+        "entry_kind": "qa",
         "source_chunk_id": "source-1",
         "qa_question": "What is this?",
         "qa_answer": "This is the answer.",
         "qa_source_kind": "parent",
+        "profile_scope": ["combined"],
     }
 
 
@@ -96,7 +103,13 @@ def test_generate_qa_chunks_returns_empty_when_api_fails(monkeypatch):
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("api down")),
     )
 
-    assert qa_indexer.generate_qa_chunks("kb-1", "doc-1", [source], 1) == []
+    assert qa_indexer.generate_qa_chunks(
+        "kb-1",
+        "doc-1",
+        [source],
+        1,
+        profile_scope=["qa-assisted"],
+    ) == []
 
 
 class FakeResponse:
