@@ -1,5 +1,11 @@
 # 待办清单
 
+## V1.5.0 release closure
+
+- [x] Align API, Web, and lockfile release metadata to `1.5.0`.
+- [x] Document V18-V20 upgrade, Profile V2 rollout, quality gates, monitoring, and rollback.
+- [x] Pass API, Worker, Web, Pester, Compose, diff, and release-scan gates on the final release diff.
+
 ## V1.4.2 governance ops stabilization
 
 - [x] Add read-only GET /api/v1/ops/governance-summary for OPS_ADMIN operators.

@@ -1,6 +1,10 @@
 # dupi-RAG
 
-> V1.4.2 is in development as a governance ops stabilization slice. It adds a read-only GET /api/v1/ops/governance-summary endpoint for OPS_ADMIN operators plus a smoke script and Pester check for the V1.4.1 upload, ingest, outbox, notification, and vector cleanup state. It is not yet documented here as merged, tagged, or released.
+> V1.5.0 is the current release. It adds Parent-Child and QA-assisted indexing, a filterable Profile V2 Milvus superset, Combined weighted RRF, revision-bound quality gates, and Web readiness/gate comparisons. API and Web version: `1.5.0`.
+
+See the [V1.5.0 release notes](docs/v1.5-release-notes.md) and [release runbook](docs/v1.5-release-runbook.md) before upgrading an existing deployment. Keep `CLASSIC` as the default until the current index revision passes the candidate-vs-classic quality gate.
+
+> V1.4.2 added a read-only GET /api/v1/ops/governance-summary endpoint for OPS_ADMIN operators plus a smoke script and Pester check for the V1.4.1 upload, ingest, outbox, notification, and vector cleanup state.
 
 ## V1.4.2 Governance Ops
 
@@ -127,6 +131,8 @@ Worker 使用 CPU-only PyTorch 和 `BAAI/bge-reranker-base`，默认在启动生
 - V1.5 使用独立的 `MILVUS_PROFILE_COLLECTION` 保存 classic、parent-child、qa-assisted 和 combined 共用的可过滤 superset。已有知识库升级后需要执行一次“重建索引”；重建按文档滚动替换向量和 chunk，不会先清空整个在线索引。
 - 知识库仅在所有文档均为 `COMPLETED` 且 `index_schema_version=2` 时标记为 profile v2 ready。首次 ready 会持久化 cutover 状态并清理 Legacy；后续上传或重建期间仍使用 v2 中已完成的文档，不会回退到已清理的 Legacy。切换默认 profile 只改变检索入口，不会再次重建统一索引。
 - 非 classic profile 必须使用当前 `index_revision` 的 RAG 评估与 `CLASSIC` 对比，且至少包含 3 个 case、引用可评估、命中率和引用通过率均不回退。未通过时更新接口返回 HTTP `409`，错误码为 `retrieval_profile_gate_blocked`。
+
+版本变更见 [V1.5.0 Release Notes](docs/v1.5-release-notes.md)，升级、灰度、验证与回滚步骤见 [V1.5.0 发布运行手册](docs/v1.5-release-runbook.md)。
 
 ## 技术栈
 
