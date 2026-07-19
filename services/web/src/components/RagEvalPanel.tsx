@@ -11,12 +11,19 @@ import { useToast } from '@/components/Toast'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import type { RagEvalCase, RagEvalCaseRequest, RagEvalRun } from '@/types'
+import type { RagEvalCase, RagEvalCaseRequest, RagEvalRun, RetrievalProfile } from '@/types'
 import { CheckCircle2, Loader2, Pencil, Play, Save, Trash2, X, XCircle } from 'lucide-react'
 
 interface RagEvalPanelProps {
   kbId: string
 }
+
+const RETRIEVAL_PROFILE_OPTIONS: Array<{ value: RetrievalProfile; label: string }> = [
+  { value: 'CLASSIC', label: 'classic' },
+  { value: 'PARENT_CHILD', label: 'parent-child' },
+  { value: 'QA_ASSISTED', label: 'qa-assisted' },
+  { value: 'COMBINED', label: 'combined' },
+]
 
 const EMPTY_FORM: RagEvalCaseRequest = {
   caseKey: '',
@@ -36,6 +43,7 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
   const [saving, setSaving] = useState(false)
   const [running, setRunning] = useState(false)
   const [useRerank, setUseRerank] = useState(false)
+  const [selectedProfiles, setSelectedProfiles] = useState<RetrievalProfile[]>(['CLASSIC'])
   const { showError, showSuccess } = useToast()
 
   useEffect(() => {
@@ -71,6 +79,24 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
 
   const updateForm = <K extends keyof RagEvalCaseRequest>(key: K, value: RagEvalCaseRequest[K]) => {
     setForm((current) => ({ ...current, [key]: value }))
+  }
+
+  const toggleProfile = (profile: RetrievalProfile, checked: boolean) => {
+    setSelectedProfiles((current) => {
+      if (checked) {
+        return current.includes(profile) ? current : [...current, profile]
+      }
+      const next = current.filter((item) => item !== profile)
+      return next.length > 0 ? next : current
+    })
+  }
+
+  const evalRunRequest = () => {
+    const base = { useRerank }
+    if (selectedProfiles.length === 1 && selectedProfiles[0] === 'CLASSIC') {
+      return base
+    }
+    return { ...base, profiles: selectedProfiles }
   }
 
   const resetForm = () => {
@@ -133,7 +159,7 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
   const run = async () => {
     setRunning(true)
     try {
-      const nextRun = await runRagEval(kbId, { useRerank })
+      const nextRun = await runRagEval(kbId, evalRunRequest())
       setRuns((current) => [nextRun, ...current.filter((item) => item.id !== nextRun.id)].slice(0, 10))
       if (nextRun.totalCount === 0) {
         showError('请先创建至少一个评估用例')
@@ -167,7 +193,22 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
             />
             启用 Rerank
           </label>
-          <Button onClick={run} disabled={running || loading || cases.length === 0}>
+
+          <div className="flex flex-wrap items-center gap-2 text-xs" aria-label="Retrieval profiles">
+            {RETRIEVAL_PROFILE_OPTIONS.map((profile) => (
+              <label key={profile.value} className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-1">
+                <input
+                  name={`profile-${profile.value}`}
+                  type="checkbox"
+                  checked={selectedProfiles.includes(profile.value)}
+                  onChange={(event) => toggleProfile(profile.value, event.target.checked)}
+                  className="h-3 w-3 accent-primary"
+                />
+                {profile.label}
+              </label>
+            ))}
+          </div>
+          <Button aria-label="Run RAG eval" onClick={run} disabled={running || loading || cases.length === 0}>
             {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
             运行评估
           </Button>
@@ -329,7 +370,7 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
           </thead>
           <tbody>
             {latestResults.length === 0 ? (
-              <tr><td colSpan={7} className="px-4 py-10 text-center text-muted-foreground">最新运行暂无结果</td></tr>
+              <tr><td colSpan={8} className="px-4 py-10 text-center text-muted-foreground">最新运行暂无结果</td></tr>
             ) : latestResults.map((result) => (
               <tr key={result.id} className="border-b last:border-0">
                 <td className="px-4 py-3">
@@ -348,6 +389,7 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
                   {result.expectedFileName && <p className="mt-1 text-xs text-muted-foreground">期望 {result.expectedFileName}</p>}
                 </td>
                 <td className="px-4 py-3 text-muted-foreground">{result.matchedToken ?? '-'}</td>
+                <td className="px-4 py-3 font-mono text-xs">{result.retrievalProfile ?? 'CLASSIC'}</td>
                 <td className="px-4 py-3">
                   <p className="font-mono text-xs">{result.retrievalMode ?? '-'}</p>
                   <p className="mt-1 text-xs text-muted-foreground">dim {result.embeddingDimension ?? '-'}</p>

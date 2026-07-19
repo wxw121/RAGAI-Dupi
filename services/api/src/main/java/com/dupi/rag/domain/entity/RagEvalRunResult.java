@@ -1,6 +1,9 @@
 package com.dupi.rag.domain.entity;
 
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import jakarta.persistence.Column;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
@@ -64,6 +67,11 @@ public class RagEvalRunResult {
 
     @Column(name = "retrieval_mode")
     private String retrievalMode;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "retrieval_profile", nullable = false)
+    @Builder.Default
+    private RetrievalProfile retrievalProfile = RetrievalProfile.CLASSIC;
 
     @Column(name = "fallback_reason", columnDefinition = "TEXT")
     private String fallbackReason;

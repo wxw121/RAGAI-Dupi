@@ -4,6 +4,7 @@ import com.dupi.rag.config.RedisQueueProperties;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.enums.ChunkStrategy;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.IngestJobMessage;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -33,6 +34,7 @@ class IngestJobProducerTest {
                 .chunkSize(300)
                 .chunkOverlap(30)
                 .chunkStrategy(ChunkStrategy.MARKDOWN)
+                .retrievalProfile(RetrievalProfile.COMBINED)
                 .embeddingModel("embed")
                 .embeddingDimension(99)
                 .build();
@@ -45,6 +47,7 @@ class IngestJobProducerTest {
                 return msg.getJobId().equals(job.getId().toString())
                         && msg.getChunkSize() == 300
                         && msg.getChunkStrategy().equals("markdown")
+                        && msg.getRetrievalProfile().equals("combined")
                         && msg.getEmbeddingDimension() == 99;
             } catch (Exception e) {
                 return false;

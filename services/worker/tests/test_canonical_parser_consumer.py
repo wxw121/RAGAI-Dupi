@@ -185,3 +185,249 @@ def test_process_ingest_job_reports_embedding_dimension_mismatch(monkeypatch):
 
     assert statuses[-1]["status"] == "failed"
     assert "Embedding dimension mismatch" in statuses[-1]["errorMessage"]
+
+
+def test_process_ingest_job_parent_child_indexes_children_and_reports_parents(monkeypatch):
+    statuses = []
+    embedded_texts = []
+    indexed_chunk_ids = []
+    parent = TextChunk("p1", 0, "full parent context", 4, {"chunk_role": "parent"})
+    child = TextChunk(
+        "c1",
+        1,
+        "child",
+        1,
+        {"chunk_role": "child", "parent_chunk_id": "p1"},
+    )
+
+    monkeypatch.setattr("app.consumer.post_status", lambda payload: statuses.append(payload))
+    monkeypatch.setattr(
+        "app.consumer.download_object",
+        lambda object_key, dest: Path(dest).write_text("raw", encoding="utf-8"),
+    )
+    monkeypatch.setattr("app.consumer.canonicalize", lambda path, mime, name: "body")
+    monkeypatch.setattr(
+        "app.consumer.build_parent_child_chunks",
+        lambda nodes, **kwargs: ([parent], [child]),
+        raising=False,
+    )
+
+    class FakeEmbedder:
+        def __init__(self, model):
+            self.model = model
+
+        def embed(self, text):
+            return [1.0, 2.0]
+
+        def embed_batch(self, texts):
+            embedded_texts.extend(texts)
+            return [[1.0, 2.0] for _ in texts]
+
+    class FakeIndexer:
+        def __init__(self, dimension):
+            self.dimension = dimension
+
+        def delete_by_doc(self, doc_id):
+            pass
+
+        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+            indexed_chunk_ids.extend(chunk.id for chunk in chunks_arg)
+            for chunk in chunks_arg:
+                chunk.milvus_id = f"m-{chunk.id}"
+            return [chunk.milvus_id for chunk in chunks_arg]
+
+    monkeypatch.setattr("app.consumer.Embedder", FakeEmbedder)
+    monkeypatch.setattr("app.consumer.MilvusIndexer", FakeIndexer)
+
+    process_ingest_job({
+        "jobId": "j",
+        "kbId": "kb",
+        "docId": "doc",
+        "objectKey": "obj",
+        "fileName": "a.txt",
+        "mimeType": "text/plain",
+        "embeddingDimension": 2,
+        "retrievalProfile": "parent-child",
+    })
+
+    assert embedded_texts == ["child"]
+    assert indexed_chunk_ids == ["c1"]
+    assert [chunk["id"] for chunk in statuses[-1]["chunks"]] == ["p1", "c1"]
+    assert statuses[-1]["chunks"][1]["metadata"]["parent_chunk_id"] == "p1"
+
+
+def test_process_ingest_job_qa_assisted_indexes_original_and_qa_chunks(monkeypatch):
+    statuses = []
+    embedded_texts = []
+    indexed_chunk_ids = []
+    qa_calls = []
+    source = TextChunk("source-1", 0, "source content", 2, {"source": "a.txt"})
+    qa_chunk = TextChunk(
+        "qa-1",
+        1,
+        "Question: Q?\nAnswer: A.",
+        4,
+        {"chunk_role": "qa", "source_chunk_id": "source-1"},
+    )
+
+    monkeypatch.setattr("app.consumer.post_status", lambda payload: statuses.append(payload))
+    monkeypatch.setattr("app.consumer.download_object", lambda key, dest: Path(dest).write_text("raw", encoding="utf-8"))
+    monkeypatch.setattr("app.consumer.canonicalize", lambda *args: "body")
+    monkeypatch.setattr("app.consumer.chunk_nodes", lambda nodes, **kwargs: [source])
+
+    def fake_generate(kb_id, doc_id, sources, start_index):
+        qa_calls.append((kb_id, doc_id, [chunk.id for chunk in sources], start_index))
+        return [qa_chunk]
+
+    monkeypatch.setattr("app.consumer.generate_qa_chunks", fake_generate, raising=False)
+
+    class FakeEmbedder:
+        def __init__(self, model):
+            self.model = model
+
+        def embed(self, text):
+            return [1.0, 2.0]
+
+        def embed_batch(self, texts):
+            embedded_texts.extend(texts)
+            return [[1.0, 2.0] for _ in texts]
+
+    class FakeIndexer:
+        def __init__(self, dimension):
+            self.dimension = dimension
+
+        def delete_by_doc(self, doc_id):
+            pass
+
+        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+            indexed_chunk_ids.extend(chunk.id for chunk in chunks_arg)
+            for chunk in chunks_arg:
+                chunk.milvus_id = f"m-{chunk.id}"
+
+    monkeypatch.setattr("app.consumer.Embedder", FakeEmbedder)
+    monkeypatch.setattr("app.consumer.MilvusIndexer", FakeIndexer)
+
+    process_ingest_job({
+        "jobId": "j",
+        "kbId": "kb",
+        "docId": "doc",
+        "objectKey": "obj",
+        "fileName": "a.txt",
+        "mimeType": "text/plain",
+        "embeddingDimension": 2,
+        "retrievalProfile": "qa-assisted",
+    })
+
+    assert qa_calls == [("kb", "doc", ["source-1"], 1)]
+    assert embedded_texts == ["source content", "Question: Q?\nAnswer: A."]
+    assert indexed_chunk_ids == ["source-1", "qa-1"]
+    assert [chunk["id"] for chunk in statuses[-1]["chunks"]] == ["source-1", "qa-1"]
+    assert statuses[-1]["status"] == "completed"
+
+
+def test_process_ingest_job_combined_uses_parents_as_qa_sources(monkeypatch):
+    statuses = []
+    indexed_chunk_ids = []
+    qa_calls = []
+    parent = TextChunk("parent-1", 0, "parent context", 3, {"chunk_role": "parent"})
+    child = TextChunk("child-1", 1, "child content", 2, {"chunk_role": "child", "parent_chunk_id": "parent-1"})
+    qa_chunk = TextChunk("qa-1", 2, "Question: Q?\nAnswer: A.", 4, {"chunk_role": "qa", "source_chunk_id": "parent-1"})
+
+    monkeypatch.setattr("app.consumer.post_status", lambda payload: statuses.append(payload))
+    monkeypatch.setattr("app.consumer.download_object", lambda key, dest: Path(dest).write_text("raw", encoding="utf-8"))
+    monkeypatch.setattr("app.consumer.canonicalize", lambda *args: "body")
+    monkeypatch.setattr("app.consumer.build_parent_child_chunks", lambda nodes, **kwargs: ([parent], [child]))
+
+    def fake_generate(kb_id, doc_id, sources, start_index):
+        qa_calls.append((kb_id, doc_id, [chunk.id for chunk in sources], start_index))
+        return [qa_chunk]
+
+    monkeypatch.setattr("app.consumer.generate_qa_chunks", fake_generate, raising=False)
+
+    class FakeEmbedder:
+        def __init__(self, model):
+            self.model = model
+
+        def embed(self, text):
+            return [1.0, 2.0]
+
+        def embed_batch(self, texts):
+            return [[1.0, 2.0] for _ in texts]
+
+    class FakeIndexer:
+        def __init__(self, dimension):
+            self.dimension = dimension
+
+        def delete_by_doc(self, doc_id):
+            pass
+
+        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+            indexed_chunk_ids.extend(chunk.id for chunk in chunks_arg)
+
+    monkeypatch.setattr("app.consumer.Embedder", FakeEmbedder)
+    monkeypatch.setattr("app.consumer.MilvusIndexer", FakeIndexer)
+
+    process_ingest_job({
+        "jobId": "j",
+        "kbId": "kb",
+        "docId": "doc",
+        "objectKey": "obj",
+        "fileName": "a.txt",
+        "mimeType": "text/plain",
+        "embeddingDimension": 2,
+        "retrievalProfile": "combined",
+    })
+
+    assert qa_calls == [("kb", "doc", ["parent-1"], 2)]
+    assert indexed_chunk_ids == ["child-1", "qa-1"]
+    assert [chunk["id"] for chunk in statuses[-1]["chunks"]] == ["parent-1", "child-1", "qa-1"]
+
+
+def test_process_ingest_job_qa_failure_still_completes_original_index(monkeypatch):
+    statuses = []
+    indexed_chunk_ids = []
+    source = TextChunk("source-1", 0, "source content", 2, {})
+
+    monkeypatch.setattr("app.consumer.post_status", lambda payload: statuses.append(payload))
+    monkeypatch.setattr("app.consumer.download_object", lambda key, dest: Path(dest).write_text("raw", encoding="utf-8"))
+    monkeypatch.setattr("app.consumer.canonicalize", lambda *args: "body")
+    monkeypatch.setattr("app.consumer.chunk_nodes", lambda nodes, **kwargs: [source])
+    monkeypatch.setattr("app.consumer.generate_qa_chunks", lambda *args: [], raising=False)
+
+    class FakeEmbedder:
+        def __init__(self, model):
+            self.model = model
+
+        def embed(self, text):
+            return [1.0, 2.0]
+
+        def embed_batch(self, texts):
+            return [[1.0, 2.0] for _ in texts]
+
+    class FakeIndexer:
+        def __init__(self, dimension):
+            self.dimension = dimension
+
+        def delete_by_doc(self, doc_id):
+            pass
+
+        def index_chunks(self, kb_id, doc_id, chunks_arg, vectors):
+            indexed_chunk_ids.extend(chunk.id for chunk in chunks_arg)
+
+    monkeypatch.setattr("app.consumer.Embedder", FakeEmbedder)
+    monkeypatch.setattr("app.consumer.MilvusIndexer", FakeIndexer)
+
+    process_ingest_job({
+        "jobId": "j",
+        "kbId": "kb",
+        "docId": "doc",
+        "objectKey": "obj",
+        "fileName": "a.txt",
+        "mimeType": "text/plain",
+        "embeddingDimension": 2,
+        "retrievalProfile": "qa-assisted",
+    })
+
+    assert indexed_chunk_ids == ["source-1"]
+    assert statuses[-1]["status"] == "completed"
+    assert [chunk["id"] for chunk in statuses[-1]["chunks"]] == ["source-1"]

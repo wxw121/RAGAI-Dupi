@@ -7,6 +7,7 @@ import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.enums.RetrievalMode;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.dto.RetrieveResponse;
@@ -27,6 +28,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -63,9 +65,10 @@ public class RetrievalService {
     public RetrieveResponse retrieve(UUID kbId, RetrieveRequest request) {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
         int topK = clampTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK());
+        RetrievalProfile retrievalProfile = resolveProfile(kb, request);
 
         if (kb.getRetrievalMode() == RetrievalMode.HYBRID || Boolean.TRUE.equals(request.getUseRerank())) {
-            return hybridRetrieve(kb, request.getQuery(), topK, Boolean.TRUE.equals(request.getUseRerank()));
+            return hybridRetrieve(kb, request.getQuery(), topK, Boolean.TRUE.equals(request.getUseRerank()), retrievalProfile);
         }
 
         List<Float> vector;
@@ -76,42 +79,43 @@ public class RetrievalService {
                 throw ex;
             }
             log.warn("Embedding retrieval unavailable; falling back to local chunk text search for kb {}", kbId, ex);
-            return localTextFallbackResponse(kb, request.getQuery(), topK, "embedding_unavailable");
+            return localTextFallbackResponse(kb, request.getQuery(), topK, retrievalProfile, "embedding_unavailable");
         }
         try {
             List<MilvusVectorService.SearchResult> results = milvusVectorService.search(kbId, vector, topK);
-            List<RetrievalHit> hits = mapHits(kbId, results);
+            List<RetrievalHit> hits = expandHitsForProfile(kbId, mapHits(kbId, results), retrievalProfile);
             return RetrieveResponse.builder()
                     .query(request.getQuery())
                     .retrievalMode("vector")
                     .hits(hits)
-                    .diagnostics(diagnostics(kb, "vector", topK, hits.size(), null))
+                    .diagnostics(diagnostics(kb, "vector", retrievalProfile, topK, hits.size(), null))
                     .build();
         } catch (IllegalStateException ex) {
             if (!isMilvusUnavailable(ex)) {
                 throw ex;
             }
             log.warn("Milvus vector retrieval unavailable; falling back to local chunk text search for kb {}", kbId, ex);
-            return localTextFallbackResponse(kb, request.getQuery(), topK, "milvus_unavailable");
+            return localTextFallbackResponse(kb, request.getQuery(), topK, retrievalProfile, "milvus_unavailable");
         }
     }
 
-    private RetrieveResponse localTextFallbackResponse(KnowledgeBase kb, String query, int topK, String fallbackReason) {
-        List<RetrievalHit> hits = localTextFallback(kb.getId(), query, topK);
+    private RetrieveResponse localTextFallbackResponse(KnowledgeBase kb, String query, int topK, RetrievalProfile retrievalProfile, String fallbackReason) {
+        List<RetrievalHit> hits = expandHitsForProfile(kb.getId(), localTextFallback(kb.getId(), query, topK), retrievalProfile);
         return RetrieveResponse.builder()
                 .query(query)
                 .retrievalMode("local_text_fallback")
                 .hits(hits)
-                .diagnostics(diagnostics(kb, "local_text_fallback", topK, hits.size(), fallbackReason))
+                .diagnostics(diagnostics(kb, "local_text_fallback", retrievalProfile, topK, hits.size(), fallbackReason))
                 .build();
     }
 
-    private RetrieveResponse hybridRetrieve(KnowledgeBase kb, String query, int topK, boolean useRerank) {
+    private RetrieveResponse hybridRetrieve(KnowledgeBase kb, String query, int topK, boolean useRerank, RetrievalProfile retrievalProfile) {
         Map<String, Object> body = Map.of(
                 "kb_id", kb.getId().toString(),
                 "query", query,
                 "top_k", topK,
                 "use_rerank", useRerank,
+                "retrieval_profile", retrievalProfile.wireValue(),
                 "embedding_model", kb.getEmbeddingModel(),
                 "embedding_dimension", kb.getEmbeddingDimension()
         );
@@ -140,23 +144,146 @@ public class RetrievalService {
                 .metadata(h.get("metadata") instanceof Map ? (Map<String, Object>) h.get("metadata") : Map.of())
                 .build()).toList();
 
+        hits = expandHitsForProfile(kb.getId(), hits, retrievalProfile);
+
         return RetrieveResponse.builder()
                 .query(query)
                 .retrievalMode(useRerank ? "hybrid_rerank" : "hybrid")
                 .hits(hits)
-                .diagnostics(diagnostics(kb, useRerank ? "hybrid_rerank" : "hybrid", topK, hits.size(), null))
+                .diagnostics(diagnostics(kb, useRerank ? "hybrid_rerank" : "hybrid", retrievalProfile, topK, hits.size(), null))
+                .build();
+    }
+
+    private List<RetrievalHit> expandHitsForProfile(
+            UUID kbId,
+            List<RetrievalHit> hits,
+            RetrievalProfile retrievalProfile
+    ) {
+        if (retrievalProfile == RetrievalProfile.CLASSIC) {
+            return hits;
+        }
+        List<RetrievalHit> expandedHits = hits.stream()
+                .map(hit -> {
+                    RetrievalHit expanded = hit;
+                    if (retrievalProfile == RetrievalProfile.QA_ASSISTED
+                            || retrievalProfile == RetrievalProfile.COMBINED) {
+                        expanded = expandQaSource(kbId, expanded, retrievalProfile);
+                    }
+                    if (retrievalProfile == RetrievalProfile.PARENT_CHILD
+                            || retrievalProfile == RetrievalProfile.COMBINED) {
+                        expanded = expandParentContext(kbId, expanded, retrievalProfile);
+                    }
+                    return expanded;
+                })
+                .toList();
+        Map<UUID, RetrievalHit> uniqueHits = new LinkedHashMap<>();
+        for (RetrievalHit hit : expandedHits) {
+            uniqueHits.merge(
+                    hit.getChunkId(),
+                    hit,
+                    (existing, candidate) -> candidate.getScore() > existing.getScore() ? candidate : existing
+            );
+        }
+        return List.copyOf(uniqueHits.values());
+    }
+
+    private RetrievalHit expandQaSource(UUID kbId, RetrievalHit hit, RetrievalProfile retrievalProfile) {
+        Map<String, Object> metadata = hit.getMetadata() != null ? hit.getMetadata() : Map.of();
+        if (!"qa".equals(String.valueOf(metadata.get("chunk_role")))) {
+            return hit;
+        }
+
+        UUID sourceId;
+        try {
+            sourceId = UUID.fromString(String.valueOf(metadata.get("source_chunk_id")));
+        } catch (IllegalArgumentException ex) {
+            return hit;
+        }
+        if (sourceId.equals(hit.getChunkId())) {
+            return hit;
+        }
+
+        Chunk source = chunkRepository.findById(sourceId).orElse(null);
+        if (source == null
+                || !Objects.equals(source.getKbId(), kbId)
+                || !Objects.equals(source.getDocId(), hit.getDocId())) {
+            return hit;
+        }
+
+        Map<String, Object> expandedMetadata = new LinkedHashMap<>();
+        if (source.getMetadata() != null) {
+            expandedMetadata.putAll(source.getMetadata());
+        }
+        expandedMetadata.putAll(metadata);
+        expandedMetadata.put("matched_qa_chunk_id", hit.getChunkId().toString());
+        expandedMetadata.put("qa_source_chunk_id", sourceId.toString());
+        expandedMetadata.put("profile", retrievalProfile.wireValue());
+
+        return RetrievalHit.builder()
+                .chunkId(source.getId())
+                .docId(source.getDocId())
+                .fileName(hit.getFileName())
+                .content(source.getContent())
+                .score(hit.getScore())
+                .metadata(expandedMetadata)
+                .build();
+    }
+
+    private RetrievalHit expandParentContext(UUID kbId, RetrievalHit hit, RetrievalProfile retrievalProfile) {
+        Map<String, Object> metadata = hit.getMetadata() != null ? hit.getMetadata() : Map.of();
+        Object rawParentId = metadata.get("parent_chunk_id");
+        if (rawParentId == null) {
+            return hit;
+        }
+
+        UUID parentId;
+        try {
+            parentId = UUID.fromString(String.valueOf(rawParentId));
+        } catch (IllegalArgumentException ex) {
+            return hit;
+        }
+        if (parentId.equals(hit.getChunkId())) {
+            return hit;
+        }
+
+        Chunk parent = chunkRepository.findById(parentId).orElse(null);
+        if (parent == null
+                || !Objects.equals(parent.getKbId(), kbId)
+                || !Objects.equals(parent.getDocId(), hit.getDocId())) {
+            return hit;
+        }
+
+        Map<String, Object> expandedMetadata = new LinkedHashMap<>();
+        if (parent.getMetadata() != null) {
+            expandedMetadata.putAll(parent.getMetadata());
+        }
+        expandedMetadata.putAll(metadata);
+        expandedMetadata.put("profile", retrievalProfile.wireValue());
+        expandedMetadata.put("expanded_from_child", true);
+        expandedMetadata.put("matched_child_chunk_id", hit.getChunkId().toString());
+        expandedMetadata.put("parent_chunk_id", parentId.toString());
+
+        return RetrievalHit.builder()
+                .chunkId(parent.getId())
+                .docId(parent.getDocId())
+                .fileName(hit.getFileName())
+                .content(parent.getContent())
+                .score(hit.getScore())
+                .metadata(expandedMetadata)
                 .build();
     }
 
     private Map<String, Object> diagnostics(
             KnowledgeBase kb,
             String retrievalMode,
+            RetrievalProfile retrievalProfile,
             int topK,
             int hitCount,
             String fallbackReason
     ) {
         Map<String, Object> diagnostics = new LinkedHashMap<>();
         diagnostics.put("retrievalMode", retrievalMode);
+        diagnostics.put("retrievalProfile", retrievalProfile.wireValue());
         diagnostics.put("topK", topK);
         diagnostics.put("hitCount", hitCount);
         diagnostics.put("embeddingModel", kb.getEmbeddingModel());
@@ -165,6 +292,16 @@ public class RetrievalService {
             diagnostics.put("fallbackReason", fallbackReason);
         }
         return diagnostics;
+    }
+
+    private RetrievalProfile resolveProfile(KnowledgeBase kb, RetrieveRequest request) {
+        if (request.getRetrievalProfile() != null) {
+            return request.getRetrievalProfile();
+        }
+        if (kb.getRetrievalProfile() != null) {
+            return kb.getRetrievalProfile();
+        }
+        return RetrievalProfile.CLASSIC;
     }
 
     private int clampTopK(Integer topK) {

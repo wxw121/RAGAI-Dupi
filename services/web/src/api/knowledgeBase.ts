@@ -18,6 +18,7 @@ import type {
   RagEvalCaseRequest,
   RagEvalRun,
   RagEvalRunRequest,
+  RetrievalProfile,
   RetrieveRequest,
   RetrieveResponse,
   Role,
@@ -34,6 +35,13 @@ export function listKnowledgeBases(): Promise<KnowledgeBase[]> {
 
 export function getKnowledgeBase(kbId: string): Promise<KnowledgeBase> {
   return apiGet<KnowledgeBase>(`${BASE}/${kbId}`)
+}
+
+export function updateKnowledgeBaseRetrievalProfile(
+  kbId: string,
+  retrievalProfile: RetrievalProfile,
+): Promise<KnowledgeBase> {
+  return apiPatch<KnowledgeBase>(`${BASE}/${kbId}/retrieval-profile`, { retrievalProfile })
 }
 
 export function createKnowledgeBase(req: CreateKnowledgeBaseRequest): Promise<KnowledgeBase> {

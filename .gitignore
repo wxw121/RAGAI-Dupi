@@ -38,6 +38,10 @@ scripts/e2e-last-run.json
 scripts/e2e-chat-session-history-last-run.json
 handoff.md
 .superpowers/
+.m2/
+.npm-cache/
+.pytest_cache/
+.pytest-tmp/
 .worktrees/
 
 # Docker local overrides

@@ -1,6 +1,7 @@
 package com.dupi.rag.domain.entity;
 
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -13,8 +14,11 @@ import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 @Entity
@@ -34,6 +38,11 @@ public class RagEvalRun {
     @Column(name = "use_rerank", nullable = false)
     @Builder.Default
     private Boolean useRerank = false;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "profile_set", columnDefinition = "jsonb", nullable = false)
+    @Builder.Default
+    private List<RetrievalProfile> profileSet = List.of(RetrievalProfile.CLASSIC);
 
     @Column(name = "passed_count", nullable = false)
     @Builder.Default

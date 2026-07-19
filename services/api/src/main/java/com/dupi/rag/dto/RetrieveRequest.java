@@ -1,5 +1,6 @@
 package com.dupi.rag.dto;
 
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -18,4 +19,6 @@ public class RetrieveRequest {
     private Integer topK;
 
     private Boolean useRerank = false;
+
+    private RetrievalProfile retrievalProfile;
 }

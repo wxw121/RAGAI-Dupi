@@ -22,6 +22,24 @@ class HybridRetrieveRequest(BaseModel):
     use_rerank: bool = False
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = 1536
+    retrieval_profile: str = "classic"
+
+
+def normalize_ingest_job(job: dict) -> dict:
+    return {
+        "jobId": job.get("jobId") or job.get("job_id"),
+        "kbId": job.get("kbId") or job.get("kb_id"),
+        "docId": job.get("docId") or job.get("doc_id"),
+        "objectKey": job.get("objectKey") or job.get("object_key"),
+        "fileName": job.get("fileName") or job.get("file_name"),
+        "mimeType": job.get("mimeType") or job.get("mime_type"),
+        "chunkSize": job.get("chunkSize") or job.get("chunk_size", 512),
+        "chunkOverlap": job.get("chunkOverlap") or job.get("chunk_overlap", 64),
+        "chunkStrategy": job.get("chunkStrategy") or job.get("chunk_strategy", "recursive"),
+        "retrievalProfile": job.get("retrievalProfile") or job.get("retrieval_profile", "classic"),
+        "embeddingModel": job.get("embeddingModel") or job.get("embedding_model"),
+        "embeddingDimension": job.get("embeddingDimension") or job.get("embedding_dimension", 1536),
+    }
 
 
 def redis_consumer_loop():
@@ -34,20 +52,7 @@ def redis_consumer_loop():
                 continue
             _, payload = result
             job = __import__("json").loads(payload)
-            camel_job = {
-                "jobId": job.get("jobId") or job.get("job_id"),
-                "kbId": job.get("kbId") or job.get("kb_id"),
-                "docId": job.get("docId") or job.get("doc_id"),
-                "objectKey": job.get("objectKey") or job.get("object_key"),
-                "fileName": job.get("fileName") or job.get("file_name"),
-                "mimeType": job.get("mimeType") or job.get("mime_type"),
-                "chunkSize": job.get("chunkSize") or job.get("chunk_size", 512),
-                "chunkOverlap": job.get("chunkOverlap") or job.get("chunk_overlap", 64),
-                "chunkStrategy": job.get("chunkStrategy") or job.get("chunk_strategy", "recursive"),
-                "embeddingModel": job.get("embeddingModel") or job.get("embedding_model"),
-                "embeddingDimension": job.get("embeddingDimension") or job.get("embedding_dimension", 1536),
-            }
-            process_ingest_job(camel_job)
+            process_ingest_job(normalize_ingest_job(job))
         except Exception:
             logger.exception("Consumer error")
 
@@ -76,6 +81,7 @@ def retrieve_hybrid(req: HybridRetrieveRequest):
         embedding_model=req.embedding_model,
         embedding_dimension=req.embedding_dimension,
         use_rerank=req.use_rerank,
+        retrieval_profile=req.retrieval_profile,
     )
     return {"query": req.query, "retrieval_mode": "hybrid_rerank" if req.use_rerank else "hybrid", "hits": hits}
 

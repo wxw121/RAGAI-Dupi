@@ -30,6 +30,7 @@ import {
   exportKnowledgeBase,
   importKnowledgeBase,
   notifyAuditAlerts,
+  updateKnowledgeBaseRetrievalProfile,
 } from './knowledgeBase'
 import { deleteDocument, getDocumentIndexDetail, getIngestJob, listDocuments, uploadDocument, uploadDocuments } from './documents'
 import {
@@ -166,6 +167,20 @@ describe('resource API wrappers', () => {
     expect(apiClient.apiDelete).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb1/rag-eval/cases/case1')
     expect(apiClient.apiDelete).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb1')
     expect(apiClient.apiDelete).toHaveBeenCalledWith('/api/v1/ops/accounts/e2e_account_42')
+  })
+
+  it('updates a knowledge base retrieval profile', async () => {
+    apiClient.apiPatch.mockResolvedValue({ id: 'kb1', retrievalProfile: 'PARENT_CHILD' })
+
+    await expect(updateKnowledgeBaseRetrievalProfile('kb1', 'PARENT_CHILD')).resolves.toEqual({
+      id: 'kb1',
+      retrievalProfile: 'PARENT_CHILD',
+    })
+
+    expect(apiClient.apiPatch).toHaveBeenCalledWith(
+      '/api/v1/knowledge-bases/kb1/retrieval-profile',
+      { retrievalProfile: 'PARENT_CHILD' },
+    )
   })
 
   it('builds document API paths', async () => {

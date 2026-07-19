@@ -4,6 +4,7 @@ import com.dupi.rag.domain.entity.RagEvalCase;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.entity.RagEvalRunResult;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.RagEvalCaseRequest;
 import com.dupi.rag.dto.RagEvalCaseResponse;
 import com.dupi.rag.dto.RagEvalRunResponse;
@@ -75,11 +76,17 @@ public class RagEvalService {
     }
 
     public RagEvalRunResponse run(UUID kbId, boolean useRerank) {
+        return run(kbId, useRerank, List.of(RetrievalProfile.CLASSIC));
+    }
+
+    public RagEvalRunResponse run(UUID kbId, boolean useRerank, List<RetrievalProfile> requestedProfiles) {
         List<RagEvalCase> cases = caseCoordinator.loadOrSeed(kbId);
+        List<RetrievalProfile> profiles = normalizeProfiles(requestedProfiles);
         RagEvalRun run = RagEvalRun.builder()
                 .kbId(kbId)
                 .useRerank(useRerank)
-                .totalCount(cases.size())
+                .profileSet(profiles)
+                .totalCount(cases.size() * profiles.size())
                 .passedCount(0)
                 .status(RagEvalRunStatus.RUNNING)
                 .createdAt(Instant.now())
@@ -88,10 +95,12 @@ public class RagEvalService {
 
         List<RagEvalRunResult> results = new ArrayList<>();
         try {
-            for (RagEvalCase evalCase : cases) {
-                RagEvalRunResult result = evaluate(kbId, run.getId(), evalCase, useRerank);
-                RagEvalRunResult saved = resultRepository.save(result);
-                results.add(saved == null ? result : saved);
+            for (RetrievalProfile profile : profiles) {
+                for (RagEvalCase evalCase : cases) {
+                    RagEvalRunResult result = evaluate(kbId, run.getId(), evalCase, useRerank, profile);
+                    RagEvalRunResult saved = resultRepository.save(result);
+                    results.add(saved == null ? result : saved);
+                }
             }
             int passed = (int) results.stream().filter(RagEvalRunResult::isPassed).count();
             run.setPassedCount(passed);
@@ -113,7 +122,18 @@ public class RagEvalService {
         }
     }
 
-    private RagEvalRunResult evaluate(UUID kbId, UUID runId, RagEvalCase evalCase, boolean useRerank) {
+    private List<RetrievalProfile> normalizeProfiles(List<RetrievalProfile> requestedProfiles) {
+        if (requestedProfiles == null || requestedProfiles.isEmpty()) {
+            return List.of(RetrievalProfile.CLASSIC);
+        }
+        List<RetrievalProfile> profiles = requestedProfiles.stream()
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .toList();
+        return profiles.isEmpty() ? List.of(RetrievalProfile.CLASSIC) : profiles;
+    }
+
+    private RagEvalRunResult evaluate(UUID kbId, UUID runId, RagEvalCase evalCase, boolean useRerank, RetrievalProfile retrievalProfile) {
         List<String> failureReasons = new ArrayList<>();
         RetrieveResponse response = null;
         List<RetrievalHit> hits = List.of();
@@ -125,6 +145,7 @@ public class RagEvalService {
             request.setQuery(evalCase.getQuery());
             request.setTopK(safeTopK(evalCase));
             request.setUseRerank(useRerank);
+            request.setRetrievalProfile(retrievalProfile);
             response = retrievalService.retrieve(kbId, request);
             hits = response.getHits() == null ? List.of() : response.getHits();
             if (hits.size() < safeMinHits(evalCase)) {
@@ -151,6 +172,7 @@ public class RagEvalService {
                 .matchedFileName(matchedFile)
                 .matchedToken(matchedToken)
                 .retrievalMode(stringDiagnostic(diagnostics, "retrievalMode", response == null ? null : response.getRetrievalMode()))
+                .retrievalProfile(retrievalProfile)
                 .fallbackReason(stringDiagnostic(diagnostics, "fallbackReason", null))
                 .embeddingModel(stringDiagnostic(diagnostics, "embeddingModel", null))
                 .embeddingDimension(intDiagnostic(diagnostics, "embeddingDimension"))
@@ -257,6 +279,7 @@ public class RagEvalService {
                 .id(run.getId())
                 .kbId(run.getKbId())
                 .useRerank(Boolean.TRUE.equals(run.getUseRerank()))
+                .profileSet(run.getProfileSet())
                 .passedCount(run.getPassedCount())
                 .totalCount(run.getTotalCount())
                 .status(run.getStatus())
@@ -279,6 +302,7 @@ public class RagEvalService {
                 .matchedFileName(result.getMatchedFileName())
                 .matchedToken(result.getMatchedToken())
                 .retrievalMode(result.getRetrievalMode())
+                .retrievalProfile(result.getRetrievalProfile())
                 .fallbackReason(result.getFallbackReason())
                 .embeddingModel(result.getEmbeddingModel())
                 .embeddingDimension(result.getEmbeddingDimension())

@@ -410,6 +410,7 @@ class ConfigAndExceptionTest {
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/chat");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/retrieve");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/reindex");
+        assertAllowed(filter, tokenService, "operator", "PATCH", "/api/v1/knowledge-bases/kb/retrieval-profile");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/ingest-jobs/job/retry");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/rag-eval/cases");
         assertAllowed(filter, tokenService, "operator", "PATCH", "/api/v1/knowledge-bases/kb/rag-eval/cases/case");
@@ -425,6 +426,11 @@ class ConfigAndExceptionTest {
         MockHttpServletRequest reindex = bearerRequest(tokenService, "reader", "POST", "/api/v1/knowledge-bases/kb/reindex");
         MockHttpServletResponse reindexResponse = new MockHttpServletResponse();
         filter.doFilter(reindex, reindexResponse, mock(FilterChain.class));
+
+        MockHttpServletRequest updateProfile = bearerRequest(
+                tokenService, "reader", "PATCH", "/api/v1/knowledge-bases/kb/retrieval-profile");
+        MockHttpServletResponse updateProfileResponse = new MockHttpServletResponse();
+        filter.doFilter(updateProfile, updateProfileResponse, mock(FilterChain.class));
 
         MockHttpServletRequest importKb = bearerRequest(tokenService, "reader", "POST", "/api/v1/knowledge-bases/import");
         MockHttpServletResponse importKbResponse = new MockHttpServletResponse();
@@ -447,6 +453,8 @@ class ConfigAndExceptionTest {
         assertThat(createKbResponse.getContentAsString()).contains("permission required: KB_WRITE");
         assertThat(reindexResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
         assertThat(reindexResponse.getContentAsString()).contains("permission required: MAINTENANCE");
+        assertThat(updateProfileResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(updateProfileResponse.getContentAsString()).contains("permission required: MAINTENANCE");
         assertThat(importKbResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());
         assertThat(importKbResponse.getContentAsString()).contains("permission required: KB_WRITE");
         assertThat(createEvalResponse.getStatus()).isEqualTo(HttpStatus.FORBIDDEN.value());

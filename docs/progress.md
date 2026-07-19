@@ -2,9 +2,27 @@
 
 ## 当前状态
 
-V1.2.1 已完成：**Web 控制台**（`:8080`）+ API + Worker + Milvus；在 V1.2 质量闭环基础上，将真实浏览器写操作门禁隔离到 `e2e` 租户，并在成功路径自动清理临时知识库和账号。
+V1.5.0 RAG Quality Upgrade P1 已完成：保留现有 `VECTOR / HYBRID / RERANK` 执行模式和 `CLASSIC` 默认值，新增可选 parent-child、QA-assisted、combined 索引与检索链路。
 
 ## 最近进展
+
+### 2026-07-19（V1.5.0 RAG Quality Upgrade P1）
+- [QA 候选生成] — Worker 通过带 internal key 的内部 API 分批请求候选问答（每批最多 16 个 source），API 复用现有 `LlmClient` 和 LLM 凭据；严格解析 JSON、过滤未知 source/空值、按 source 去重并限制最多 3 条。
+- [QA 索引与降级] — `QA_ASSISTED` 以普通原文块为 QA source，`COMBINED` 以父块为 source；QA 块与可检索原文块/子块共同进入 Embedding 和 Milvus，同时保存 `source_chunk_id`、问题、答案和 source 类型。QA 调用或响应失败时不影响原文摄入完成。
+- [QA 命中回填] — `QA_ASSISTED / COMBINED` 命中 QA 块后回填同知识库、同文档 source 内容，并保留命中 QA、source、问题、答案和 profile provenance；`COMBINED` 对 child source 继续回填 parent 上下文，多个入口回填同一最终块时保留最高分命中。
+- [模式切换闭环] — 更新知识库 profile 需要 `MAINTENANCE` 权限并自动清理旧索引、重新入队全部文档；Worker Redis payload 同时兼容 camel/snake case profile 字段，Web 刷新文档和任务状态。
+- [兼容与默认值] — 旧 `CLASSIC / PARENT_CHILD` 行为保持不变，默认仍为 `CLASSIC`，不会在质量门禁通过前自动切换。
+- [P2 明确保留] — 当前多 profile 评估是在知识库活动物理索引上比较检索行为，不能直接作为跨索引默认启用门禁；P2 需增加 profile 隔离索引或可过滤统一超集，再完成 Combined 分数融合、命中率/引用质量不回退门禁自动化和可视化增强。
+- [验证] — API 聚焦测试通过 97 个，Worker 聚焦测试通过 39 个，Web 聚焦测试通过 7 个，Web 生产构建通过。
+
+### 2026-07-18（V1.5.0 RAG Quality Upgrade P0）
+- [Retrieval profile 主干] — 新增 `CLASSIC / PARENT_CHILD / QA_ASSISTED / COMBINED`，知识库持久化默认 profile，请求可临时覆盖；保留原有 `VECTOR / HYBRID / RERANK` 作为检索执行模式。
+- [Parent-child 索引] — 摄入消息携带知识库 profile；`PARENT_CHILD / COMBINED` 摄入生成父块和子块，只对子块做 Embedding/Milvus 索引，同时把父块保存到 PostgreSQL。检索命中子块后按 `parent_chunk_id` 回填父块，并保留命中子块溯源元数据；Hybrid BM25 排除父块作为直接入口。
+- [多 profile 评估] — RAG eval 一次可运行多个 profile，每个 case/profile 分别保存结果，运行记录保存 profile 集合，评估页展示当前活动物理索引上的 profile 行为对比。
+- [最小 Web 设置] — 知识库索引维护区可保存默认 profile；评估页可勾选多 profile 对比。旧请求不传 profile 时仍按 classic 兼容执行。
+- [默认启用策略] — 本阶段不修改现有默认逻辑；只有 classic 对比命中率和引用质量不回退后，才允许调整默认 profile。
+- [P1 明确保留] — 自动 QA 候选生成、QA chunk/source provenance、QA-assisted 双入口召回仍待实现；当前 `QA_ASSISTED` 仅具备 profile 传递/评估骨架。
+- [P2 明确保留] — Combined 多路分数融合调参、默认启用门禁自动化、评估可视化增强仍待实现。
 
 ### 2026-07-14（V1.2.1 E2E 隔离与清理）
 - [受限测试账号删除] — 新增 `DELETE /api/v1/ops/accounts/{username}`；既有 `/ops/**` 的 `OPS_ADMIN` 校验之外，服务层只允许物理删除租户严格为 `e2e`、用户名以小写 `e2e_` 开头的账号。成功操作记录 `ACCOUNT_DELETE_E2E` 审计；账号管理页面不提供通用删除操作。

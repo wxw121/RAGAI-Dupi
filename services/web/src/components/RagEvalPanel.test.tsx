@@ -146,6 +146,56 @@ describe('RagEvalPanel', () => {
     expect(api.deleteRagEvalCase).toHaveBeenCalledWith('kb-1', 'case-id-1')
   })
 
+
+  it('runs eval against selected retrieval profiles', async () => {
+    api.listRagEvalCases.mockResolvedValue([
+      { id: 'case-id-1', caseKey: 'case-1', query: 'Question?', minHits: 1, topK: 5, mustContainAny: [] },
+    ])
+    api.listRagEvalRuns.mockResolvedValue([])
+    api.runRagEval.mockResolvedValue({
+      id: 'run-1',
+      kbId: 'kb-1',
+      useRerank: false,
+      profileSet: ['CLASSIC', 'PARENT_CHILD'],
+      passedCount: 2,
+      totalCount: 2,
+      status: 'COMPLETED',
+      failureMessage: null,
+      createdAt: '2026-07-12T00:01:00Z',
+      results: [],
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(<RagEvalPanel kbId="kb-1" />)
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+
+    await act(async () => {
+      checkbox('profile-PARENT_CHILD').click()
+      await Promise.resolve()
+    })
+
+    const runButton = container?.querySelector<HTMLButtonElement>('[aria-label="Run RAG eval"]')
+    expect(runButton).toBeTruthy()
+    expect(runButton?.disabled).toBe(false)
+
+    await act(async () => {
+      runButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+    })
+
+    expect(api.runRagEval).toHaveBeenCalledWith('kb-1', {
+      useRerank: false,
+      profiles: ['CLASSIC', 'PARENT_CHILD'],
+    })
+  })
+
   function input(name: string): HTMLInputElement {
     const field = container?.querySelector<HTMLInputElement>(`input[name="${name}"]`)
     if (!field) throw new Error(`Missing input ${name}`)

@@ -1,5 +1,6 @@
 package com.dupi.rag.dto;
 
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -24,6 +25,7 @@ public class RagEvalRunResultResponse {
     private String matchedFileName;
     private String matchedToken;
     private String retrievalMode;
+    private RetrievalProfile retrievalProfile;
     private String fallbackReason;
     private String embeddingModel;
     private Integer embeddingDimension;

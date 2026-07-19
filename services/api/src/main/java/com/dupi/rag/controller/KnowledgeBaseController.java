@@ -46,6 +46,19 @@ public class KnowledgeBaseController {
         return knowledgeBaseService.get(kbId);
     }
 
+    @PatchMapping("/{kbId}/retrieval-profile")
+    public KnowledgeBaseResponse updateRetrievalProfile(
+            @PathVariable UUID kbId,
+            @Valid @RequestBody UpdateKnowledgeBaseRetrievalProfileRequest request
+    ) {
+        KnowledgeBaseResponse response = knowledgeBaseService.updateRetrievalProfile(
+                kbId,
+                request.getRetrievalProfile()
+        );
+        ingestJobService.reindexKnowledgeBase(kbId);
+        return response;
+    }
+
     @DeleteMapping("/{kbId}")
     public void delete(@PathVariable UUID kbId) {
         knowledgeBaseService.delete(kbId);
@@ -177,6 +190,10 @@ public class KnowledgeBaseController {
             @PathVariable UUID kbId,
             @RequestBody(required = false) RagEvalRunRequest request
     ) {
-        return ragEvalService.run(kbId, request != null && Boolean.TRUE.equals(request.getUseRerank()));
+        return ragEvalService.run(
+                kbId,
+                request != null && Boolean.TRUE.equals(request.getUseRerank()),
+                request == null ? null : request.getProfiles()
+        );
     }
 }

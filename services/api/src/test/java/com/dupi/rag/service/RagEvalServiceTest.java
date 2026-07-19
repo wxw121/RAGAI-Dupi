@@ -3,8 +3,10 @@ package com.dupi.rag.service;
 import com.dupi.rag.domain.entity.RagEvalCase;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.RagEvalCaseRequest;
 import com.dupi.rag.dto.RetrievalHit;
+import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.dto.RetrieveResponse;
 import com.dupi.rag.repository.RagEvalCaseRepository;
 import com.dupi.rag.repository.RagEvalRunRepository;
@@ -12,6 +14,7 @@ import com.dupi.rag.repository.RagEvalRunResultRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -119,6 +122,59 @@ class RagEvalServiceTest {
         assertThat(listed).hasSize(1);
         verify(knowledgeBaseService, times(2)).findOrThrow(kbId);
         verify(caseRepository).delete(existing);
+    }
+
+
+    @Test
+    void runEvaluatesEveryCaseAgainstEveryRequestedProfile() {
+        UUID kbId = UUID.randomUUID();
+        UUID caseId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        UUID chunkId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        RagEvalCase evalCase = caseEntity(kbId, caseId);
+        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(retrievalService.retrieve(argThat(id -> id.equals(kbId)), any())).thenAnswer(inv -> {
+            RetrieveRequest request = inv.getArgument(1);
+            return RetrieveResponse.builder()
+                    .query(request.getQuery())
+                    .retrievalMode("vector")
+                    .diagnostics(Map.of(
+                            "retrievalMode", "vector",
+                            "retrievalProfile", request.getRetrievalProfile().wireValue(),
+                            "embeddingModel", "embed",
+                            "embeddingDimension", 1024
+                    ))
+                    .hits(List.of(RetrievalHit.builder()
+                            .chunkId(chunkId)
+                            .docId(docId)
+                            .fileName("guide.md")
+                            .content("Use install command")
+                            .score(0.8)
+                            .metadata(Map.of())
+                            .build()))
+                    .build();
+        });
+        when(runRepository.save(any(RagEvalRun.class))).thenAnswer(inv -> {
+            RagEvalRun run = inv.getArgument(0);
+            run.setId(runId);
+            return run;
+        });
+
+        var response = service().run(kbId, false, List.of(RetrievalProfile.CLASSIC, RetrievalProfile.PARENT_CHILD));
+
+        assertThat(response.getTotalCount()).isEqualTo(2);
+        assertThat(response.getProfileSet()).containsExactly(RetrievalProfile.CLASSIC, RetrievalProfile.PARENT_CHILD);
+        assertThat(response.getResults()).extracting(result -> result.getRetrievalProfile())
+                .containsExactly(RetrievalProfile.CLASSIC, RetrievalProfile.PARENT_CHILD);
+        ArgumentCaptor<RetrieveRequest> requestCaptor = ArgumentCaptor.forClass(RetrieveRequest.class);
+        verify(retrievalService, times(2)).retrieve(argThat(id -> id.equals(kbId)), requestCaptor.capture());
+        assertThat(requestCaptor.getAllValues()).extracting(RetrieveRequest::getRetrievalProfile)
+                .containsExactly(RetrievalProfile.CLASSIC, RetrievalProfile.PARENT_CHILD);
+        verify(resultRepository, times(2)).save(ArgumentMatchers.argThat(result ->
+                result.getRetrievalProfile() == RetrievalProfile.CLASSIC
+                        || result.getRetrievalProfile() == RetrievalProfile.PARENT_CHILD
+        ));
     }
 
     @Test

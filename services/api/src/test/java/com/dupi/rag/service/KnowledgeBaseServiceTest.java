@@ -4,6 +4,7 @@ import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.config.LlmProperties;
 import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.CreateKnowledgeBaseRequest;
 import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.KnowledgeBaseRepository;
@@ -87,6 +88,40 @@ class KnowledgeBaseServiceTest {
         assertThat(response.getEmbeddingDimension()).isEqualTo(256);
         assertThat(response.isEmbeddingConfigCurrent()).isFalse();
         assertThat(response.getEmbeddingConfigWarning()).contains("current embedding config");
+    }
+
+    @Test
+    void createPersistsSelectedRetrievalProfile() {
+        CreateKnowledgeBaseRequest request = new CreateKnowledgeBaseRequest();
+        request.setName("KB");
+        request.setRetrievalProfile(RetrievalProfile.PARENT_CHILD);
+        when(repository.save(any(KnowledgeBase.class))).thenAnswer(inv -> {
+            KnowledgeBase kb = inv.getArgument(0);
+            kb.setId(UUID.randomUUID());
+            return kb;
+        });
+
+        var response = service.create(request);
+
+        assertThat(response.getRetrievalProfile()).isEqualTo(RetrievalProfile.PARENT_CHILD);
+        verify(repository).save(argThat(kb -> kb.getRetrievalProfile() == RetrievalProfile.PARENT_CHILD));
+    }
+
+    @Test
+    void updateRetrievalProfilePersistsSelectedProfile() {
+        UUID id = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(id)
+                .name("KB")
+                .retrievalProfile(RetrievalProfile.CLASSIC)
+                .build();
+        when(repository.findByIdAndTenantId(id, "default")).thenReturn(Optional.of(kb));
+        when(repository.save(any(KnowledgeBase.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        var response = service.updateRetrievalProfile(id, RetrievalProfile.QA_ASSISTED);
+
+        assertThat(response.getRetrievalProfile()).isEqualTo(RetrievalProfile.QA_ASSISTED);
+        verify(repository).save(argThat(saved -> saved.getRetrievalProfile() == RetrievalProfile.QA_ASSISTED));
     }
 
     @Test

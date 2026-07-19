@@ -263,8 +263,9 @@ cd services/api
 | V1 | 知识库 CRUD、异步摄入、纯向量检索、SSE RAG、Web 控制台 |
 | V1.1 | 真实浏览器 E2E 门禁、摄入诊断、RAG 评估闭环、上传治理提示、聚合运维告警 |
 | V1.2 | 索引详情、结构化 Chat 错误、持久化 RAG 评估、混合检索/Rerank 控制、Webhook、导出恢复 |
+| V1.5 | Parent-Child / QA-assisted 索引、检索 profile A/B、多 profile RAG 评估 |
 | V2 | BM25 sparse 生产调优、语义分块、生成中断、完整对象/向量灾备恢复 |
-| V3 | Parent-Child 索引、多模态 OCR、Pipeline DSL |
+| V3 | 多模态 OCR、Pipeline DSL |
 | V4 | K8s、多租户、合规审计 |
 
 详细规划见 [docs/todo.md](docs/todo.md) 与 [docs/decisions.md](docs/decisions.md)。

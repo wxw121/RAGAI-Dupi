@@ -4,6 +4,7 @@ import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.config.LlmProperties;
 import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.CreateKnowledgeBaseRequest;
 import com.dupi.rag.dto.KnowledgeBaseResponse;
 import com.dupi.rag.exception.ResourceNotFoundException;
@@ -46,6 +47,7 @@ public class KnowledgeBaseService {
                 .embeddingDimension(embeddingDimension)
                 .chunkStrategy(request.getChunkStrategy())
                 .retrievalMode(request.getRetrievalMode())
+                .retrievalProfile(request.getRetrievalProfile())
                 .tenantId(TenantContext.getTenantId())
                 .build();
         return toResponse(repository.save(kb));
@@ -53,6 +55,13 @@ public class KnowledgeBaseService {
 
     public KnowledgeBaseResponse get(UUID id) {
         return toResponse(findOrThrow(id));
+    }
+
+    @Transactional
+    public KnowledgeBaseResponse updateRetrievalProfile(UUID id, RetrievalProfile retrievalProfile) {
+        KnowledgeBase kb = findOrThrow(id);
+        kb.setRetrievalProfile(retrievalProfile);
+        return toResponse(repository.save(kb));
     }
 
     public List<KnowledgeBaseResponse> list() {
@@ -116,6 +125,7 @@ public class KnowledgeBaseService {
                 .embeddingConfigWarning(embeddingConfigCurrent ? null : embeddingConfigWarning(kb))
                 .chunkStrategy(kb.getChunkStrategy())
                 .retrievalMode(kb.getRetrievalMode())
+                .retrievalProfile(kb.getRetrievalProfile())
                 .createdAt(kb.getCreatedAt())
                 .updatedAt(kb.getUpdatedAt())
                 .build();

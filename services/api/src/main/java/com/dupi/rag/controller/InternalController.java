@@ -1,8 +1,12 @@
 package com.dupi.rag.controller;
 
+import com.dupi.rag.dto.QaCandidatesRequest;
+import com.dupi.rag.dto.QaCandidatesResponse;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.service.KnowledgeBaseService;
+import com.dupi.rag.service.QaGenerationService;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -19,6 +23,7 @@ public class InternalController {
     private final KnowledgeBaseService knowledgeBaseService;
     private final ChunkRepository chunkRepository;
     private final DocumentRepository documentRepository;
+    private final QaGenerationService qaGenerationService;
 
     @GetMapping("/knowledge-bases/{kbId}/chunks")
     public List<Map<String, Object>> listChunks(@PathVariable UUID kbId) {
@@ -35,5 +40,13 @@ public class InternalController {
                         "metadata", c.getMetadata() != null ? c.getMetadata() : Map.of()
                 ))
                 .toList();
+    }
+
+    @PostMapping("/knowledge-bases/{kbId}/qa-candidates")
+    public QaCandidatesResponse generateQaCandidates(
+            @PathVariable UUID kbId,
+            @Valid @RequestBody QaCandidatesRequest request
+    ) {
+        return qaGenerationService.generate(kbId, request);
     }
 }

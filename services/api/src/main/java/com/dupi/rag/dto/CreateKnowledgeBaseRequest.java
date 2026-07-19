@@ -2,6 +2,7 @@ package com.dupi.rag.dto;
 
 import com.dupi.rag.domain.enums.ChunkStrategy;
 import com.dupi.rag.domain.enums.RetrievalMode;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -36,4 +37,6 @@ public class CreateKnowledgeBaseRequest {
     private ChunkStrategy chunkStrategy = ChunkStrategy.RECURSIVE;
 
     private RetrievalMode retrievalMode = RetrievalMode.VECTOR;
+
+    private RetrievalProfile retrievalProfile = RetrievalProfile.CLASSIC;
 }

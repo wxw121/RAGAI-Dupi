@@ -2,6 +2,7 @@ package com.dupi.rag.dto;
 
 import com.dupi.rag.domain.enums.ChunkStrategy;
 import com.dupi.rag.domain.enums.RetrievalMode;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import lombok.Builder;
 import lombok.Data;
 
@@ -24,6 +25,7 @@ public class KnowledgeBaseResponse {
     private String embeddingConfigWarning;
     private ChunkStrategy chunkStrategy;
     private RetrievalMode retrievalMode;
+    private RetrievalProfile retrievalProfile;
     private Instant createdAt;
     private Instant updatedAt;
 }

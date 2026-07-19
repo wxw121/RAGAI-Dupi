@@ -2,6 +2,7 @@ package com.dupi.rag.domain.entity;
 
 import com.dupi.rag.domain.enums.ChunkStrategy;
 import com.dupi.rag.domain.enums.RetrievalMode;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -58,6 +59,11 @@ public class KnowledgeBase {
     @Column(name = "retrieval_mode", nullable = false)
     @Builder.Default
     private RetrievalMode retrievalMode = RetrievalMode.VECTOR;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "retrieval_profile", nullable = false)
+    @Builder.Default
+    private RetrievalProfile retrievalProfile = RetrievalProfile.CLASSIC;
 
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;

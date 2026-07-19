@@ -7,6 +7,7 @@ import com.dupi.rag.config.ApiTokenService;
 import com.dupi.rag.config.AuditProperties;
 import com.dupi.rag.config.RedisQueueProperties;
 import com.dupi.rag.config.UploadRateLimitProperties;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.*;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
@@ -171,6 +172,9 @@ class ControllerLayerTest {
         UUID sessionId = UUID.randomUUID();
         UUID secondSessionId = UUID.randomUUID();
         CreateKnowledgeBaseRequest create = new CreateKnowledgeBaseRequest();
+        UpdateKnowledgeBaseRetrievalProfileRequest updateProfile =
+                new UpdateKnowledgeBaseRetrievalProfileRequest();
+        updateProfile.setRetrievalProfile(RetrievalProfile.PARENT_CHILD);
         RetrieveRequest retrieve = new RetrieveRequest();
         retrieve.setQuery("q");
         ChatRequest streamChat = new ChatRequest();
@@ -223,6 +227,7 @@ class ControllerLayerTest {
         when(kbService.create(create)).thenReturn(kbResponse);
         when(kbService.list()).thenReturn(List.of(kbResponse));
         when(kbService.get(kbId)).thenReturn(kbResponse);
+        when(kbService.updateRetrievalProfile(kbId, RetrievalProfile.PARENT_CHILD)).thenReturn(kbResponse);
         when(retrievalService.retrieve(kbId, retrieve)).thenReturn(retrieveResponse);
         when(chatService.chatStream(kbId, streamChat)).thenReturn(Flux.just(ServerSentEvent.<String>builder().event("done").data("{}").build()));
         when(chatService.chat(kbId, syncChat)).thenReturn("answer");
@@ -237,13 +242,15 @@ class ControllerLayerTest {
         when(ragEvalService.createCase(eq(kbId), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.updateCase(eq(kbId), eq(ragEvalCase.getId()), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.listRuns(kbId)).thenReturn(List.of(ragEvalRun));
-        when(ragEvalService.run(eq(kbId), eq(true))).thenReturn(ragEvalRun);
+        when(ragEvalService.run(eq(kbId), eq(true), eq(List.of(RetrievalProfile.CLASSIC))))
+                .thenReturn(ragEvalRun);
         when(knowledgeBaseExportService.exportKnowledgeBase(kbId)).thenReturn(exportResponse);
         when(knowledgeBaseExportService.restore(importRequest)).thenReturn(kbResponse);
 
         assertThat(controller.create(create)).isSameAs(kbResponse);
         assertThat(controller.list()).containsExactly(kbResponse);
         assertThat(controller.get(kbId)).isSameAs(kbResponse);
+        assertThat(controller.updateRetrievalProfile(kbId, updateProfile)).isSameAs(kbResponse);
         controller.delete(kbId);
         assertThat(controller.retrieve(kbId, retrieve)).isSameAs(retrieveResponse);
         assertThat(controller.chatStream(kbId, streamChat).collectList().block()).hasSize(1);
@@ -274,6 +281,7 @@ class ControllerLayerTest {
         assertThat(controller.runRagEval(kbId, ragEvalRunRequest)).isSameAs(ragEvalRun);
 
         verify(kbService).delete(kbId);
+        verify(ingestJobService, times(2)).reindexKnowledgeBase(kbId);
         verify(chatService).cancel("s1");
         verify(chatService, never()).cancel(null);
         verify(chatSessionService).delete(kbId, sessionId);
@@ -492,7 +500,13 @@ class ControllerLayerTest {
         KnowledgeBaseService kbService = mock(KnowledgeBaseService.class);
         ChunkRepository chunkRepository = mock(ChunkRepository.class);
         DocumentRepository documentRepository = mock(DocumentRepository.class);
-        InternalController controller = new InternalController(kbService, chunkRepository, documentRepository);
+        QaGenerationService qaGenerationService = mock(QaGenerationService.class);
+        InternalController controller = new InternalController(
+                kbService,
+                chunkRepository,
+                documentRepository,
+                qaGenerationService
+        );
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         UUID chunkId = UUID.randomUUID();
@@ -509,6 +523,10 @@ class ControllerLayerTest {
         when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
                 Chunk.builder().id(chunkId).kbId(kbId).docId(docId).chunkIndex(0).content("content").metadata(null).build()
         ));
+        QaCandidatesRequest qaRequest = new QaCandidatesRequest();
+        qaRequest.setDocId(docId);
+        QaCandidatesResponse qaResponse = QaCandidatesResponse.builder().candidates(List.of()).build();
+        when(qaGenerationService.generate(kbId, qaRequest)).thenReturn(qaResponse);
 
         List<Map<String, Object>> chunks = controller.listChunks(kbId);
 
@@ -518,6 +536,7 @@ class ControllerLayerTest {
                 .containsEntry("file_name", "doc.md")
                 .containsEntry("content", "content")
                 .containsEntry("metadata", Map.of());
+        assertThat(controller.generateQaCandidates(kbId, qaRequest)).isSameAs(qaResponse);
         verify(kbService).findSystemOrThrow(kbId);
     }
 

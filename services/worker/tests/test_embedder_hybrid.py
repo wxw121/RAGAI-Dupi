@@ -225,3 +225,70 @@ def test_hybrid_retrieve_without_rerank_fetches_default_corpus(monkeypatch):
     result = hybrid.hybrid_retrieve("kb", "hello", 2, "m", 3, use_rerank=False)
 
     assert [hit["chunk_id"] for hit in result] == ["v1", "b1"]
+
+
+def test_hybrid_retrieve_excludes_parent_chunks_from_bm25_entries(monkeypatch):
+    class FakeEmbedder:
+        def __init__(self, model):
+            self.model = model
+
+        def embed(self, query):
+            return [0.1]
+
+    class FakeIndexer:
+        def __init__(self, dimension):
+            self.dimension = dimension
+
+        def search(self, kb_id, vector, top_k):
+            return []
+
+    corpus = [
+        {
+            "chunk_id": "parent",
+            "doc_id": "d",
+            "content": "target phrase",
+            "metadata": {"chunk_role": "parent"},
+        },
+        {
+            "chunk_id": "child",
+            "doc_id": "d",
+            "content": "target phrase",
+            "metadata": {"chunk_role": "child", "parent_chunk_id": "parent"},
+        },
+    ]
+    monkeypatch.setattr(hybrid, "Embedder", FakeEmbedder)
+    monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
+
+    result = hybrid.hybrid_retrieve(
+        "kb",
+        "target phrase",
+        5,
+        "m",
+        3,
+        corpus_fetcher=lambda _: corpus,
+    )
+
+    assert [hit["chunk_id"] for hit in result] == ["child"]
+
+
+def test_hybrid_retrieve_attaches_retrieval_profile_metadata(monkeypatch):
+    class FakeEmbedder:
+        def __init__(self, model):
+            self.model = model
+
+        def embed(self, query):
+            return [0.1]
+
+    class FakeIndexer:
+        def __init__(self, dimension):
+            self.dimension = dimension
+
+        def search(self, kb_id, vector, top_k):
+            return [{"chunk_id": "v1", "doc_id": "d", "content": "vector hello", "score": 0.8}]
+
+    monkeypatch.setattr(hybrid, "Embedder", FakeEmbedder)
+    monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
+
+    result = hybrid.hybrid_retrieve("kb", "hello", 1, "m", 3, retrieval_profile="qa-assisted")
+
+    assert result[0]["metadata"]["retrieval_profile"] == "qa-assisted"

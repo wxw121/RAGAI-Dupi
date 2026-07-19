@@ -8,6 +8,7 @@ import {
   reindexKnowledgeBase,
   retryIngestJob,
   retryVectorCleanupTask,
+  updateKnowledgeBaseRetrievalProfile,
 } from '@/api/knowledgeBase'
 import { deleteDocument, getDocumentIndexDetail, getIngestJob, listDocuments, uploadDocuments } from '@/api/documents'
 import type {
@@ -16,6 +17,7 @@ import type {
   IngestJob,
   KnowledgeBase,
   OpsGuardrails,
+  RetrievalProfile,
   VectorCleanupTask,
 } from '@/types'
 import { AppLayout } from '@/components/AppLayout'
@@ -37,6 +39,7 @@ import {
   MessageSquare,
   RefreshCw,
   RotateCcw,
+  Save,
 } from 'lucide-react'
 
 type Tab = 'documents' | 'chat' | 'eval'
@@ -57,6 +60,8 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const [loading, setLoading] = useState(true)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [reindexing, setReindexing] = useState(false)
+  const [retrievalProfile, setRetrievalProfile] = useState<RetrievalProfile>('CLASSIC')
+  const [savingRetrievalProfile, setSavingRetrievalProfile] = useState(false)
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
   const [retryingCleanupTaskId, setRetryingCleanupTaskId] = useState<string | null>(null)
   const [indexDetail, setIndexDetail] = useState<DocumentIndexDetail | null>(null)
@@ -68,7 +73,9 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const loadKb = useCallback(async () => {
     if (!kbId) return
     try {
-      setKb(await getKnowledgeBase(kbId))
+      const loadedKb = await getKnowledgeBase(kbId)
+      setKb(loadedKb)
+      setRetrievalProfile(loadedKb.retrievalProfile ?? 'CLASSIC')
     } catch (e) {
       showError(e instanceof Error ? e.message : '加载知识库失败')
     }
@@ -259,6 +266,22 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
     }
   }
 
+  const handleRetrievalProfileUpdate = async () => {
+    if (!kbId) return
+    setSavingRetrievalProfile(true)
+    try {
+      const updatedKb = await updateKnowledgeBaseRetrievalProfile(kbId, retrievalProfile)
+      setKb(updatedKb)
+      setRetrievalProfile(updatedKb.retrievalProfile)
+      await Promise.all([loadDocs(), loadJobs()])
+      showSuccess('索引模式已更新，已开始重建索引')
+    } catch (e) {
+      showError(e instanceof Error ? e.message : '更新索引模式失败')
+    } finally {
+      setSavingRetrievalProfile(false)
+    }
+  }
+
   const handleRetryJob = async (job: IngestJob) => {
     if (!kbId) return
     setRetryingJobId(job.id)
@@ -389,6 +412,39 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
                   <RefreshCw className="h-4 w-4" />
                 )}
                 重建索引
+              </Button>
+            </div>
+
+            <div className="mt-4 flex flex-col gap-3 border-t border-border pt-4 md:flex-row md:items-end">
+              <div className="min-w-0 flex-1">
+                <label htmlFor="retrieval-profile" className="mb-1 block text-sm font-medium">
+                  索引模式
+                </label>
+                <select
+                  id="retrieval-profile"
+                  name="retrievalProfile"
+                  value={retrievalProfile}
+                  onChange={(event) => setRetrievalProfile(event.target.value as RetrievalProfile)}
+                  className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                >
+                  <option value="CLASSIC">Classic</option>
+                  <option value="PARENT_CHILD">Parent-child</option>
+                  <option value="QA_ASSISTED">QA-assisted</option>
+                  <option value="COMBINED">Combined</option>
+                </select>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={savingRetrievalProfile || retrievalProfile === kb.retrievalProfile}
+                onClick={handleRetrievalProfileUpdate}
+              >
+                {savingRetrievalProfile ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4" />
+                )}
+                保存索引模式
               </Button>
             </div>
 

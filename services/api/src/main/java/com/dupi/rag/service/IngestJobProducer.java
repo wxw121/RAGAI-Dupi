@@ -32,6 +32,7 @@ public class IngestJobProducer {
                     .chunkSize(kb.getChunkSize())
                     .chunkOverlap(kb.getChunkOverlap())
                     .chunkStrategy(kb.getChunkStrategy().name().toLowerCase())
+                    .retrievalProfile(kb.getRetrievalProfile().wireValue())
                     .embeddingModel(kb.getEmbeddingModel())
                     .embeddingDimension(kb.getEmbeddingDimension())
                     .build();

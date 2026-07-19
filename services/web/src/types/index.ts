@@ -1,3 +1,5 @@
+export type RetrievalProfile = 'CLASSIC' | 'PARENT_CHILD' | 'QA_ASSISTED' | 'COMBINED'
+
 export interface KnowledgeBase {
   id: string
   tenantId: string
@@ -12,6 +14,7 @@ export interface KnowledgeBase {
   embeddingConfigWarning: string | null
   chunkStrategy: string
   retrievalMode: string
+  retrievalProfile: RetrievalProfile
   createdAt: string
   updatedAt: string
 }
@@ -23,6 +26,7 @@ export interface CreateKnowledgeBaseRequest {
   chunkOverlap?: number
   topK?: number
   retrievalMode?: 'VECTOR' | 'HYBRID'
+  retrievalProfile?: RetrievalProfile
 }
 
 export interface Document {
@@ -239,6 +243,7 @@ export interface RetrieveRequest {
   query: string
   topK?: number
   useRerank?: boolean
+  retrievalProfile?: RetrievalProfile
 }
 
 export interface RetrieveResponse {
@@ -282,6 +287,7 @@ export interface RagEvalResult {
   matchedFileName: string | null
   matchedToken: string | null
   retrievalMode: string | null
+  retrievalProfile?: RetrievalProfile | null
   fallbackReason: string | null
   embeddingModel: string | null
   embeddingDimension: number | null
@@ -292,6 +298,7 @@ export interface RagEvalRun {
   id: string
   kbId: string
   useRerank: boolean
+  profileSet?: RetrievalProfile[]
   passedCount: number
   totalCount: number
   status: 'RUNNING' | 'COMPLETED' | 'FAILED'
@@ -302,6 +309,7 @@ export interface RagEvalRun {
 
 export interface RagEvalRunRequest {
   useRerank?: boolean
+  profiles?: RetrievalProfile[]
 }
 
 export interface DocumentIndexDetail {
@@ -333,6 +341,7 @@ export interface KnowledgeBaseSnapshot {
   embeddingDimension: number
   chunkStrategy: 'RECURSIVE' | 'SEMANTIC' | 'MARKDOWN'
   retrievalMode: 'VECTOR' | 'HYBRID'
+  retrievalProfile?: RetrievalProfile
 }
 
 export interface DocumentSnapshot {
@@ -389,6 +398,7 @@ export interface KnowledgeBaseImport {
     embeddingDimension?: number
     chunkStrategy?: KnowledgeBaseSnapshot['chunkStrategy']
     retrievalMode?: KnowledgeBaseSnapshot['retrievalMode']
+    retrievalProfile?: RetrievalProfile
   }
   evalCases?: RagEvalCaseRequest[]
 }

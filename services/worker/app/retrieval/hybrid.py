@@ -74,6 +74,19 @@ def bm25_search(corpus: list[dict], query: str, top_k: int) -> list[dict]:
     return [{**doc, "score": float(score)} for doc, score in ranked if score > 0]
 
 
+
+def attach_profile_metadata(hits: list[dict], retrieval_profile: str) -> list[dict]:
+    if retrieval_profile == "classic":
+        return hits
+    results = []
+    for hit in hits:
+        item = dict(hit)
+        metadata = dict(item.get("metadata") or {})
+        metadata["retrieval_profile"] = retrieval_profile
+        item["metadata"] = metadata
+        results.append(item)
+    return results
+
 def rerank_hits(query: str, hits: list[dict], top_k: int) -> list[dict]:
     model = get_reranker()
     if model is None or not hits:
@@ -114,6 +127,7 @@ def hybrid_retrieve(
     embedding_model: str,
     embedding_dimension: int,
     use_rerank: bool = False,
+    retrieval_profile: str = "classic",
     corpus_fetcher=None,
 ) -> list[dict]:
     """执行混合检索主流程：向量召回、BM25 召回、RRF 融合、可选重排。
@@ -127,10 +141,15 @@ def hybrid_retrieve(
     vector_hits = indexer.search(kb_id, embedder.embed(query), top_k * 2)
 
     corpus = corpus_fetcher(kb_id) if corpus_fetcher else fetch_kb_corpus(kb_id)
+    corpus = [
+        item
+        for item in corpus
+        if (item.get("metadata") or {}).get("chunk_role") != "parent"
+    ]
 
     bm25_hits = bm25_search(corpus, query, top_k * 2)
     fused = rrf_fusion(vector_hits, bm25_hits)[: top_k * 2]
 
     if use_rerank:
-        return rerank_hits(query, fused, top_k)
-    return fused[:top_k]
+        return attach_profile_metadata(rerank_hits(query, fused, top_k), retrieval_profile)
+    return attach_profile_metadata(fused[:top_k], retrieval_profile)
