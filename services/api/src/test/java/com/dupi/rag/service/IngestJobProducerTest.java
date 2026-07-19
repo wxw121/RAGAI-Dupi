@@ -31,7 +31,7 @@ class IngestJobProducerTest {
         ProfileIndexStateService profileIndexStateService = mock(ProfileIndexStateService.class);
         IngestJobProducer producer = new IngestJobProducer(redis, props, mapper, profileIndexStateService);
         IngestJob job = IngestJob.builder().id(UUID.randomUUID()).kbId(UUID.randomUUID()).docId(UUID.randomUUID()).build();
-        when(profileIndexStateService.isV2Ready(job.getKbId())).thenReturn(false);
+        when(profileIndexStateService.isV2Activated(job.getKbId())).thenReturn(false);
         KnowledgeBase kb = KnowledgeBase.builder()
                 .chunkSize(300)
                 .chunkOverlap(30)

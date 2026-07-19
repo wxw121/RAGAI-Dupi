@@ -41,6 +41,7 @@ class ConfigAndExceptionTest {
     void profileIndexAndQualityGateEntitiesExposeSafeDefaults() {
         assertThat(Document.builder().build().getIndexSchemaVersion()).isEqualTo(1);
         assertThat(KnowledgeBase.builder().build().getIndexRevision()).isZero();
+        assertThat(KnowledgeBase.builder().build().isProfileIndexActivated()).isFalse();
         assertThat(RagEvalRun.builder().build().getGateSummary()).isEmpty();
         assertThat(RagEvalRunResult.builder().build().isHitPassed()).isFalse();
         assertThat(RagEvalRunResult.builder().build().isCitationEligible()).isFalse();

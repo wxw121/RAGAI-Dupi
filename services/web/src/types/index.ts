@@ -120,7 +120,11 @@ export interface IngestDiagnosis {
 
 export interface VectorCleanupTask {
   id: string
-  targetType: 'KNOWLEDGE_BASE' | 'DOCUMENT'
+  targetType:
+    | 'PROFILE_KNOWLEDGE_BASE'
+    | 'PROFILE_DOCUMENT'
+    | 'LEGACY_KNOWLEDGE_BASE'
+    | 'LEGACY_DOCUMENT'
   targetId: string
   status: 'PENDING' | 'COMPLETED' | 'FAILED'
   attemptCount: number

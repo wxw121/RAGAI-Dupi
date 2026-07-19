@@ -308,6 +308,60 @@ def test_hybrid_retrieve_attaches_retrieval_profile_metadata(monkeypatch):
     assert result[0]["metadata"]["retrieval_profile"] == "qa-assisted"
 
 
+def test_hybrid_retrieve_hydrates_vector_hit_provenance_from_corpus(monkeypatch):
+    class FakeEmbedder:
+        def __init__(self, model):
+            self.model = model
+
+        def embed(self, query):
+            return [0.1]
+
+    class FakeIndexer:
+        def __init__(self, dimension, collection_name=None, profile_schema=False):
+            self.dimension = dimension
+
+        def search_profile(self, kb_id, vector, top_k, profile, entry_kind=None):
+            return [{
+                "chunk_id": "qa-vector",
+                "doc_id": "d",
+                "content": "generated question and answer",
+                "score": 0.8,
+            }]
+
+    corpus = [{
+        "chunk_id": "qa-vector",
+        "doc_id": "d",
+        "file_name": "guide.md",
+        "content": "generated question and answer",
+        "metadata": {
+            "chunk_role": "qa",
+            "entry_kind": "qa",
+            "source_chunk_id": "source-1",
+            "profile_scope": ["qa-assisted"],
+        },
+    }]
+    monkeypatch.setattr(hybrid, "Embedder", FakeEmbedder)
+    monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
+    monkeypatch.setattr(hybrid, "rerank_hits", lambda query, hits, top_k: hits[:top_k])
+
+    result = hybrid.hybrid_retrieve(
+        "kb",
+        "unmatched",
+        1,
+        "m",
+        3,
+        use_rerank=True,
+        retrieval_profile="qa-assisted",
+        profile_index_ready=True,
+        corpus_fetcher=lambda _: corpus,
+    )
+
+    assert result[0]["file_name"] == "guide.md"
+    assert result[0]["metadata"]["chunk_role"] == "qa"
+    assert result[0]["metadata"]["source_chunk_id"] == "source-1"
+    assert result[0]["metadata"]["retrieval_profile"] == "qa-assisted"
+
+
 def test_filter_profile_corpus_isolates_classic_parent_child_and_qa_entries():
     corpus = [
         {

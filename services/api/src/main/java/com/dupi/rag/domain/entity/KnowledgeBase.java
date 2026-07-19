@@ -69,6 +69,10 @@ public class KnowledgeBase {
     @Builder.Default
     private Long indexRevision = 0L;
 
+    @Column(name = "profile_index_activated", nullable = false)
+    @Builder.Default
+    private boolean profileIndexActivated = false;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

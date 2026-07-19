@@ -2,6 +2,7 @@ package com.dupi.rag.service;
 
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.KnowledgeBaseRepository;
@@ -23,6 +24,7 @@ public class ProfileIndexStateService {
 
     public boolean isV2Ready(UUID kbId) {
         return documentRepository.countByKbId(kbId) > 0
+                && documentRepository.countByKbIdAndStatusNot(kbId, DocumentStatus.COMPLETED) == 0
                 && documentRepository.countByKbIdAndIndexSchemaVersionLessThan(
                         kbId,
                         TARGET_SCHEMA_VERSION
@@ -33,6 +35,27 @@ public class ProfileIndexStateService {
         return knowledgeBaseRepository.findById(kbId)
                 .map(KnowledgeBase::getIndexRevision)
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found: " + kbId));
+    }
+
+    public boolean isV2Activated(UUID kbId) {
+        return knowledgeBaseRepository.findById(kbId)
+                .map(KnowledgeBase::isProfileIndexActivated)
+                .orElse(false);
+    }
+
+    public boolean shouldDeferLegacyCleanup(UUID kbId) {
+        return knowledgeBaseRepository.findById(kbId).isPresent() && !isV2Ready(kbId);
+    }
+
+    @Transactional
+    public void activateV2Index(KnowledgeBase kb) {
+        KnowledgeBase locked = knowledgeBaseRepository.findByIdForUpdate(kb.getId())
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Knowledge base not found: " + kb.getId()
+                ));
+        locked.setProfileIndexActivated(true);
+        knowledgeBaseRepository.save(locked);
+        kb.setProfileIndexActivated(true);
     }
 
     @Transactional

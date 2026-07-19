@@ -10,6 +10,12 @@
 
 支持私有文档（PDF、DOCX、TXT、Markdown、Excel）上传、异步解析与向量化，结合大模型进行检索增强问答（SSE 流式）。
 
+### V1.5 升级与启用
+
+- V1.5 使用独立的 `MILVUS_PROFILE_COLLECTION` 保存 classic、parent-child、qa-assisted 和 combined 共用的可过滤 superset。已有知识库升级后需要执行一次“重建索引”；重建按文档滚动替换向量和 chunk，不会先清空整个在线索引。
+- 知识库仅在所有文档均为 `COMPLETED` 且 `index_schema_version=2` 时标记为 profile v2 ready。首次 ready 会持久化 cutover 状态并清理 Legacy；后续上传或重建期间仍使用 v2 中已完成的文档，不会回退到已清理的 Legacy。切换默认 profile 只改变检索入口，不会再次重建统一索引。
+- 非 classic profile 必须使用当前 `index_revision` 的 RAG 评估与 `CLASSIC` 对比，且至少包含 3 个 case、引用可评估、命中率和引用通过率均不回退。未通过时更新接口返回 HTTP `409`，错误码为 `retrieval_profile_gate_blocked`。
+
 ## 技术栈
 
 - **Web 控制台**：React 18 + Vite + TypeScript + Tailwind

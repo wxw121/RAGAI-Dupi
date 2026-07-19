@@ -7,8 +7,8 @@ V1.5.0 RAG Quality Upgrade P2 is complete: existing VECTOR / HYBRID / RERANK mod
 ## 最近进展
 
 ### 2026-07-19 (V1.5.0 RAG Quality Upgrade P2)
-- [Profile v2 isolated index] Worker ingest now builds one reusable original/parent/child/QA superset and writes a filterable `MILVUS_PROFILE_COLLECTION`; legacy original vectors are dual-written only until cutover remains safe.
-- [Readiness and revision] API tracks `index_schema_version=2`, knowledge-base `index_revision`, and separate legacy/profile cleanup targets so eval decisions are tied to the current index state.
+- [Profile v2 isolated index] Worker ingest now builds one reusable original/parent/child/QA superset and writes a filterable `MILVUS_PROFILE_COLLECTION`; legacy original vectors are dual-written until the knowledge base safely cuts over, after which the persisted cutover state prevents fallback to the deleted Legacy index.
+- [Readiness and revision] API requires every document to be `COMPLETED` at `index_schema_version=2`, tracks knowledge-base `index_revision`, and separates legacy/profile cleanup targets so eval decisions remain tied to the current index state. Reindex rolls documents in place instead of deleting the whole live profile index before transactional job creation.
 - [Combined weighted fusion] API vector and Worker hybrid retrieval query child and QA routes independently, then apply weighted RRF with `COMBINED_CHILD_WEIGHT=1.0`, `COMBINED_QA_WEIGHT=0.8`, and `RRF_K=60`; rerank runs after fusion.
 - [Quality gate] RAG eval automatically compares non-classic candidates against classic, stores hit/citation booleans, and returns PASSED/BLOCKED/INSUFFICIENT_DATA/STALE/INDEX_NOT_READY/NOT_EVALUATED decisions. Non-classic default activation requires a current PASSED gate or returns `409 retrieval_profile_gate_blocked`.
 - [Web panel] Knowledge-base settings show profile readiness, schema/revision, and gate badges; blocked candidates are disabled locally, and the RAG eval panel shows candidate-vs-classic rates, deltas, and reasons.
@@ -17,7 +17,7 @@ V1.5.0 RAG Quality Upgrade P2 is complete: existing VECTOR / HYBRID / RERANK mod
 - [QA 候选生成] — Worker 通过带 internal key 的内部 API 分批请求候选问答（每批最多 16 个 source），API 复用现有 `LlmClient` 和 LLM 凭据；严格解析 JSON、过滤未知 source/空值、按 source 去重并限制最多 3 条。
 - [QA 索引与降级] — `QA_ASSISTED` 以普通原文块为 QA source，`COMBINED` 以父块为 source；QA 块与可检索原文块/子块共同进入 Embedding 和 Milvus，同时保存 `source_chunk_id`、问题、答案和 source 类型。QA 调用或响应失败时不影响原文摄入完成。
 - [QA 命中回填] — `QA_ASSISTED / COMBINED` 命中 QA 块后回填同知识库、同文档 source 内容，并保留命中 QA、source、问题、答案和 profile provenance；`COMBINED` 对 child source 继续回填 parent 上下文，多个入口回填同一最终块时保留最高分命中。
-- [模式切换闭环] — 更新知识库 profile 需要 `MAINTENANCE` 权限并自动清理旧索引、重新入队全部文档；Worker Redis payload 同时兼容 camel/snake case profile 字段，Web 刷新文档和任务状态。
+- [模式切换闭环] — Worker Redis payload 同时兼容 camel/snake case profile 字段；P2 统一 superset 建成后，更新知识库 profile 只切换默认检索入口，不再清理索引或重新入队文档。
 - [兼容与默认值] — 旧 `CLASSIC / PARENT_CHILD` 行为保持不变，默认仍为 `CLASSIC`，不会在质量门禁通过前自动切换。
 - [验证] — API 聚焦测试通过 97 个，Worker 聚焦测试通过 39 个，Web 聚焦测试通过 7 个，Web 生产构建通过。
 

@@ -27,6 +27,7 @@ public class VectorCleanupTaskService {
     private final VectorCleanupTaskRepository repository;
     private final MilvusVectorService milvusVectorService;
     private final AuditLogService auditLogService;
+    private final ProfileIndexStateService profileIndexStateService;
 
     @Transactional
     public void enqueueKnowledgeBase(UUID kbId) {
@@ -58,6 +59,20 @@ public class VectorCleanupTaskService {
     @Transactional
     public void enqueueLegacyDocument(UUID docId) {
         enqueue(VectorCleanupTargetType.LEGACY_DOCUMENT, docId);
+    }
+
+    @Transactional
+    public void completePendingProfileKnowledgeBase(UUID kbId) {
+        repository.findByTargetTypeAndTargetIdAndStatus(
+                        VectorCleanupTargetType.PROFILE_KNOWLEDGE_BASE,
+                        kbId,
+                        VectorCleanupStatus.PENDING
+                )
+                .ifPresent(task -> {
+                    task.setStatus(VectorCleanupStatus.COMPLETED);
+                    task.setLastError(null);
+                    repository.save(task);
+                });
     }
 
     @Scheduled(cron = "${dupi.cleanup.orphan-vectors-cron:0 30 3 * * *}")
@@ -130,6 +145,11 @@ public class VectorCleanupTaskService {
     }
 
     private void process(VectorCleanupTask task, Instant now) {
+        if (task.getTargetType() == VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE
+                && profileIndexStateService.shouldDeferLegacyCleanup(task.getTargetId())) {
+            task.setNextAttemptAt(now.plus(Duration.ofMinutes(5)));
+            return;
+        }
         try {
             switch (task.getTargetType()) {
                 case PROFILE_KNOWLEDGE_BASE ->

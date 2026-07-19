@@ -74,7 +74,7 @@ public class KnowledgeBaseService {
 
     @Transactional
     public KnowledgeBaseResponse updateRetrievalProfile(UUID id, RetrievalProfile retrievalProfile) {
-        KnowledgeBase kb = findOrThrow(id);
+        KnowledgeBase kb = findForUpdateOrThrow(id);
         RetrievalProfile target = retrievalProfile == null ? RetrievalProfile.CLASSIC : retrievalProfile;
         if (target != RetrievalProfile.CLASSIC) {
             retrievalProfileGateService.assertCanActivate(id, target);

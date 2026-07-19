@@ -282,7 +282,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       setKb(updatedKb)
       setRetrievalProfile(updatedKb.retrievalProfile)
       await Promise.all([loadDocs(), loadJobs()])
-      showSuccess('索引模式已更新，已开始重建索引')
+      showSuccess('检索 Profile 已更新')
     } catch (e) {
       showError(e instanceof Error ? e.message : '更新索引模式失败')
     } finally {

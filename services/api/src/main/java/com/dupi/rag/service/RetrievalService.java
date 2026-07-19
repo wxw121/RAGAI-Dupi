@@ -69,7 +69,8 @@ public class RetrievalService {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
         int topK = clampTopK(request.getTopK() != null ? request.getTopK() : kb.getTopK());
         RetrievalProfile retrievalProfile = resolveProfile(kb, request);
-        boolean profileIndexReady = profileIndexStateService.isV2Ready(kbId);
+        boolean profileIndexReady = profileIndexStateService.isV2Activated(kbId)
+                || profileIndexStateService.isV2Ready(kbId);
         if (!profileIndexReady && retrievalProfile != RetrievalProfile.CLASSIC) {
             throw RetrievalProfileConflictException.indexNotReady();
         }
@@ -109,7 +110,7 @@ public class RetrievalService {
                 results = weightedRrfFusion.fuse(List.of(
                         new WeightedRrfFusion.Route(ragProperties.getCombinedChildWeight(), childHits),
                         new WeightedRrfFusion.Route(ragProperties.getCombinedQaWeight(), qaHits)
-                ), ragProperties.getRrfK());
+                ), ragProperties.getRrfK()).stream().limit(topK).toList();
                 routeDiagnostics = Map.of(
                         "combinedChildWeight", ragProperties.getCombinedChildWeight(),
                         "combinedQaWeight", ragProperties.getCombinedQaWeight(),
@@ -197,14 +198,29 @@ public class RetrievalService {
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> rawHits = (List<Map<String, Object>>) response.get("hits");
-        List<RetrievalHit> hits = rawHits.stream().map(h -> RetrievalHit.builder()
-                .chunkId(UUID.fromString(String.valueOf(h.get("chunk_id"))))
-                .docId(UUID.fromString(String.valueOf(h.get("doc_id"))))
-                .fileName(String.valueOf(h.getOrDefault("file_name", "")))
-                .content(String.valueOf(h.get("content")))
-                .score(((Number) h.getOrDefault("score", 0)).doubleValue())
-                .metadata(h.get("metadata") instanceof Map ? (Map<String, Object>) h.get("metadata") : Map.of())
-                .build()).toList();
+        List<RetrievalHit> hits = rawHits.stream().map(h -> {
+            UUID chunkId = UUID.fromString(String.valueOf(h.get("chunk_id")));
+            UUID docId = UUID.fromString(String.valueOf(h.get("doc_id")));
+            Map<String, Object> metadata = new LinkedHashMap<>();
+            Chunk stored = chunkRepository.findById(chunkId).orElse(null);
+            if (stored != null
+                    && Objects.equals(stored.getKbId(), kb.getId())
+                    && Objects.equals(stored.getDocId(), docId)
+                    && stored.getMetadata() != null) {
+                metadata.putAll(stored.getMetadata());
+            }
+            if (h.get("metadata") instanceof Map<?, ?> workerMetadata) {
+                workerMetadata.forEach((key, value) -> metadata.put(String.valueOf(key), value));
+            }
+            return RetrievalHit.builder()
+                    .chunkId(chunkId)
+                    .docId(docId)
+                    .fileName(String.valueOf(h.getOrDefault("file_name", "")))
+                    .content(String.valueOf(h.get("content")))
+                    .score(((Number) h.getOrDefault("score", 0)).doubleValue())
+                    .metadata(metadata)
+                    .build();
+        }).toList();
 
         hits = expandHitsForProfile(kb.getId(), hits, retrievalProfile);
 

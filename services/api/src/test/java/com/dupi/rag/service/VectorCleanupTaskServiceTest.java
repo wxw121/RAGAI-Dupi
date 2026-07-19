@@ -29,6 +29,7 @@ class VectorCleanupTaskServiceTest {
     @Mock VectorCleanupTaskRepository repository;
     @Mock MilvusVectorService milvusVectorService;
     @Mock AuditLogService auditLogService;
+    @Mock ProfileIndexStateService profileIndexStateService;
 
     @AfterEach
     void tearDown() {
@@ -111,6 +112,7 @@ class VectorCleanupTaskServiceTest {
                 eq(VectorCleanupStatus.PENDING),
                 any(Instant.class)
         )).thenReturn(List.of(task));
+        when(profileIndexStateService.shouldDeferLegacyCleanup(kbId)).thenReturn(false);
         doThrow(new IllegalStateException("milvus down"))
                 .when(milvusVectorService).deleteLegacyByKbIdForCleanup(kbId);
 
@@ -119,6 +121,40 @@ class VectorCleanupTaskServiceTest {
         assertThat(task.getStatus()).isEqualTo(VectorCleanupStatus.PENDING);
         assertThat(task.getAttemptCount()).isEqualTo(1);
         assertThat(task.getLastError()).contains("milvus down");
+        assertThat(task.getNextAttemptAt()).isAfter(before);
+    }
+
+    @Test
+    void completePendingProfileKnowledgeBaseClosesStaleCompensationTask() {
+        UUID kbId = UUID.randomUUID();
+        VectorCleanupTask task = task(VectorCleanupTargetType.PROFILE_KNOWLEDGE_BASE, kbId);
+        when(repository.findByTargetTypeAndTargetIdAndStatus(
+                VectorCleanupTargetType.PROFILE_KNOWLEDGE_BASE,
+                kbId,
+                VectorCleanupStatus.PENDING
+        )).thenReturn(Optional.of(task));
+
+        service().completePendingProfileKnowledgeBase(kbId);
+
+        assertThat(task.getStatus()).isEqualTo(VectorCleanupStatus.COMPLETED);
+        verify(repository).save(task);
+    }
+
+    @Test
+    void processPendingTasksDefersLegacyKnowledgeBaseCleanupUntilProfileIndexIsReady() {
+        UUID kbId = UUID.randomUUID();
+        VectorCleanupTask task = task(VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE, kbId);
+        Instant before = task.getNextAttemptAt();
+        when(repository.findTop50ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
+                eq(VectorCleanupStatus.PENDING),
+                any(Instant.class)
+        )).thenReturn(List.of(task));
+        when(profileIndexStateService.shouldDeferLegacyCleanup(kbId)).thenReturn(true);
+
+        service().processPendingTasks();
+
+        verify(milvusVectorService, never()).deleteLegacyByKbIdForCleanup(kbId);
+        assertThat(task.getStatus()).isEqualTo(VectorCleanupStatus.PENDING);
         assertThat(task.getNextAttemptAt()).isAfter(before);
     }
 
@@ -241,7 +277,12 @@ class VectorCleanupTaskServiceTest {
     }
 
     private VectorCleanupTaskService service() {
-        return new VectorCleanupTaskService(repository, milvusVectorService, auditLogService);
+        return new VectorCleanupTaskService(
+                repository,
+                milvusVectorService,
+                auditLogService,
+                profileIndexStateService
+        );
     }
 
     private static VectorCleanupTask task(VectorCleanupTargetType targetType, UUID targetId) {

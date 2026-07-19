@@ -3,7 +3,6 @@ package com.dupi.rag.service;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.entity.RagEvalRunResult;
 import com.dupi.rag.domain.enums.RagEvalGateStatus;
-import com.dupi.rag.domain.enums.RagEvalRunStatus;
 import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.RagEvalGateDecisionResponse;
 import com.dupi.rag.dto.RagEvalProfileMetricsResponse;
@@ -71,7 +70,7 @@ public class RetrievalProfileGateService {
                     .reason("classic_profile")
                     .build();
         }
-        return runRepository.findTopByKbIdAndStatusOrderByCreatedAtDesc(kbId, RagEvalRunStatus.COMPLETED)
+        return runRepository.findLatestCompletedContainingClassicAndProfile(kbId, candidate.name())
                 .map(run -> latestDecision(kbId, candidate, run))
                 .orElseGet(() -> notEvaluated(candidate));
     }

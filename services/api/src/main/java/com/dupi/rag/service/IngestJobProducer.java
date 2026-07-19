@@ -36,7 +36,7 @@ public class IngestJobProducer {
                     .retrievalProfile(kb.getRetrievalProfile().wireValue())
                     .embeddingModel(kb.getEmbeddingModel())
                     .embeddingDimension(kb.getEmbeddingDimension())
-                    .legacyWriteRequired(!profileIndexStateService.isV2Ready(job.getKbId()))
+                    .legacyWriteRequired(!profileIndexStateService.isV2Activated(job.getKbId()))
                     .indexSchemaVersion(ProfileIndexStateService.TARGET_SCHEMA_VERSION)
                     .build();
             String payload = objectMapper.writeValueAsString(message);

@@ -96,13 +96,14 @@ class RetrievalProfileGateServiceTest {
     }
 
     @Test
-    void latestDecisionRecalculatesAgainstCurrentRevisionAndIndexState() {
+    void latestDecisionUsesLatestCompletedRunContainingClassicAndCandidate() {
         UUID kbId = UUID.randomUUID();
         UUID runId = UUID.randomUUID();
-        when(runRepository.findTopByKbIdAndStatusOrderByCreatedAtDesc(kbId, RagEvalRunStatus.COMPLETED))
+        when(runRepository.findLatestCompletedContainingClassicAndProfile(kbId, RetrievalProfile.COMBINED.name()))
                 .thenReturn(Optional.of(RagEvalRun.builder()
                         .id(runId)
                         .kbId(kbId)
+                        .profileSet(List.of(RetrievalProfile.CLASSIC, RetrievalProfile.COMBINED))
                         .indexRevision(3L)
                         .status(RagEvalRunStatus.COMPLETED)
                         .build()));

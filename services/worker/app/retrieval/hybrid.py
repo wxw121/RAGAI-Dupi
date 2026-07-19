@@ -115,6 +115,22 @@ def attach_profile_metadata(hits: list[dict], retrieval_profile: str) -> list[di
         results.append(item)
     return results
 
+
+def hydrate_vector_hits(hits: list[dict], corpus: list[dict]) -> list[dict]:
+    corpus_by_id = {str(item.get("chunk_id")): item for item in corpus}
+    hydrated = []
+    for hit in hits:
+        source = corpus_by_id.get(str(hit.get("chunk_id")))
+        if source is None:
+            hydrated.append(hit)
+            continue
+        item = {**source, **hit}
+        metadata = dict(source.get("metadata") or {})
+        metadata.update(hit.get("metadata") or {})
+        item["metadata"] = metadata
+        hydrated.append(item)
+    return hydrated
+
 def rerank_hits(query: str, hits: list[dict], top_k: int) -> list[dict]:
     model = get_reranker()
     if model is None or not hits:
@@ -175,7 +191,8 @@ def hybrid_retrieve(
 
     if not profile_index_ready:
         indexer = MilvusIndexer(dimension=embedding_dimension)
-        vector_hits = indexer.search(kb_id, query_vector, route_limit)
+        vector_hits = hydrate_vector_hits(
+            indexer.search(kb_id, query_vector, route_limit), corpus)
         filtered_corpus = filter_profile_corpus(corpus, retrieval_profile, False)
         fused = rrf_fusion(
             vector_hits,
@@ -189,10 +206,10 @@ def hybrid_retrieve(
             profile_schema=True,
         )
         if retrieval_profile == "combined":
-            child_vector_hits = indexer.search_profile(
-                kb_id, query_vector, route_limit, retrieval_profile, "child")
-            qa_vector_hits = indexer.search_profile(
-                kb_id, query_vector, route_limit, retrieval_profile, "qa")
+            child_vector_hits = hydrate_vector_hits(indexer.search_profile(
+                kb_id, query_vector, route_limit, retrieval_profile, "child"), corpus)
+            qa_vector_hits = hydrate_vector_hits(indexer.search_profile(
+                kb_id, query_vector, route_limit, retrieval_profile, "qa"), corpus)
             child_corpus = filter_profile_corpus(corpus, retrieval_profile, True, "child")
             qa_corpus = filter_profile_corpus(corpus, retrieval_profile, True, "qa")
             child_bm25_hits = bm25_search(child_corpus, query, route_limit)
@@ -205,8 +222,8 @@ def hybrid_retrieve(
             ], settings.rrf_k)[:route_limit]
         else:
             entry_kind = "child" if retrieval_profile == "parent-child" else None
-            vector_hits = indexer.search_profile(
-                kb_id, query_vector, route_limit, retrieval_profile, entry_kind)
+            vector_hits = hydrate_vector_hits(indexer.search_profile(
+                kb_id, query_vector, route_limit, retrieval_profile, entry_kind), corpus)
             filtered_corpus = filter_profile_corpus(
                 corpus, retrieval_profile, True, entry_kind)
             fused = rrf_fusion(
