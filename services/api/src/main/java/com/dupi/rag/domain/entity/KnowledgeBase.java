@@ -65,6 +65,10 @@ public class KnowledgeBase {
     @Builder.Default
     private RetrievalProfile retrievalProfile = RetrievalProfile.CLASSIC;
 
+    @Column(name = "index_revision", nullable = false)
+    @Builder.Default
+    private Long indexRevision = 0L;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

@@ -19,6 +19,7 @@ import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Entity
@@ -43,6 +44,14 @@ public class RagEvalRun {
     @Column(name = "profile_set", columnDefinition = "jsonb", nullable = false)
     @Builder.Default
     private List<RetrievalProfile> profileSet = List.of(RetrievalProfile.CLASSIC);
+
+    @Column(name = "index_revision")
+    private Long indexRevision;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "gate_summary", columnDefinition = "jsonb", nullable = false)
+    @Builder.Default
+    private Map<String, Object> gateSummary = Map.of();
 
     @Column(name = "passed_count", nullable = false)
     @Builder.Default

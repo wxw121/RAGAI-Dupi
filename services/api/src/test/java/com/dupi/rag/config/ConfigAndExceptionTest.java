@@ -1,5 +1,9 @@
 package com.dupi.rag.config;
 
+import com.dupi.rag.domain.entity.Document;
+import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.entity.RagEvalRun;
+import com.dupi.rag.domain.entity.RagEvalRunResult;
 import com.dupi.rag.exception.GlobalExceptionHandler;
 import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.UserAccountRepository;
@@ -29,6 +33,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
 
 class ConfigAndExceptionTest {
+
+    @Test
+    void profileIndexAndQualityGateEntitiesExposeSafeDefaults() {
+        assertThat(Document.builder().build().getIndexSchemaVersion()).isEqualTo(1);
+        assertThat(KnowledgeBase.builder().build().getIndexRevision()).isZero();
+        assertThat(RagEvalRun.builder().build().getGateSummary()).isEmpty();
+        assertThat(RagEvalRunResult.builder().build().isHitPassed()).isFalse();
+        assertThat(RagEvalRunResult.builder().build().isCitationEligible()).isFalse();
+        assertThat(RagEvalRunResult.builder().build().isCitationPassed()).isFalse();
+    }
 
     @Test
     void corsConfigAllowsLocalDevelopmentOriginsAndStandardMethods() {

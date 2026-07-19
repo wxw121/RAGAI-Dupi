@@ -43,6 +43,10 @@ public class Document {
     @Column(name = "error_message")
     private String errorMessage;
 
+    @Column(name = "index_schema_version", nullable = false)
+    @Builder.Default
+    private Integer indexSchemaVersion = 1;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

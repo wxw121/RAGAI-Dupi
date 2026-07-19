@@ -47,6 +47,18 @@ public class RagEvalRunResult {
     @Builder.Default
     private boolean passed = false;
 
+    @Column(name = "hit_passed", nullable = false)
+    @Builder.Default
+    private boolean hitPassed = false;
+
+    @Column(name = "citation_eligible", nullable = false)
+    @Builder.Default
+    private boolean citationEligible = false;
+
+    @Column(name = "citation_passed", nullable = false)
+    @Builder.Default
+    private boolean citationPassed = false;
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "failure_reasons", columnDefinition = "jsonb", nullable = false)
     @Builder.Default
