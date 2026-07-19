@@ -281,7 +281,7 @@ class ControllerLayerTest {
         assertThat(controller.runRagEval(kbId, ragEvalRunRequest)).isSameAs(ragEvalRun);
 
         verify(kbService).delete(kbId);
-        verify(ingestJobService, times(2)).reindexKnowledgeBase(kbId);
+        verify(ingestJobService, times(1)).reindexKnowledgeBase(kbId);
         verify(chatService).cancel("s1");
         verify(chatService, never()).cancel(null);
         verify(chatSessionService).delete(kbId, sessionId);

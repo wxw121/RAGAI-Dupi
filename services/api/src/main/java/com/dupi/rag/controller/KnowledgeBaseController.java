@@ -51,12 +51,10 @@ public class KnowledgeBaseController {
             @PathVariable UUID kbId,
             @Valid @RequestBody UpdateKnowledgeBaseRetrievalProfileRequest request
     ) {
-        KnowledgeBaseResponse response = knowledgeBaseService.updateRetrievalProfile(
+        return knowledgeBaseService.updateRetrievalProfile(
                 kbId,
                 request.getRetrievalProfile()
         );
-        ingestJobService.reindexKnowledgeBase(kbId);
-        return response;
     }
 
     @DeleteMapping("/{kbId}")

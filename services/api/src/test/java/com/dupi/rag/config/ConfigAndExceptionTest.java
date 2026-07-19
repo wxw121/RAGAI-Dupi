@@ -4,8 +4,11 @@ import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.entity.RagEvalRunResult;
+import com.dupi.rag.domain.enums.RetrievalProfile;
+import com.dupi.rag.dto.RagEvalGateDecisionResponse;
 import com.dupi.rag.exception.GlobalExceptionHandler;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.exception.RetrievalProfileConflictException;
 import com.dupi.rag.repository.UserAccountRepository;
 import io.milvus.client.MilvusServiceClient;
 import io.minio.MinioClient;
@@ -835,6 +838,16 @@ class ConfigAndExceptionTest {
         assertThat(badRequest.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(badRequest.getBody().getError()).isEqualTo("bad_request");
         assertThat(badRequest.getBody().getMessage()).isEqualTo("bad input");
+
+        var gateBlocked = handler.handleRetrievalProfileConflict(
+                RetrievalProfileConflictException.gateBlocked(RagEvalGateDecisionResponse.builder()
+                        .candidate(RetrievalProfile.PARENT_CHILD)
+                        .reason("index_revision_changed")
+                        .build())
+        );
+        assertThat(gateBlocked.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(gateBlocked.getBody().getError()).isEqualTo("retrieval_profile_gate_blocked");
+        assertThat(gateBlocked.getBody().getMessage()).contains("index_revision_changed");
 
         IllegalStateException providerFailure = new IllegalStateException("provider down");
         com.dupi.rag.exception.ChatPipelineException chatException =
