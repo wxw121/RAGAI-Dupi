@@ -13,7 +13,7 @@
 
     <groupId>com.dupi</groupId>
     <artifactId>dupi-rag-api</artifactId>
-    <version>1.4.1-SNAPSHOT</version>
+    <version>1.5.0</version>
     <name>dupi-rag-api</name>
     <description>dupi-RAG Knowledge Base API</description>
 
