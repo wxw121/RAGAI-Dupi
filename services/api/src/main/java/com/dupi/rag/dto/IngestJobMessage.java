@@ -24,7 +24,10 @@ public class IngestJobMessage {
     private Integer chunkSize;
     private Integer chunkOverlap;
     private String chunkStrategy;
+    private String retrievalProfile;
     private String embeddingModel;
     private Integer embeddingDimension;
     private Integer sparseProfileVersion;
+    private Boolean legacyWriteRequired;
+    private Integer indexSchemaVersion;
 }

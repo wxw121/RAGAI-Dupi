@@ -38,6 +38,15 @@ public class GlobalExceptionHandler {
                 "Check the request parameters and try again."));
     }
 
+    @ExceptionHandler(RetrievalProfileConflictException.class)
+    public ResponseEntity<ApiErrorResponse> handleRetrievalProfileConflict(RetrievalProfileConflictException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(error(
+                "retrieval_profile_gate_blocked",
+                ex.getMessage() != null ? ex.getMessage() : "Retrieval profile gate blocked",
+                "retrieval_profile",
+                "Run a current RAG evaluation and only activate profiles with a passed gate."));
+    }
+
     @ExceptionHandler(ChatPipelineException.class)
     public ResponseEntity<ApiErrorResponse> handleChatPipeline(ChatPipelineException ex) {
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error(

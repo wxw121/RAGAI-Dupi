@@ -14,12 +14,29 @@ import { useToast } from '@/components/Toast'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import type { RagEvalCase, RagEvalCaseRequest, RagEvalRun, RagQualityPolicy } from '@/types'
+import type {
+  RagEvalCase,
+  RagEvalCaseRequest,
+  RagEvalGateDecision,
+  RagEvalRun,
+  RagQualityPolicy,
+  RetrievalIndexMode,
+} from '@/types'
 import { CheckCircle2, Loader2, Pencil, Play, Save, Trash2, X, XCircle } from 'lucide-react'
 
 interface RagEvalPanelProps {
   kbId: string
 }
+
+const RETRIEVAL_PROFILE_OPTIONS: Array<{ value: RetrievalIndexMode; label: string }> = [
+  { value: 'CLASSIC', label: 'classic' },
+  { value: 'PARENT_CHILD', label: 'parent-child' },
+  { value: 'QA_ASSISTED', label: 'qa-assisted' },
+  { value: 'COMBINED', label: 'combined' },
+]
+
+const formatPercent = (value: number | null | undefined) => `${((value ?? 0) * 100).toFixed(1)}%`
+const formatDelta = (value: number | null | undefined) => `${(value ?? 0) >= 0 ? '+' : ''}${formatPercent(value)}`
 
 const EMPTY_FORM: RagEvalCaseRequest = {
   caseKey: '',
@@ -39,6 +56,7 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
   const [saving, setSaving] = useState(false)
   const [running, setRunning] = useState(false)
   const [useRerank, setUseRerank] = useState(false)
+  const [selectedProfiles, setSelectedProfiles] = useState<RetrievalIndexMode[]>(['CLASSIC'])
   const [policy, setPolicy] = useState<RagQualityPolicy | null>(null)
   const { showError, showSuccess } = useToast()
 
@@ -65,6 +83,8 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
 
   const latestRun = runs[0]
   const latestResults = latestRun?.results ?? []
+  const latestGateDecisions = Object.entries(latestRun?.gateSummary ?? {})
+    .filter((entry): entry is [string, RagEvalGateDecision] => Boolean(entry[1]))
   const canSave = form.caseKey.trim().length > 0 && form.query.trim().length > 0
   const runSummary = useMemo(
     () => runs.map((run) => ({
@@ -76,6 +96,20 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
 
   const updateForm = <K extends keyof RagEvalCaseRequest>(key: K, value: RagEvalCaseRequest[K]) => {
     setForm((current) => ({ ...current, [key]: value }))
+  }
+
+  const toggleProfile = (profile: RetrievalIndexMode, checked: boolean) => {
+    setSelectedProfiles((current) => {
+      if (checked) return current.includes(profile) ? current : [...current, profile]
+      const next = current.filter((item) => item !== profile)
+      return next.length > 0 ? next : current
+    })
+  }
+
+  const evalRunRequest = () => {
+    const base = { useRerank }
+    if (selectedProfiles.length === 1 && selectedProfiles[0] === 'CLASSIC') return base
+    return { ...base, profiles: selectedProfiles }
   }
 
   const resetForm = () => {
@@ -138,7 +172,7 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
   const run = async () => {
     setRunning(true)
     try {
-      const nextRun = await runRagEval(kbId, { useRerank })
+      const nextRun = await runRagEval(kbId, evalRunRequest())
       setRuns((current) => [nextRun, ...current.filter((item) => item.id !== nextRun.id)].slice(0, 10))
       if (nextRun.totalCount === 0) {
         showError('请先创建至少一个评估用例')
@@ -191,7 +225,21 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
             />
             启用 Rerank
           </label>
-          <Button onClick={run} disabled={running || loading || cases.length === 0}>
+          <div className="flex flex-wrap items-center gap-2 text-xs" aria-label="Retrieval profiles">
+            {RETRIEVAL_PROFILE_OPTIONS.map((profile) => (
+              <label key={profile.value} className="inline-flex items-center gap-1 rounded border border-border px-2 py-1">
+                <input
+                  name={`profile-${profile.value}`}
+                  type="checkbox"
+                  checked={selectedProfiles.includes(profile.value)}
+                  onChange={(event) => toggleProfile(profile.value, event.target.checked)}
+                  className="h-3 w-3 accent-primary"
+                />
+                {profile.label}
+              </label>
+            ))}
+          </div>
+          <Button aria-label="Run RAG eval" onClick={run} disabled={running || loading || cases.length === 0}>
             {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
             运行评估
           </Button>
@@ -207,6 +255,30 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
           <Button className="self-end" onClick={() => void savePolicy()} disabled={saving}><Save className="h-4 w-4" />保存策略</Button>
         </div>
       </section>}
+
+      {latestGateDecisions.length > 0 && (
+        <section className="border-y border-border py-4">
+          <h3 className="mb-3 text-sm font-semibold">Profile quality gates</h3>
+          <div className="grid gap-3 md:grid-cols-2">
+            {latestGateDecisions.map(([profile, decision]) => (
+              <div key={profile} className="rounded border border-border p-3 text-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-mono font-semibold">{profile} {decision.status}</span>
+                  <Badge variant={decision.status === 'PASSED' ? 'success' : 'error'}>
+                    {decision.reason}
+                  </Badge>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+                  <span>Hit {formatPercent(decision.metrics?.hitRate)}</span>
+                  <span>Citation {formatPercent(decision.metrics?.citationPassRate)}</span>
+                  <span>Hit delta {formatDelta(decision.hitRateDelta)}</span>
+                  <span>Citation delta {formatDelta(decision.citationPassRateDelta)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="border-y border-border py-5">
         <div className="mb-4 flex items-center justify-between gap-3">

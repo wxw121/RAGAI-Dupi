@@ -20,6 +20,10 @@ public interface KnowledgeBaseRepository extends JpaRepository<KnowledgeBase, UU
     Optional<KnowledgeBase> findByIdAndTenantId(@Param("id") UUID id, @Param("tenantId") String tenantId);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select kb from KnowledgeBase kb where kb.id = :id")
+    Optional<KnowledgeBase> findByIdForUpdate(@Param("id") UUID id);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select kb from KnowledgeBase kb where kb.id = :id and kb.tenantId = :tenantId and kb.lifecycleStatus = com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus.READY")
     Optional<KnowledgeBase> findByIdAndTenantIdForUpdate(
             @Param("id") UUID id,

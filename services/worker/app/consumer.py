@@ -23,6 +23,8 @@ from app.indexer import MilvusIndexer, scope_chunk_ids
 from app.models import DocumentNode
 from app.parser.document_parser import parse_document
 from app.config import settings
+from app.profile_index_plan import build_profile_index_plan
+from app.retrieval.sparse import SparseMilvusAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +168,79 @@ def _mutate_document_vectors(
     return owned_ids
 
 
+def _mutate_profile_vectors(
+    profile_indexer,
+    legacy_indexer,
+    sparse_adapter,
+    kb_id: str,
+    doc_id: str,
+    profile_chunks,
+    profile_vectors,
+    legacy_chunks,
+    legacy_vectors,
+    sparse_profile_version: int,
+    ensure_active,
+):
+    profile_ids = [chunk.id for chunk in profile_chunks]
+    legacy_ids = [chunk.id for chunk in legacy_chunks]
+    with _document_vector_lock(kb_id, doc_id) as lock_lease:
+        ensure_active()
+        try:
+            profile_indexer.delete_by_doc(doc_id, kb_id=kb_id, strict=True)
+            ensure_active()
+            profile_indexer.index_profile_chunks(kb_id, doc_id, profile_chunks, profile_vectors)
+            ensure_active()
+            if legacy_indexer is not None:
+                legacy_indexer.delete_by_doc(
+                    doc_id,
+                    kb_id=kb_id,
+                    sparse_profile_version=sparse_profile_version,
+                    strict=True,
+                )
+                ensure_active()
+                legacy_indexer.index_chunks(
+                    kb_id,
+                    doc_id,
+                    legacy_chunks,
+                    legacy_vectors,
+                    sparse_profile_version=sparse_profile_version,
+                )
+            elif sparse_adapter is not None:
+                sparse_adapter.delete_by_doc(doc_id)
+                sparse_adapter.upsert(kb_id, doc_id, legacy_chunks)
+            ensure_active()
+        except Exception as exc:
+            if lock_lease is not None and not lock_lease.held():
+                raise VectorLockLost(f"Lost vector lock for document {doc_id}") from exc
+            profile_indexer.delete_by_ids(profile_ids, kb_id=kb_id, strict=True)
+            if legacy_indexer is not None:
+                legacy_indexer.delete_by_ids(
+                    legacy_ids,
+                    kb_id=kb_id,
+                    sparse_profile_version=sparse_profile_version,
+                    strict=True,
+                )
+            elif sparse_adapter is not None:
+                sparse_adapter.delete_by_ids(legacy_ids)
+            raise
+
+
+def _scope_plan_chunks(plan, execution_id: str | None, doc_id: str):
+    if not execution_id:
+        return
+    original_ids = [chunk.id for chunk in plan.persisted_chunks]
+    scope_chunk_ids(plan.persisted_chunks, execution_id, doc_id)
+    id_map = {
+        original_id: chunk.id
+        for original_id, chunk in zip(original_ids, plan.persisted_chunks)
+    }
+    for chunk in plan.persisted_chunks:
+        for key in ("parent_chunk_id", "source_chunk_id"):
+            referenced_id = chunk.metadata.get(key)
+            if referenced_id in id_map:
+                chunk.metadata[key] = id_map[referenced_id]
+
+
 def _run_with_heartbeat(operation, heartbeat, interval_seconds: float):
     heartbeat()
     stopped = threading.Event()
@@ -225,11 +300,16 @@ def process_ingest_job(job: dict):
     sparse_profile_version = int(
         job.get("sparseProfileVersion") or job.get("sparse_profile_version") or 0
     )
+    index_schema_version = int(job.get("indexSchemaVersion") or 2)
+    legacy_write_required = bool(job.get("legacyWriteRequired", True))
     sequence = 0
-    indexer = None
+    profile_indexer = None
+    legacy_indexer = None
+    sparse_adapter = None
     index_started = False
     index_committed = False
-    owned_vector_ids = []
+    profile_vector_ids = []
+    legacy_vector_ids = []
 
     if execution_id:
         claim_response = claim_job(
@@ -241,7 +321,13 @@ def process_ingest_job(job: dict):
         if isinstance(claim_response, dict):
             sequence = int(claim_response.get("callbackSequence") or 0)
 
-    def update(status: str, stage: str, error: str | None = None, chunks=None):
+    def update(
+        status: str,
+        stage: str,
+        error: str | None = None,
+        chunks=None,
+        completed_schema_version: int | None = None,
+    ):
         nonlocal sequence
         sequence += 1
         payload = {
@@ -265,6 +351,8 @@ def process_ingest_job(job: dict):
                 }
                 for c in chunks
             ]
+        if completed_schema_version is not None:
+            payload["indexSchemaVersion"] = completed_schema_version
         try:
             ack = post_status(payload)
         except Exception as exc:
@@ -304,14 +392,19 @@ def process_ingest_job(job: dict):
         return _run_with_heartbeat(operation, ensure_job_active, heartbeat_interval)
 
     def cleanup_vectors():
-        if indexer is None or not owned_vector_ids:
+        if profile_indexer is None or not profile_vector_ids:
             return
-        indexer.delete_by_ids(
-            owned_vector_ids,
-            kb_id=kb_id,
-            sparse_profile_version=sparse_profile_version,
-            strict=True,
-        )
+        with _document_vector_lock(kb_id, doc_id):
+            profile_indexer.delete_by_ids(profile_vector_ids, kb_id=kb_id, strict=True)
+            if legacy_indexer is not None and legacy_vector_ids:
+                legacy_indexer.delete_by_ids(
+                    legacy_vector_ids,
+                    kb_id=kb_id,
+                    sparse_profile_version=sparse_profile_version,
+                    strict=True,
+                )
+            elif sparse_adapter is not None and legacy_vector_ids:
+                sparse_adapter.delete_by_ids(legacy_vector_ids)
 
     try:
         update("processing", "parsing")
@@ -340,15 +433,19 @@ def process_ingest_job(job: dict):
 
         update("processing", "chunking")
         embedder = Embedder(model=embedding_model)
-        chunks = run_guarded(
-            lambda: chunk_nodes(
+        plan = run_guarded(
+            lambda: build_profile_index_plan(
                 nodes,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 strategy=chunk_strategy,
                 embed_fn=embedder.embed if chunk_strategy == "semantic" else None,
+                kb_id=kb_id,
+                doc_id=doc_id,
             )
         )
+        _scope_plan_chunks(plan, execution_id, doc_id)
+        chunks = plan.v2_index_chunks
 
         if not chunks:
             raise ValueError("No chunks produced from document")
@@ -370,44 +467,76 @@ def process_ingest_job(job: dict):
             )
 
         update("processing", "indexing")
-        indexer = run_guarded(lambda: MilvusIndexer(dimension=embedding_dimension))
+        profile_indexer = run_guarded(lambda: MilvusIndexer(
+            dimension=embedding_dimension,
+            collection_name=settings.milvus_profile_collection,
+            profile_schema=True,
+        ))
+        if legacy_write_required:
+            legacy_indexer = run_guarded(lambda: MilvusIndexer(dimension=embedding_dimension))
+        if sparse_profile_version > 0 and legacy_indexer is None:
+            sparse_adapter = SparseMilvusAdapter(kb_id, sparse_profile_version)
         index_started = True
-        owned_vector_ids = scope_chunk_ids(chunks, execution_id, doc_id)
+        profile_vector_ids = [chunk.id for chunk in chunks]
+        legacy_vector_ids = [chunk.id for chunk in plan.legacy_chunks]
+        vector_by_chunk_id = {
+            chunk.id: vector
+            for chunk, vector in zip(chunks, vectors)
+        }
+        legacy_vectors = [vector_by_chunk_id[chunk.id] for chunk in plan.legacy_chunks]
 
         if execution_id:
             def mutate_vectors():
                 nonlocal index_committed
-                _mutate_document_vectors(
-                    indexer,
+                _mutate_profile_vectors(
+                    profile_indexer,
+                    legacy_indexer,
+                    sparse_adapter,
                     kb_id,
                     doc_id,
                     chunks,
                     vectors,
+                    plan.legacy_chunks,
+                    legacy_vectors,
                     sparse_profile_version,
-                    execution_id,
                     ensure_job_active,
-                    owned_ids=owned_vector_ids,
                 )
                 index_committed = True
 
             run_guarded(mutate_vectors)
         else:
-            indexer.delete_by_doc(
-                doc_id,
-                kb_id=kb_id,
-                sparse_profile_version=sparse_profile_version,
-            )
-            indexer.index_chunks(
-                kb_id,
-                doc_id,
-                chunks,
-                vectors,
-                sparse_profile_version=sparse_profile_version,
-            )
+            profile_indexer.delete_by_doc(doc_id)
+            profile_indexer.index_profile_chunks(kb_id, doc_id, chunks, vectors)
+            if legacy_indexer is not None:
+                legacy_indexer.delete_by_doc(
+                    doc_id,
+                    kb_id=kb_id,
+                    sparse_profile_version=sparse_profile_version,
+                )
+                legacy_indexer.index_chunks(
+                    kb_id,
+                    doc_id,
+                    plan.legacy_chunks,
+                    legacy_vectors,
+                    sparse_profile_version=sparse_profile_version,
+                )
+            elif sparse_adapter is not None:
+                sparse_adapter.delete_by_doc(doc_id)
+                sparse_adapter.upsert(kb_id, doc_id, plan.legacy_chunks)
             index_committed = True
 
-        update("completed", "completed", chunks=chunks)
-        logger.info("Ingest job %s completed with %d chunks", job_id, len(chunks))
+        update(
+            "completed",
+            "completed",
+            chunks=plan.persisted_chunks,
+            completed_schema_version=index_schema_version,
+        )
+        logger.info(
+            "Ingest job %s completed with %d persisted chunks and %d indexed chunks",
+            job_id,
+            len(plan.persisted_chunks),
+            len(chunks),
+        )
 
     except IngestCancelled:
         if index_committed:

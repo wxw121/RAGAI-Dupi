@@ -47,6 +47,7 @@ class IngestJobServiceTest {
     @Mock VectorCleanupTaskService vectorCleanupTaskService;
     @Mock AuditLogService auditLogService;
     @Mock IngestFailureNotificationService failureNotificationService;
+    @Mock ProfileIndexStateService profileIndexStateService;
 
     IngestJobService service() {
         RedisQueueProperties redisQueueProperties = new RedisQueueProperties();
@@ -67,7 +68,8 @@ class IngestJobServiceTest {
                 milvusVectorService,
                 vectorCleanupTaskService,
                 auditLogService,
-                failureNotificationService
+                failureNotificationService,
+                profileIndexStateService
         );
     }
 
@@ -962,7 +964,7 @@ class IngestJobServiceTest {
     }
 
     @Test
-    void reindexKnowledgeBaseClearsChunksAndRequeuesAllDocumentsWithCurrentEmbeddingConfig() {
+    void reindexKnowledgeBaseRollsDocumentsWithoutDeletingTheOnlineIndex() {
         UUID kbId = UUID.randomUUID();
         UUID firstDocId = UUID.randomUUID();
         UUID secondDocId = UUID.randomUUID();
@@ -986,7 +988,10 @@ class IngestJobServiceTest {
         assertThat(first.getStatus()).isEqualTo(DocumentStatus.PENDING);
         assertThat(first.getErrorMessage()).isNull();
         assertThat(second.getStatus()).isEqualTo(DocumentStatus.PENDING);
-        verify(chunkRepository).deleteByKbId(kbId);
+        verify(profileIndexStateService).resetForReindex(kb, List.of(first, second));
+        verify(vectorCleanupTaskService).completePendingProfileKnowledgeBase(kbId);
+        verify(chunkRepository, never()).deleteByKbId(kbId);
+        verify(milvusVectorService, never()).deleteByKbId(kbId);
         verify(ingestJobRepository, times(2)).save(any(IngestJob.class));
         verify(ingestOutboxService).record(any(IngestJob.class), eq(kb), eq(first.getObjectKey()), eq(first.getFileName()), eq(first.getMimeType()));
         verify(ingestOutboxService).record(any(IngestJob.class), eq(kb), eq(second.getObjectKey()), eq(second.getFileName()), eq(second.getMimeType()));
@@ -1017,27 +1022,30 @@ class IngestJobServiceTest {
         assertThatThrownBy(() -> service().reindexKnowledgeBase(kbId))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("redis unavailable");
-        verify(vectorCleanupTaskService).enqueueKnowledgeBase(kbId);
-        verify(milvusVectorService).deleteByKbId(kbId);
+        verify(profileIndexStateService).resetForReindex(kb, List.of(doc));
+        verify(vectorCleanupTaskService).completePendingProfileKnowledgeBase(kbId);
+        verify(vectorCleanupTaskService, never()).enqueueKnowledgeBase(kbId);
+        verify(milvusVectorService, never()).deleteByKbId(kbId);
         verify(documentRepository, never()).save(doc);
         verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
     }
 
     @Test
-    void reindexKnowledgeBaseContinuesWhenImmediateVectorDeleteFails() {
+    void reindexKnowledgeBaseDoesNotDeleteVectorsBeforeReplacementCompletes() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         Document doc = doc(kbId, docId);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc));
-        doThrow(new IllegalStateException("milvus unavailable")).when(milvusVectorService).deleteByKbId(kbId);
-
         var responses = service().reindexKnowledgeBase(kbId, "model", 256);
 
         assertThat(responses).hasSize(1);
         assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PENDING);
-        verify(chunkRepository).deleteByKbId(kbId);
+        verify(profileIndexStateService).resetForReindex(kb, List.of(doc));
+        verify(vectorCleanupTaskService).completePendingProfileKnowledgeBase(kbId);
+        verify(chunkRepository, never()).deleteByKbId(kbId);
+        verify(milvusVectorService, never()).deleteByKbId(kbId);
         verify(ingestOutboxService).record(any(IngestJob.class), eq(kb), eq(doc.getObjectKey()), eq(doc.getFileName()), eq(doc.getMimeType()));
         verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
     }

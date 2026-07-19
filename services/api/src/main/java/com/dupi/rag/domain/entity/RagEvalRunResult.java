@@ -1,10 +1,11 @@
 package com.dupi.rag.domain.entity;
 
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.domain.enums.RagEvalComparisonStatus;
 import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
+import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
@@ -47,6 +48,18 @@ public class RagEvalRunResult {
     @Builder.Default
     private boolean passed = false;
 
+    @Column(name = "hit_passed", nullable = false)
+    @Builder.Default
+    private boolean hitPassed = false;
+
+    @Column(name = "citation_eligible", nullable = false)
+    @Builder.Default
+    private boolean citationEligible = false;
+
+    @Column(name = "citation_passed", nullable = false)
+    @Builder.Default
+    private boolean citationPassed = false;
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "failure_reasons", columnDefinition = "jsonb", nullable = false)
     @Builder.Default
@@ -67,6 +80,11 @@ public class RagEvalRunResult {
 
     @Column(name = "retrieval_mode")
     private String retrievalMode;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "retrieval_profile", nullable = false)
+    @Builder.Default
+    private RetrievalProfile retrievalProfile = RetrievalProfile.CLASSIC;
 
     @Column(name = "fallback_reason", columnDefinition = "TEXT")
     private String fallbackReason;

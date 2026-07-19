@@ -4,6 +4,7 @@ import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.entity.RetrievalProfile;
 import com.dupi.rag.domain.entity.UploadQuotaReservation;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
@@ -23,6 +24,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.mock.web.MockMultipartFile;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -50,6 +52,7 @@ class DocumentServiceTest {
     @Mock RetrievalProfileRepository retrievalProfileRepository;
     @Mock KnowledgeBaseMaintenanceService maintenanceService;
     @Mock UploadQuotaService uploadQuotaService;
+    @Mock ProfileIndexStateService profileIndexStateService;
 
     DocumentService service() {
         return new DocumentService(
@@ -66,7 +69,8 @@ class DocumentServiceTest {
                 auditLogService,
                 retrievalProfileRepository,
                 maintenanceService,
-                uploadQuotaService
+                uploadQuotaService,
+                profileIndexStateService
         );
     }
 
@@ -83,6 +87,44 @@ class DocumentServiceTest {
         assertThat(firstFingerprint).startsWith("sha256:");
         assertThat(secondFingerprint).startsWith("sha256:");
         assertThat(firstFingerprint).isNotEqualTo(secondFingerprint);
+    }
+
+    @Test
+    void fileFingerprintWrapsUnreadableMultipartFiles() {
+        MockMultipartFile unreadable = new MockMultipartFile("file", "broken.md", "text/markdown", "x".getBytes()) {
+            @Override
+            public InputStream getInputStream() throws IOException {
+                throw new IOException("read failed");
+            }
+        };
+
+        assertThatThrownBy(() -> service().fileFingerprint(unreadable))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to fingerprint upload")
+                .hasRootCauseMessage("read failed");
+    }
+
+    @Test
+    void uploadUsesSafeFilenameAndMimeDefaultsWhenMultipartMetadataIsMissing() {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).name("KB").build();
+        MockMultipartFile file = new MockMultipartFile("file", "ignored", null, "hello".getBytes()) {
+            @Override
+            public String getOriginalFilename() {
+                return null;
+            }
+        };
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(uploadQuotaService.reserveForUpload(
+                eq(kbId), any(UUID.class), isNull(), eq("unknown"), eq("application/octet-stream"),
+                eq(5L), anyString()))
+                .thenAnswer(invocation -> reservation(kbId, invocation.getArgument(1), null, 5L));
+
+        var response = service().upload(kbId, file);
+
+        assertThat(response.getFileName()).isEqualTo("unknown");
+        assertThat(response.getMimeType()).isEqualTo("application/octet-stream");
+        verify(minioStorageService).upload(contains("unknown"), any(), eq(5L), eq("application/octet-stream"));
     }
 
     @Test
@@ -407,18 +449,37 @@ class DocumentServiceTest {
     }
 
     @Test
+    void listByKbReturnsDocumentWithoutCurrentJob() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        Document doc = doc(kbId, docId);
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc));
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(docId)).thenReturn(Optional.empty());
+
+        var response = service().listByKb(kbId);
+
+        assertThat(response).singleElement().satisfies(item -> {
+            assertThat(item.getId()).isEqualTo(docId);
+            assertThat(item.getCurrentJob()).isNull();
+        });
+    }
+
+    @Test
     void deleteContinuesWhenExternalStoresFail() throws IOException {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         Document doc = doc(kbId, docId);
         when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        doThrow(new IllegalStateException("profile milvus")).when(milvusVectorService).deleteProfileByDocId(docId);
         doThrow(new IllegalStateException("milvus")).when(milvusVectorService).deleteByDocId(docId);
         doThrow(new IllegalStateException("minio")).when(minioStorageService).delete(doc.getObjectKey());
 
         service().delete(kbId, docId);
 
         verify(documentTombstoneService).recordDeleted(doc);
-        verify(vectorCleanupTaskService).enqueueDocument(docId);
+        verify(vectorCleanupTaskService).enqueueProfileDocument(docId);
+        verify(vectorCleanupTaskService).enqueueLegacyDocument(docId);
+        verify(milvusVectorService).deleteProfileByDocId(docId);
         verify(chunkRepository).deleteByDocId(docId);
         verify(documentRepository).delete(doc);
         verify(auditLogService).recordSuccess(
@@ -427,6 +488,36 @@ class DocumentServiceTest {
                 eq(docId),
                 contains(doc.getFileName())
         );
+    }
+
+    @Test
+    void deleteCleansAllVectorStoresReleasesQuotaAndBumpsProfileRevision() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID quotaReservationId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).name("KB").build();
+        Document doc = doc(kbId, docId);
+        doc.setQuotaReservationId(quotaReservationId);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(retrievalProfileRepository.findByKbIdOrderByVersionDesc(kbId)).thenReturn(List.of(
+                RetrievalProfile.builder().kbId(kbId).version(3).build(),
+                RetrievalProfile.builder().kbId(kbId).version(1).build()
+        ));
+
+        service().delete(kbId, docId);
+
+        verify(maintenanceService).assertMutationAllowed(kbId);
+        verify(documentTombstoneService).recordDeleted(doc);
+        verify(vectorCleanupTaskService).enqueueProfileDocument(docId);
+        verify(vectorCleanupTaskService).enqueueLegacyDocument(docId);
+        verify(milvusVectorService).deleteProfileByDocId(docId);
+        verify(milvusVectorService).deleteByDocId(docId);
+        verify(milvusVectorService).deleteSparseByDocId(kbId, docId, List.of(3, 1));
+        verify(minioStorageService).delete(doc.getObjectKey());
+        verify(uploadQuotaService).releaseCommitted(quotaReservationId, "Document deleted");
+        verify(documentRepository).delete(doc);
+        verify(profileIndexStateService).bumpRevision(kb);
     }
 
     private static Document doc(UUID kbId, UUID docId) {

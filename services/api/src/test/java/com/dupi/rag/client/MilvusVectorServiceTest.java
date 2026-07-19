@@ -2,6 +2,7 @@ package com.dupi.rag.client;
 
 import com.dupi.rag.config.LlmProperties;
 import com.dupi.rag.config.MilvusProperties;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.grpc.CollectionSchema;
 import io.milvus.grpc.DataType;
@@ -33,6 +34,19 @@ import static org.mockito.Mockito.*;
 class MilvusVectorServiceTest {
 
     @Test
+    void initializeCollectionsCreatesAndLoadsLegacyAndProfileCollections() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        when(client.hasCollection(any())).thenReturn(R.success(false));
+        when(client.createCollection(any(CreateCollectionParam.class))).thenReturn(R.success());
+
+        service(client).initializeCollections();
+
+        verify(client, times(2)).createCollection(any(CreateCollectionParam.class));
+        verify(client, times(2)).createIndex(any());
+        verify(client, times(2)).loadCollection(any());
+    }
+
+    @Test
     void ensureCollectionLoadsExistingCollectionAsynchronously() {
         MilvusServiceClient client = mock(MilvusServiceClient.class);
         when(client.hasCollection(any())).thenReturn(R.success(true));
@@ -58,6 +72,80 @@ class MilvusVectorServiceTest {
         verify(client).createCollection(any(CreateCollectionParam.class));
         verify(client).createIndex(any());
         verify(client).loadCollection(any());
+    }
+
+    @Test
+    void ensureProfileCollectionCreatesFilterableSupersetSchema() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        when(client.hasCollection(any())).thenReturn(R.success(false));
+        when(client.createCollection(any(CreateCollectionParam.class))).thenReturn(R.success());
+
+        service(client).ensureProfileCollection();
+
+        ArgumentCaptor<CreateCollectionParam> create = ArgumentCaptor.forClass(CreateCollectionParam.class);
+        verify(client).createCollection(create.capture());
+        assertThat(create.getValue().getCollectionName()).isEqualTo("chunks_profiles_v2");
+        assertThat(create.getValue().getFieldTypes()).extracting(field -> field.getName())
+                .containsExactly(
+                        "chunk_id",
+                        "kb_id",
+                        "doc_id",
+                        "content",
+                        "entry_kind",
+                        "profile_classic",
+                        "profile_parent_child",
+                        "profile_qa_assisted",
+                        "profile_combined",
+                        "embedding"
+                );
+    }
+
+    @Test
+    void ensureProfileCollectionLoadsExistingCompatibleCollectionAsynchronously() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        when(client.hasCollection(any())).thenReturn(R.success(true));
+        when(client.describeCollection(any())).thenReturn(R.success(profileDescribeCollection(1536)));
+
+        service(client).ensureProfileCollection();
+
+        verify(client, never()).createCollection(any(CreateCollectionParam.class));
+        ArgumentCaptor<LoadCollectionParam> load = ArgumentCaptor.forClass(LoadCollectionParam.class);
+        verify(client).loadCollection(load.capture());
+        assertThat(load.getValue().getCollectionName()).isEqualTo("chunks_profiles_v2");
+        assertThat(load.getValue().isSyncLoad()).isFalse();
+    }
+
+    @Test
+    void searchProfileBuildsOnlyWhitelistedCollectionAndExpression() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        when(client.getLoadState(any(GetLoadStateParam.class)))
+                .thenReturn(R.success(loadState(LoadState.LoadStateLoaded)));
+        when(client.search(any(SearchParam.class)))
+                .thenReturn(R.failed(R.Status.Unknown, "boom"));
+        UUID kbId = UUID.randomUUID();
+        MilvusVectorService service = service(client);
+
+        assertThatThrownBy(() -> service.searchProfile(
+                kbId,
+                List.of(0.1f),
+                3,
+                RetrievalProfile.COMBINED,
+                "qa"
+        )).isInstanceOf(IllegalStateException.class);
+
+        ArgumentCaptor<SearchParam> search = ArgumentCaptor.forClass(SearchParam.class);
+        verify(client).search(search.capture());
+        assertThat(search.getValue().getCollectionName()).isEqualTo("chunks_profiles_v2");
+        assertThat(search.getValue().getExpr()).isEqualTo(
+                "kb_id == \"" + kbId + "\" and profile_combined == true and entry_kind == \"qa\""
+        );
+        assertThatThrownBy(() -> service.searchProfile(
+                kbId,
+                List.of(0.1f),
+                3,
+                RetrievalProfile.COMBINED,
+                "qa or true"
+        )).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -167,6 +255,26 @@ class MilvusVectorServiceTest {
     }
 
     @Test
+    void profileDeleteBuildsDocAndKnowledgeBaseExpressions() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        when(client.getLoadState(any(GetLoadStateParam.class))).thenReturn(R.success(loadState(LoadState.LoadStateLoaded)));
+        when(client.delete(any(DeleteParam.class))).thenReturn(R.success());
+        UUID docId = UUID.randomUUID();
+        UUID kbId = UUID.randomUUID();
+        MilvusVectorService service = service(client);
+
+        service.deleteProfileByDocId(docId);
+        service.deleteProfileByKbId(kbId);
+
+        ArgumentCaptor<DeleteParam> deletes = ArgumentCaptor.forClass(DeleteParam.class);
+        verify(client, times(2)).delete(deletes.capture());
+        assertThat(deletes.getAllValues()).extracting(DeleteParam::getCollectionName)
+                .containsExactly("chunks_profiles_v2", "chunks_profiles_v2");
+        assertThat(deletes.getAllValues()).extracting(DeleteParam::getExpr)
+                .containsExactly("doc_id == \"" + docId + "\"", "kb_id == \"" + kbId + "\"");
+    }
+
+    @Test
     void deleteIgnoresUnloadedCollectionFailures() {
         MilvusServiceClient client = mock(MilvusServiceClient.class);
         when(client.getLoadState(any(GetLoadStateParam.class))).thenReturn(R.success(loadState(LoadState.LoadStateLoaded)));
@@ -265,6 +373,25 @@ class MilvusVectorServiceTest {
     }
 
     @Test
+    void profileCleanupDeleteUsesStrictProfileCollectionExpressions() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        when(client.delete(any(DeleteParam.class))).thenReturn(R.success());
+        UUID docId = UUID.randomUUID();
+        UUID kbId = UUID.randomUUID();
+        MilvusVectorService service = service(client);
+
+        service.deleteProfileByDocIdForCleanup(docId);
+        service.deleteProfileByKbIdForCleanup(kbId);
+
+        ArgumentCaptor<DeleteParam> deletes = ArgumentCaptor.forClass(DeleteParam.class);
+        verify(client, times(2)).delete(deletes.capture());
+        assertThat(deletes.getAllValues()).extracting(DeleteParam::getCollectionName)
+                .containsExactly("chunks_profiles_v2", "chunks_profiles_v2");
+        assertThat(deletes.getAllValues()).extracting(DeleteParam::getExpr)
+                .containsExactly("doc_id == \"" + docId + "\"", "kb_id == \"" + kbId + "\"");
+    }
+
+    @Test
     void cleanupDeleteReportsEmptyMilvusResponse() {
         MilvusServiceClient client = mock(MilvusServiceClient.class);
         when(client.delete(any(DeleteParam.class))).thenReturn(null);
@@ -299,6 +426,35 @@ class MilvusVectorServiceTest {
                                 .build())
                         .build())
                 .build();
+    }
+
+    private static DescribeCollectionResponse profileDescribeCollection(int dimension) {
+        CollectionSchema.Builder schema = CollectionSchema.newBuilder();
+        for (String field : List.of(
+                "chunk_id",
+                "kb_id",
+                "doc_id",
+                "content",
+                "entry_kind",
+                "profile_classic",
+                "profile_parent_child",
+                "profile_qa_assisted",
+                "profile_combined"
+        )) {
+            schema.addFields(FieldSchema.newBuilder()
+                    .setName(field)
+                    .setDataType(field.startsWith("profile_") ? DataType.Bool : DataType.VarChar)
+                    .build());
+        }
+        schema.addFields(FieldSchema.newBuilder()
+                .setName("embedding")
+                .setDataType(DataType.FloatVector)
+                .addTypeParams(KeyValuePair.newBuilder()
+                        .setKey("dim")
+                        .setValue(String.valueOf(dimension))
+                        .build())
+                .build());
+        return DescribeCollectionResponse.newBuilder().setSchema(schema.build()).build();
     }
 
     private static GetLoadingProgressResponse loadingProgress(long progress) {

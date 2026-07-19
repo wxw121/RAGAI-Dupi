@@ -4,8 +4,13 @@ import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.config.LlmProperties;
 import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.enums.RagEvalGateStatus;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.CreateKnowledgeBaseRequest;
+import com.dupi.rag.dto.KnowledgeBaseResponse;
+import com.dupi.rag.dto.RagEvalGateDecisionResponse;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.exception.RetrievalProfileConflictException;
 import com.dupi.rag.repository.KnowledgeBaseRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -14,6 +19,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -33,6 +39,12 @@ class KnowledgeBaseServiceTest {
     VectorCleanupTaskService vectorCleanupTaskService;
     @Mock
     AuditLogService auditLogService;
+    @Mock
+    ProfileIndexStateService profileIndexStateService;
+    @Mock
+    RetrievalProfileGateService retrievalProfileGateService;
+    @Mock
+    KnowledgeBaseMaintenanceService maintenanceService;
 
     LlmProperties llmProperties;
     KnowledgeBaseService service;
@@ -42,7 +54,16 @@ class KnowledgeBaseServiceTest {
         llmProperties = new LlmProperties();
         llmProperties.getEmbedding().setModel("default-embedding");
         llmProperties.getEmbedding().setDimension(1024);
-        service = new KnowledgeBaseService(repository, milvusVectorService, llmProperties, vectorCleanupTaskService, auditLogService);
+        service = new KnowledgeBaseService(
+                repository,
+                milvusVectorService,
+                llmProperties,
+                vectorCleanupTaskService,
+                auditLogService,
+                profileIndexStateService,
+                retrievalProfileGateService,
+                maintenanceService
+        );
     }
 
     @Test
@@ -90,6 +111,62 @@ class KnowledgeBaseServiceTest {
     }
 
     @Test
+    void createRejectsNonClassicProfileDefaults() {
+        CreateKnowledgeBaseRequest request = new CreateKnowledgeBaseRequest();
+        request.setName("KB");
+        request.setRetrievalProfile(RetrievalProfile.PARENT_CHILD);
+
+        assertThatThrownBy(() -> service.create(request))
+                .isInstanceOf(RetrievalProfileConflictException.class)
+                .hasMessageContaining("not_evaluated");
+        verify(repository, never()).save(any());
+    }
+
+    @Test
+    void updateRetrievalProfileAllowsClassicWithoutGate() {
+        UUID id = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(id)
+                .name("KB")
+                .retrievalProfile(RetrievalProfile.QA_ASSISTED)
+                .build();
+        when(repository.findByIdAndTenantIdForUpdate(id, "default")).thenReturn(Optional.of(kb));
+        when(repository.save(any(KnowledgeBase.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        var response = service.updateRetrievalProfile(id, RetrievalProfile.CLASSIC);
+
+        assertThat(response.getRetrievalProfile()).isEqualTo(RetrievalProfile.CLASSIC);
+        verify(retrievalProfileGateService, never()).assertCanActivate(any(), any());
+        verify(repository).findByIdAndTenantIdForUpdate(id, "default");
+        verify(repository).save(argThat(saved -> saved.getRetrievalProfile() == RetrievalProfile.CLASSIC));
+    }
+
+    @Test
+    void updateRetrievalProfileRequiresPassedGateForNonClassic() {
+        UUID id = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(id)
+                .name("KB")
+                .retrievalProfile(RetrievalProfile.CLASSIC)
+                .build();
+        when(repository.findByIdAndTenantIdForUpdate(id, "default")).thenReturn(Optional.of(kb));
+        when(repository.save(any(KnowledgeBase.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        var response = service.updateRetrievalProfile(id, RetrievalProfile.PARENT_CHILD);
+
+        assertThat(response.getRetrievalProfile()).isEqualTo(RetrievalProfile.PARENT_CHILD);
+        verify(retrievalProfileGateService).assertCanActivate(id, RetrievalProfile.PARENT_CHILD);
+        verify(repository).findByIdAndTenantIdForUpdate(id, "default");
+        verify(repository).save(argThat(saved -> saved.getRetrievalProfile() == RetrievalProfile.PARENT_CHILD));
+        verify(maintenanceService).assertMutationAllowed(id);
+        verify(auditLogService).recordSuccessInCurrentTransaction(
+                eq("KNOWLEDGE_BASE_RETRIEVAL_PROFILE_UPDATE"),
+                eq("KNOWLEDGE_BASE"),
+                eq(id),
+                contains("PARENT_CHILD"));
+    }
+
+    @Test
     void getMarksExistingKnowledgeBaseWhenEmbeddingConfigIsOutdated() {
         UUID id = UUID.randomUUID();
         KnowledgeBase kb = KnowledgeBase.builder()
@@ -107,6 +184,35 @@ class KnowledgeBaseServiceTest {
                 .contains("text-embedding-3-small")
                 .contains("default-embedding")
                 .contains("re-index");
+    }
+
+
+    @Test
+    void responseIncludesProfileIndexReadinessRevisionAndGateDecisions() {
+        UUID id = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(id)
+                .name("Ready")
+                .indexRevision(7L)
+                .retrievalProfile(RetrievalProfile.CLASSIC)
+                .build();
+        RagEvalGateDecisionResponse gate = RagEvalGateDecisionResponse.builder()
+                .candidate(RetrievalProfile.PARENT_CHILD)
+                .baseline(RetrievalProfile.CLASSIC)
+                .status(RagEvalGateStatus.PASSED)
+                .reason("passed")
+                .build();
+        when(repository.findByIdAndTenantId(id, "default")).thenReturn(Optional.of(kb));
+        when(profileIndexStateService.isV2Ready(id)).thenReturn(true);
+        when(retrievalProfileGateService.latestDecision(id, RetrievalProfile.PARENT_CHILD)).thenReturn(gate);
+
+        KnowledgeBaseResponse response = service.get(id);
+
+        assertThat(response.getIndexSchemaVersion()).isEqualTo(ProfileIndexStateService.TARGET_SCHEMA_VERSION);
+        assertThat(response.isProfileIndexReady()).isTrue();
+        assertThat(response.getIndexRevision()).isEqualTo(7L);
+        assertThat(response.getRetrievalProfileGateDecisions())
+                .containsEntry(RetrievalProfile.PARENT_CHILD, gate);
     }
 
     @Test
@@ -167,7 +273,8 @@ class KnowledgeBaseServiceTest {
 
         service.delete(id);
 
-        verify(vectorCleanupTaskService).enqueueKnowledgeBase(id);
+        verify(vectorCleanupTaskService).enqueueProfileKnowledgeBase(id);
+        verify(vectorCleanupTaskService).enqueueLegacyKnowledgeBase(id);
         verify(milvusVectorService).deleteByKbId(id);
         verify(repository).deleteById(id);
         verify(auditLogService).recordSuccess(
@@ -186,7 +293,8 @@ class KnowledgeBaseServiceTest {
 
         service.delete(id);
 
-        verify(vectorCleanupTaskService).enqueueKnowledgeBase(id);
+        verify(vectorCleanupTaskService).enqueueProfileKnowledgeBase(id);
+        verify(vectorCleanupTaskService).enqueueLegacyKnowledgeBase(id);
         verify(repository).deleteById(id);
         verify(auditLogService).recordSuccess(
                 eq("KNOWLEDGE_BASE_DELETE"),

@@ -116,10 +116,17 @@ Worker 使用 CPU-only PyTorch 和 `BAAI/bge-reranker-base`，默认在启动生
 > V1.1（API `0.1.1-SNAPSHOT` / Web `0.1.1`）新增真实浏览器 E2E 门禁、摄入诊断、知识库详情 `RAG 评估`、上传治理提示与聚合运维告警；设计与实施记录见 [docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md](docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md) 与 [docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md](docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md)。
 > V1.2（API `0.1.2-SNAPSHOT` / Web `0.1.2`）扩展真实浏览器门禁，新增文档索引详情、结构化 Chat 错误、持久化 RAG 评估用例/历史、混合检索与 Rerank 控制、审计告警 Webhook，以及知识库元数据/分块快照导出恢复；实施计划见 [docs/superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md](docs/superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md)。
 > V1.2.1 收尾将真实浏览器门禁业务数据隔离到 `e2e` 租户；成功运行会删除临时知识库和账号，失败运行仅保留 `e2e` 证据。设计见 [docs/superpowers/specs/2026-07-14-v1.2.1-e2e-isolation-cleanup-design.md](docs/superpowers/specs/2026-07-14-v1.2.1-e2e-isolation-cleanup-design.md)。
+> V1.5 (RAG Quality Upgrade) adds Parent-Child / QA-assisted indexing, a filterable profile v2 Milvus superset, Combined weighted RRF, revision-bound eval quality gates, and Web readiness/gate comparisons.
 
 企业级 RAG 知识库引擎 — 类似 Dify/扣子底层知识库模块。
 
 支持私有文档（PDF、DOCX、TXT、Markdown、Excel）上传、异步解析与向量化，结合大模型进行检索增强问答（SSE 流式）。
+
+### V1.5 升级与启用
+
+- V1.5 使用独立的 `MILVUS_PROFILE_COLLECTION` 保存 classic、parent-child、qa-assisted 和 combined 共用的可过滤 superset。已有知识库升级后需要执行一次“重建索引”；重建按文档滚动替换向量和 chunk，不会先清空整个在线索引。
+- 知识库仅在所有文档均为 `COMPLETED` 且 `index_schema_version=2` 时标记为 profile v2 ready。首次 ready 会持久化 cutover 状态并清理 Legacy；后续上传或重建期间仍使用 v2 中已完成的文档，不会回退到已清理的 Legacy。切换默认 profile 只改变检索入口，不会再次重建统一索引。
+- 非 classic profile 必须使用当前 `index_revision` 的 RAG 评估与 `CLASSIC` 对比，且至少包含 3 个 case、引用可评估、命中率和引用通过率均不回退。未通过时更新接口返回 HTTP `409`，错误码为 `retrieval_profile_gate_blocked`。
 
 ## 技术栈
 
@@ -375,8 +382,9 @@ cd services/api
 | V1 | 知识库 CRUD、异步摄入、纯向量检索、SSE RAG、Web 控制台 |
 | V1.1 | 真实浏览器 E2E 门禁、摄入诊断、RAG 评估闭环、上传治理提示、聚合运维告警 |
 | V1.2 | 索引详情、结构化 Chat 错误、持久化 RAG 评估、混合检索/Rerank 控制、Webhook、导出恢复 |
+| V1.5 | Parent-Child / QA-assisted indexing, profile v2 filterable superset, Combined weighted fusion, revision-bound quality gates, Web readiness/gate comparison |
 | V2 | BM25 sparse 生产调优、语义分块、生成中断、完整对象/向量灾备恢复 |
-| V3 | Parent-Child 索引、多模态 OCR、Pipeline DSL |
+| V3 | 多模态 OCR、Pipeline DSL |
 | V4 | K8s、多租户、合规审计 |
 
 详细规划见 [docs/todo.md](docs/todo.md) 与 [docs/decisions.md](docs/decisions.md)。

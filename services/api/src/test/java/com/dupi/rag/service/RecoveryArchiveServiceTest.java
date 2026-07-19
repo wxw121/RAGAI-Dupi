@@ -57,9 +57,12 @@ class RecoveryArchiveServiceTest {
         lenient().when(recoveryVectors.readDense(any(), any(), anyInt()))
                 .thenReturn(new VectorSnapshotPage(List.of(), null, "empty"));
         lenient().when(recoveryVectors.denseCollection()).thenReturn("chunks");
+        lenient().when(recoveryVectors.profileCollection()).thenReturn("chunks_profiles_v2");
         lenient().when(recoveryVectors.describe("chunks"))
                 .thenReturn(new MilvusRecoverySchema("COSINE", 1024, java.util.Map.of()));
         lenient().when(recoveryVectors.serializeRows(anyList())).thenReturn(new byte[0]);
+        lenient().when(recoveryVectors.readProfile(any(), any(), anyInt()))
+                .thenReturn(new VectorSnapshotPage(List.of(), null, "empty"));
     }
 
     @Test
@@ -95,6 +98,7 @@ class RecoveryArchiveServiceTest {
                 .name("hybrid").version(2).vectorCandidateCount(10).sparseCandidateCount(10)
                 .rrfConstant(60).rerankCandidateLimit(5).finalTopK(3).build();
         kb.setActiveRetrievalProfileId(profile.getId());
+        kb.setProfileIndexActivated(true);
         when(archives.findById(archiveId)).thenReturn(Optional.of(archive));
         when(knowledgeBases.findSystemOrThrow(kbId)).thenReturn(kb);
         when(documents.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(document));
@@ -118,6 +122,8 @@ class RecoveryArchiveServiceTest {
                 .thenReturn(new MilvusRecoverySchema("IP", 1024, java.util.Map.of()));
         when(recoveryVectors.readSparse(eq(kbId), eq(2), any(), anyInt()))
                 .thenReturn(new VectorSnapshotPage(List.of(), null, "empty"));
+        when(recoveryVectors.describe("chunks_profiles_v2"))
+                .thenReturn(new MilvusRecoverySchema("COSINE", 1024, java.util.Map.of()));
 
         service.capture(archiveId);
 
@@ -127,6 +133,7 @@ class RecoveryArchiveServiceTest {
         verify(archives, atLeast(2)).findById(archiveId);
         verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("objects/" + document.getId() + "/guide.md"), any());
         verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("vectors/dense.ndjson"), any());
+        verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("vectors/profile.ndjson"), any());
         verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("vectors/sparse.ndjson"), any());
         verify(maintenance).release(archiveId, RecoveryArchiveStatus.COMPLETED);
     }

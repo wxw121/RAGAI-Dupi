@@ -6,10 +6,13 @@ import com.dupi.rag.config.RagProperties;
 import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.KnowledgeBase;
-import com.dupi.rag.domain.entity.RetrievalProfile;
+import com.dupi.rag.domain.entity.SparseMigration;
 import com.dupi.rag.domain.enums.RetrievalMode;
+import com.dupi.rag.domain.enums.RetrievalProfile;
+import com.dupi.rag.domain.enums.SparseMigrationState;
 import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
+import com.dupi.rag.exception.RetrievalProfileConflictException;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.SparseMigrationRepository;
@@ -46,6 +49,7 @@ class RetrievalServiceTest {
     @Mock MilvusVectorService milvusVectorService;
     @Mock ChunkRepository chunkRepository;
     @Mock DocumentRepository documentRepository;
+    @Mock ProfileIndexStateService profileIndexStateService;
     @Mock RetrievalProfileService retrievalProfileService;
     @Mock SparseMigrationRepository sparseMigrationRepository;
 
@@ -62,9 +66,482 @@ class RetrievalServiceTest {
                 documentRepository,
                 properties,
                 builder,
+                profileIndexStateService,
+                new WeightedRrfFusion(),
                 retrievalProfileService,
                 sparseMigrationRepository
         );
+    }
+
+    @Test
+    void nonClassicProfileRequiresReadyV2Index() {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(5)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .retrievalProfile(RetrievalProfile.PARENT_CHILD)
+                .build();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(false);
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("query");
+
+        assertThatThrownBy(() -> service(new RagProperties()).retrieve(kbId, request))
+                .isInstanceOf(RetrievalProfileConflictException.class)
+                .hasMessageContaining("not ready");
+        verifyNoInteractions(llmClient, milvusVectorService);
+    }
+
+    @Test
+    void activatedV2IndexRemainsUsableWhileANewDocumentIsPending() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID chunkId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(1)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .retrievalProfile(RetrievalProfile.PARENT_CHILD)
+                .build();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(profileIndexStateService.isV2Activated(kbId)).thenReturn(true);
+        when(llmClient.embed("query", "embed")).thenReturn(List.of(0.1f));
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(1), eq(RetrievalProfile.PARENT_CHILD), eq("child")))
+                .thenReturn(List.of(new MilvusVectorService.SearchResult(
+                        chunkId.toString(), docId.toString(), "child", 0.9)));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("query");
+
+        var response = service(new RagProperties()).retrieve(kbId, request);
+
+        assertThat(response.getHits()).hasSize(1);
+        verify(milvusVectorService).searchProfile(
+                eq(kbId), anyList(), eq(1), eq(RetrievalProfile.PARENT_CHILD), eq("child"));
+        verify(milvusVectorService, never()).searchLegacy(any(), anyList(), anyInt());
+    }
+
+    @Test
+    void retrieveRequestProfileOverridesKnowledgeBaseDefaultInDiagnostics() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID chunkId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(5)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .retrievalProfile(RetrievalProfile.CLASSIC)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(5);
+        rag.setMaxContextChars(2000);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(llmClient.embed("hello", "embed")).thenReturn(List.of(0.1f, 0.2f));
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.PARENT_CHILD), eq("child")))
+                .thenReturn(List.of(new MilvusVectorService.SearchResult(chunkId.toString(), docId.toString(), "chunk", 0.9)));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        when(chunkRepository.findById(chunkId)).thenReturn(Optional.empty());
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("hello");
+        request.setRetrievalProfile(RetrievalProfile.PARENT_CHILD);
+
+        var response = service(rag).retrieve(kbId, request);
+
+        assertThat(response.getDiagnostics()).containsEntry("retrievalProfile", "parent-child");
+    }
+
+    @Test
+    void parentChildProfileExpandsChildHitToParentContext() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID childId = UUID.randomUUID();
+        UUID parentId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(5)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .retrievalProfile(RetrievalProfile.PARENT_CHILD)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(5);
+        rag.setMaxContextChars(2000);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(llmClient.embed("child query", "embed")).thenReturn(List.of(0.1f, 0.2f));
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.PARENT_CHILD), eq("child")))
+                .thenReturn(List.of(new MilvusVectorService.SearchResult(childId.toString(), docId.toString(), "child snippet", 0.9)));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        when(chunkRepository.findById(childId)).thenReturn(Optional.of(Chunk.builder()
+                .id(childId)
+                .kbId(kbId)
+                .docId(docId)
+                .chunkIndex(1)
+                .content("child snippet")
+                .metadata(Map.of("parent_chunk_id", parentId.toString(), "heading", "Child"))
+                .build()));
+        lenient().when(chunkRepository.findById(parentId)).thenReturn(Optional.of(Chunk.builder()
+                .id(parentId)
+                .kbId(kbId)
+                .docId(docId)
+                .chunkIndex(0)
+                .content("full parent paragraph with complete semantic context")
+                .metadata(Map.of("heading", "Parent"))
+                .build()));
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("child query");
+
+        var response = service(rag).retrieve(kbId, request);
+
+        assertThat(response.getHits()).singleElement().satisfies(hit -> {
+            assertThat(hit.getChunkId()).isEqualTo(parentId);
+            assertThat(hit.getContent()).isEqualTo("full parent paragraph with complete semantic context");
+            assertThat(hit.getMetadata()).containsEntry("matched_child_chunk_id", childId.toString())
+                    .containsEntry("parent_chunk_id", parentId.toString())
+                    .containsEntry("expanded_from_child", true);
+        });
+    }
+
+    @Test
+    void parentChildProfileDoesNotExpandParentFromAnotherKnowledgeBase() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID childId = UUID.randomUUID();
+        UUID parentId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(5)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .retrievalProfile(RetrievalProfile.PARENT_CHILD)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(5);
+        rag.setMaxContextChars(2000);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(llmClient.embed("child query", "embed")).thenReturn(List.of(0.1f, 0.2f));
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.PARENT_CHILD), eq("child")))
+                .thenReturn(List.of(new MilvusVectorService.SearchResult(childId.toString(), docId.toString(), "child snippet", 0.9)));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        when(chunkRepository.findById(childId)).thenReturn(Optional.of(Chunk.builder()
+                .id(childId)
+                .kbId(kbId)
+                .docId(docId)
+                .chunkIndex(1)
+                .content("child snippet")
+                .metadata(Map.of("parent_chunk_id", parentId.toString()))
+                .build()));
+        lenient().when(chunkRepository.findById(parentId)).thenReturn(Optional.of(Chunk.builder()
+                .id(parentId)
+                .kbId(UUID.randomUUID())
+                .docId(docId)
+                .chunkIndex(0)
+                .content("foreign parent context")
+                .build()));
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("child query");
+
+        var response = service(rag).retrieve(kbId, request);
+
+        assertThat(response.getHits()).singleElement().satisfies(hit -> {
+            assertThat(hit.getChunkId()).isEqualTo(childId);
+            assertThat(hit.getContent()).isEqualTo("child snippet");
+        });
+    }
+
+    @Test
+    void parentChildProfileDeduplicatesChildrenExpandedToSameParent() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID firstChildId = UUID.randomUUID();
+        UUID secondChildId = UUID.randomUUID();
+        UUID parentId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(5)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .retrievalProfile(RetrievalProfile.PARENT_CHILD)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(5);
+        rag.setMaxContextChars(2000);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(llmClient.embed("shared parent", "embed")).thenReturn(List.of(0.1f));
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.PARENT_CHILD), eq("child"))).thenReturn(List.of(
+                new MilvusVectorService.SearchResult(
+                        firstChildId.toString(), docId.toString(), "first child", 0.9),
+                new MilvusVectorService.SearchResult(
+                        secondChildId.toString(), docId.toString(), "second child", 0.8)
+        ));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        when(chunkRepository.findById(firstChildId)).thenReturn(Optional.of(Chunk.builder()
+                .id(firstChildId)
+                .kbId(kbId)
+                .docId(docId)
+                .content("first child")
+                .metadata(Map.of("parent_chunk_id", parentId.toString()))
+                .build()));
+        when(chunkRepository.findById(secondChildId)).thenReturn(Optional.of(Chunk.builder()
+                .id(secondChildId)
+                .kbId(kbId)
+                .docId(docId)
+                .content("second child")
+                .metadata(Map.of("parent_chunk_id", parentId.toString()))
+                .build()));
+        when(chunkRepository.findById(parentId)).thenReturn(Optional.of(Chunk.builder()
+                .id(parentId)
+                .kbId(kbId)
+                .docId(docId)
+                .content("shared parent context")
+                .metadata(Map.of())
+                .build()));
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("shared parent");
+
+        var response = service(rag).retrieve(kbId, request);
+
+        assertThat(response.getHits()).singleElement().satisfies(hit -> {
+            assertThat(hit.getChunkId()).isEqualTo(parentId);
+            assertThat(hit.getScore()).isEqualTo(0.9);
+            assertThat(hit.getMetadata()).containsEntry("matched_child_chunk_id", firstChildId.toString());
+        });
+    }
+
+    @Test
+    void qaAssistedProfileExpandsQaHitToSourceContextWithProvenance() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID qaId = UUID.randomUUID();
+        UUID sourceId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(5)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .retrievalProfile(RetrievalProfile.QA_ASSISTED)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(5);
+        rag.setMaxContextChars(2000);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(llmClient.embed("install query", "embed")).thenReturn(List.of(0.1f, 0.2f));
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.QA_ASSISTED), isNull()))
+                .thenReturn(List.of(new MilvusVectorService.SearchResult(
+                        qaId.toString(), docId.toString(), "Question: How?\nAnswer: Use the command.", 0.9)));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        when(chunkRepository.findById(qaId)).thenReturn(Optional.of(Chunk.builder()
+                .id(qaId)
+                .kbId(kbId)
+                .docId(docId)
+                .chunkIndex(1)
+                .content("Question: How?\nAnswer: Use the command.")
+                .metadata(Map.of(
+                        "chunk_role", "qa",
+                        "source_chunk_id", sourceId.toString(),
+                        "qa_question", "How?",
+                        "qa_answer", "Use the command."
+                ))
+                .build()));
+        when(chunkRepository.findById(sourceId)).thenReturn(Optional.of(Chunk.builder()
+                .id(sourceId)
+                .kbId(kbId)
+                .docId(docId)
+                .chunkIndex(0)
+                .content("Run the documented installation command in the project directory.")
+                .metadata(Map.of("heading", "Installation"))
+                .build()));
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("install query");
+
+        var response = service(rag).retrieve(kbId, request);
+
+        assertThat(response.getHits()).singleElement().satisfies(hit -> {
+            assertThat(hit.getChunkId()).isEqualTo(sourceId);
+            assertThat(hit.getContent()).isEqualTo("Run the documented installation command in the project directory.");
+            assertThat(hit.getMetadata()).containsEntry("heading", "Installation")
+                    .containsEntry("matched_qa_chunk_id", qaId.toString())
+                    .containsEntry("qa_source_chunk_id", sourceId.toString())
+                    .containsEntry("qa_question", "How?")
+                    .containsEntry("qa_answer", "Use the command.")
+                    .containsEntry("profile", "qa-assisted");
+        });
+    }
+
+    @Test
+    void combinedProfileExpandsQaSourceChildToParentContext() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID qaId = UUID.randomUUID();
+        UUID childId = UUID.randomUUID();
+        UUID parentId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(5)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .retrievalProfile(RetrievalProfile.COMBINED)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(5);
+        rag.setMaxContextChars(2000);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(llmClient.embed("combined query", "embed")).thenReturn(List.of(0.1f, 0.2f));
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.COMBINED), eq("child")))
+                .thenReturn(List.of());
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.COMBINED), eq("qa")))
+                .thenReturn(List.of(new MilvusVectorService.SearchResult(
+                        qaId.toString(), docId.toString(), "Question: Why?\nAnswer: Because.", 0.9)));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        when(chunkRepository.findById(qaId)).thenReturn(Optional.of(Chunk.builder()
+                .id(qaId)
+                .kbId(kbId)
+                .docId(docId)
+                .chunkIndex(2)
+                .content("Question: Why?\nAnswer: Because.")
+                .metadata(Map.of(
+                        "chunk_role", "qa",
+                        "source_chunk_id", childId.toString(),
+                        "qa_question", "Why?",
+                        "qa_answer", "Because."
+                ))
+                .build()));
+        when(chunkRepository.findById(childId)).thenReturn(Optional.of(Chunk.builder()
+                .id(childId)
+                .kbId(kbId)
+                .docId(docId)
+                .chunkIndex(1)
+                .content("child snippet")
+                .metadata(Map.of("chunk_role", "child", "parent_chunk_id", parentId.toString()))
+                .build()));
+        when(chunkRepository.findById(parentId)).thenReturn(Optional.of(Chunk.builder()
+                .id(parentId)
+                .kbId(kbId)
+                .docId(docId)
+                .chunkIndex(0)
+                .content("complete parent context")
+                .metadata(Map.of("chunk_role", "parent"))
+                .build()));
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("combined query");
+
+        var response = service(rag).retrieve(kbId, request);
+
+        assertThat(response.getHits()).singleElement().satisfies(hit -> {
+            assertThat(hit.getChunkId()).isEqualTo(parentId);
+            assertThat(hit.getContent()).isEqualTo("complete parent context");
+            assertThat(hit.getMetadata()).containsEntry("matched_qa_chunk_id", qaId.toString())
+                    .containsEntry("qa_source_chunk_id", childId.toString())
+                    .containsEntry("matched_child_chunk_id", childId.toString())
+                    .containsEntry("parent_chunk_id", parentId.toString())
+                    .containsEntry("profile", "combined");
+        });
+    }
+
+    @Test
+    void combinedVectorProfileTruncatesFusedRoutesToTopK() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID childId = UUID.randomUUID();
+        UUID qaId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(1)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .retrievalProfile(RetrievalProfile.COMBINED)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(1);
+        rag.setMaxContextChars(2000);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(llmClient.embed("combined limit", "embed")).thenReturn(List.of(0.1f));
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(1), eq(RetrievalProfile.COMBINED), eq("child")))
+                .thenReturn(List.of(new MilvusVectorService.SearchResult(
+                        childId.toString(), docId.toString(), "child", 0.9)));
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(1), eq(RetrievalProfile.COMBINED), eq("qa")))
+                .thenReturn(List.of(new MilvusVectorService.SearchResult(
+                        qaId.toString(), docId.toString(), "qa", 0.8)));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("combined limit");
+
+        var response = service(rag).retrieve(kbId, request);
+
+        assertThat(response.getHits()).hasSize(1);
+    }
+
+    @Test
+    void qaAssistedProfileDoesNotExpandSourceFromAnotherDocument() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID foreignDocId = UUID.randomUUID();
+        UUID qaId = UUID.randomUUID();
+        UUID sourceId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(5)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .retrievalProfile(RetrievalProfile.QA_ASSISTED)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(5);
+        rag.setMaxContextChars(2000);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(llmClient.embed("foreign source", "embed")).thenReturn(List.of(0.1f));
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(milvusVectorService.searchProfile(
+                eq(kbId), anyList(), eq(5), eq(RetrievalProfile.QA_ASSISTED), isNull()))
+                .thenReturn(List.of(new MilvusVectorService.SearchResult(
+                        qaId.toString(), docId.toString(), "Question: Q?\nAnswer: A.", 0.9)));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        when(chunkRepository.findById(qaId)).thenReturn(Optional.of(Chunk.builder()
+                .id(qaId)
+                .kbId(kbId)
+                .docId(docId)
+                .chunkIndex(1)
+                .content("Question: Q?\nAnswer: A.")
+                .metadata(Map.of("chunk_role", "qa", "source_chunk_id", sourceId.toString()))
+                .build()));
+        lenient().when(chunkRepository.findById(sourceId)).thenReturn(Optional.of(Chunk.builder()
+                .id(sourceId)
+                .kbId(kbId)
+                .docId(foreignDocId)
+                .chunkIndex(0)
+                .content("foreign document content")
+                .metadata(Map.of())
+                .build()));
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("foreign source");
+
+        var response = service(rag).retrieve(kbId, request);
+
+        assertThat(response.getHits()).singleElement().satisfies(hit -> {
+            assertThat(hit.getChunkId()).isEqualTo(qaId);
+            assertThat(hit.getContent()).isEqualTo("Question: Q?\nAnswer: A.");
+            assertThat(hit.getMetadata()).doesNotContainKey("matched_qa_chunk_id");
+        });
     }
 
     @Test
@@ -83,7 +560,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("hello", "embed")).thenReturn(List.of(0.1f, 0.2f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(50)))
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(50)))
                 .thenReturn(List.of(new MilvusVectorService.SearchResult(chunkId.toString(), docId.toString(), "chunk", 0.9)));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findById(chunkId)).thenReturn(Optional.of(Chunk.builder()
@@ -120,7 +597,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("hello", "embed")).thenReturn(List.of(0.1f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(7)))
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(7)))
                 .thenReturn(List.of(new MilvusVectorService.SearchResult(chunkId.toString(), docId.toString(), "chunk", 0.9)));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of());
         when(chunkRepository.findById(chunkId)).thenReturn(Optional.empty());
@@ -151,7 +628,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("asyncio 并发", "embed")).thenReturn(List.of(0.1f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(1)))
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(1)))
                 .thenThrow(new IllegalStateException("Milvus collection is not ready for search"));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
@@ -204,7 +681,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("本地兜底检索", "embed")).thenReturn(List.of(0.1f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(1)))
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(1)))
                 .thenThrow(new IllegalStateException("Milvus search failed: fail to search on QueryNode 7: Timestamp lag too large"));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
@@ -295,7 +772,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("虚拟环境怎么创建", "embed")).thenReturn(List.of(0.1f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(3)))
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(3)))
                 .thenThrow(new IllegalStateException("Milvus collection is not ready for search"));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
@@ -345,7 +822,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("这个知识库讲了什么", "embed")).thenReturn(List.of(0.1f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(2)))
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(2)))
                 .thenThrow(new IllegalStateException("Milvus collection is not ready for search"));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(
@@ -394,7 +871,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(2000);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(llmClient.embed("hello", "embed")).thenReturn(List.of(0.1f));
-        when(milvusVectorService.search(eq(kbId), anyList(), eq(1)))
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(1)))
                 .thenReturn(List.of(new MilvusVectorService.SearchResult(chunkId.toString(), docId.toString(), "chunk", 0.9)));
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
         when(chunkRepository.findById(chunkId)).thenReturn(Optional.empty());
@@ -405,7 +882,7 @@ class RetrievalServiceTest {
         var response = service(rag).retrieve(kbId, request);
 
         assertThat(response.getHits()).hasSize(1);
-        verify(milvusVectorService).search(eq(kbId), anyList(), eq(1));
+        verify(milvusVectorService).searchLegacy(eq(kbId), anyList(), eq(1));
     }
 
     @Test
@@ -454,7 +931,7 @@ class RetrievalServiceTest {
         rag.setMaxContextChars(1000);
         ExchangeFunction exchange = request -> {
             String json = """
-                    {"rerank_applied":true,"hits":[{"chunk_id":"%s","doc_id":"%s","file_name":"doc.md","content":"hybrid hit","score":0.7,"metadata":{"heading":"H"}}]}
+                    {"hits":[{"chunk_id":"%s","doc_id":"%s","file_name":"doc.md","content":"hybrid hit","score":0.7,"metadata":{"heading":"H"}}]}
                     """.formatted(chunkId, docId);
             return Mono.just(ClientResponse.create(HttpStatus.OK)
                     .header("Content-Type", "application/json")
@@ -478,6 +955,158 @@ class RetrievalServiceTest {
             assertThat(hit.getMetadata()).containsEntry("heading", "H");
         });
         verifyNoInteractions(llmClient, milvusVectorService);
+    }
+
+    @Test
+    void localFallbackFiltersPersistedEntriesForEveryRetrievalProfile() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(10)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.VECTOR)
+                .retrievalProfile(RetrievalProfile.CLASSIC)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(10);
+        rag.setMaxContextChars(2000);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(llmClient.embed(anyString(), eq("embed")))
+                .thenThrow(new RuntimeException("Connection refused"));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+        Chunk classic = scopedChunk(kbId, docId, "original", List.of("classic"));
+        Chunk child = scopedChunk(kbId, docId, "child", List.of("parent-child", "combined"));
+        Chunk original = scopedChunk(kbId, docId, "original", List.of("qa-assisted"));
+        Chunk qa = scopedChunk(kbId, docId, "qa", List.of("qa-assisted", "combined"));
+        when(chunkRepository.findByKbIdOrderByChunkIndexAsc(kbId))
+                .thenReturn(List.of(classic, child, original, qa));
+
+        assertFallbackChunkIds(kbId, rag, RetrievalProfile.CLASSIC, classic.getId());
+        assertFallbackChunkIds(kbId, rag, RetrievalProfile.PARENT_CHILD, child.getId());
+        assertFallbackChunkIds(kbId, rag, RetrievalProfile.QA_ASSISTED, original.getId(), qa.getId());
+        assertFallbackChunkIds(kbId, rag, RetrievalProfile.COMBINED, child.getId(), qa.getId());
+    }
+
+    @Test
+    void retrieveForProfileIncludesVersionedShadowSparseConfiguration() {
+        UUID kbId = UUID.randomUUID();
+        UUID activeProfileId = UUID.randomUUID();
+        UUID shadowProfileId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID chunkId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(3)
+                .embeddingModel("embed")
+                .embeddingDimension(3)
+                .retrievalMode(RetrievalMode.HYBRID)
+                .build();
+        com.dupi.rag.domain.entity.RetrievalProfile activeProfile = persistedProfile(kbId, activeProfileId, 3);
+        com.dupi.rag.domain.entity.RetrievalProfile shadowProfile = persistedProfile(kbId, shadowProfileId, 4);
+        SparseMigration migration = SparseMigration.builder()
+                .id(UUID.randomUUID())
+                .kbId(kbId)
+                .profileId(shadowProfileId)
+                .state(SparseMigrationState.SHADOW_VALIDATING)
+                .legacyBm25Enabled(true)
+                .build();
+        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK)
+                .header("Content-Type", "application/json")
+                .body("""
+                        {"profile_version":3,"hits":[{"chunk_id":"%s","doc_id":"%s","file_name":"doc.md","content":"hybrid hit","score":0.7}]}
+                        """.formatted(chunkId, docId))
+                .build());
+        RetrievalService retrievalService = service(new RagProperties(),
+                WebClient.builder().exchangeFunction(exchange));
+        ReflectionTestUtils.setField(retrievalService, "workerBaseUrl", "http://worker");
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(retrievalProfileService.find(kbId, activeProfileId)).thenReturn(activeProfile);
+        when(retrievalProfileService.find(kbId, shadowProfileId)).thenReturn(shadowProfile);
+        when(sparseMigrationRepository.findTopByKbIdAndStateInOrderByCreatedAtDesc(eq(kbId), anyList()))
+                .thenReturn(Optional.of(migration));
+
+        var response = retrievalService.retrieveForProfile(kbId, request("hybrid"), activeProfileId);
+
+        assertThat(response.getHits()).singleElement().extracting(RetrievalHit::getChunkId).isEqualTo(chunkId);
+        assertThat(response.getDiagnostics()).containsEntry("profileVersion", 3);
+    }
+
+    @Test
+    void retrieveForEvaluationVectorUsesLegacyVectorSearch() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID chunkId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(1)
+                .embeddingModel("embed")
+                .retrievalMode(RetrievalMode.HYBRID)
+                .build();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(llmClient.embed("vector", "embed")).thenReturn(List.of(0.1f));
+        when(milvusVectorService.searchLegacy(eq(kbId), anyList(), eq(1)))
+                .thenReturn(List.of(new MilvusVectorService.SearchResult(
+                        chunkId.toString(), docId.toString(), "legacy", 0.8)));
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc(kbId, docId)));
+
+        var response = service(new RagProperties())
+                .retrieveForEvaluation(kbId, request("vector"), RetrievalMode.VECTOR);
+
+        assertThat(response.getRetrievalMode()).isEqualTo("vector");
+        assertThat(response.getHits()).singleElement().extracting(RetrievalHit::getChunkId).isEqualTo(chunkId);
+        verify(retrievalProfileService, never()).resolveActive(kb);
+    }
+
+    @Test
+    void hybridRetrieveHydratesMissingWorkerMetadataBeforeQaExpansion() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID qaId = UUID.randomUUID();
+        UUID sourceId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder()
+                .id(kbId)
+                .topK(1)
+                .embeddingModel("embed")
+                .embeddingDimension(3)
+                .retrievalMode(RetrievalMode.HYBRID)
+                .retrievalProfile(RetrievalProfile.QA_ASSISTED)
+                .build();
+        RagProperties rag = new RagProperties();
+        rag.setDefaultTopK(1);
+        rag.setMaxContextChars(1000);
+        ExchangeFunction exchange = request -> {
+            String json = """
+                    {"hits":[{"chunk_id":"%s","doc_id":"%s","file_name":"doc.md","content":"generated qa","score":0.7}]}
+                    """.formatted(qaId, docId);
+            return Mono.just(ClientResponse.create(HttpStatus.OK)
+                    .header("Content-Type", "application/json")
+                    .body(json)
+                    .build());
+        };
+        RetrievalService retrievalService = service(rag, WebClient.builder().exchangeFunction(exchange));
+        ReflectionTestUtils.setField(retrievalService, "workerBaseUrl", "http://worker");
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(profileIndexStateService.isV2Activated(kbId)).thenReturn(true);
+        when(chunkRepository.findById(qaId)).thenReturn(Optional.of(Chunk.builder()
+                .id(qaId).kbId(kbId).docId(docId).content("generated qa")
+                .metadata(Map.of("chunk_role", "qa", "source_chunk_id", sourceId.toString()))
+                .build()));
+        when(chunkRepository.findById(sourceId)).thenReturn(Optional.of(Chunk.builder()
+                .id(sourceId).kbId(kbId).docId(docId).content("source context")
+                .metadata(Map.of("heading", "Source"))
+                .build()));
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery("hello");
+
+        var response = retrievalService.retrieve(kbId, request);
+
+        assertThat(response.getHits()).singleElement().satisfies(hit -> {
+            assertThat(hit.getChunkId()).isEqualTo(sourceId);
+            assertThat(hit.getContent()).isEqualTo("source context");
+            assertThat(hit.getMetadata()).containsEntry("matched_qa_chunk_id", qaId.toString());
+        });
     }
 
     @Test
@@ -506,79 +1135,6 @@ class RetrievalServiceTest {
         assertThatThrownBy(() -> retrievalService.retrieve(kbId, request))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Hybrid retrieval failed");
-    }
-
-    @Test
-    void hybridRetrieveAppliesActiveProfileAndExposesRedactedStageRanks() {
-        UUID kbId = UUID.randomUUID();
-        UUID docId = UUID.randomUUID();
-        UUID chunkId = UUID.randomUUID();
-        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).topK(3).embeddingModel("embed")
-                .embeddingDimension(3).retrievalMode(RetrievalMode.HYBRID)
-                .activeRetrievalProfileId(UUID.randomUUID()).build();
-        RetrievalProfile profile = RetrievalProfile.builder()
-                .id(kb.getActiveRetrievalProfileId()).kbId(kbId).name("balanced").version(4)
-                .vectorCandidateCount(30).sparseCandidateCount(20).rrfConstant(60)
-                .rerankEnabled(true).rerankCandidateLimit(10).finalTopK(5).build();
-        RagProperties rag = new RagProperties();
-        rag.setDefaultTopK(5);
-        rag.setMaxContextChars(1000);
-        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK)
-                .header("Content-Type", "application/json")
-                .body("""
-                        {"profile_version":4,"rerank_applied":false,"fallback_reason":"reranker_unavailable","hits":[{"chunk_id":"%s","doc_id":"%s","file_name":"doc.md",
-                        "content":"hit","score":0.7,"metadata":{"embedding":[0.3],"provider_url":"secret",
-                        "nested":[[{"base_url":"secret","authorization":"bearer","safe":"kept","nullable":null}]]},
-                        "vector_rank":2,"sparse_rank":1,"fusion_rank":1,
-                        "rerank_rank":1,"rerank_score":0.91,"embedding":[0.1,0.2]}]}
-                        """.formatted(chunkId, docId)).build());
-        RetrievalService retrievalService = service(rag, WebClient.builder().exchangeFunction(exchange));
-        ReflectionTestUtils.setField(retrievalService, "workerBaseUrl", "http://worker");
-        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
-        when(retrievalProfileService.find(kbId, profile.getId())).thenReturn(profile);
-        RetrieveRequest request = new RetrieveRequest();
-        request.setQuery("hello");
-
-        var response = retrievalService.retrieveForProfile(kbId, request, profile.getId());
-
-        assertThat(response.getDiagnostics()).containsEntry("profileVersion", 4)
-                .containsEntry("rerankApplied", false).containsEntry("fallbackReason", "reranker_unavailable")
-                .containsEntry("vectorRank", 2).containsEntry("sparseRank", 1)
-                .containsEntry("fusionRank", 1).doesNotContainKey("embedding");
-        assertThat(response.getRetrievalMode()).isEqualTo("hybrid");
-        assertThat(response.getHits()).singleElement().satisfies(hit ->
-                assertThat(hit.getMetadata()).containsKey("retrievalStages")
-                        .doesNotContainKeys("embedding", "provider_url")
-                        .hasEntrySatisfying("nested", nested -> assertThat(String.valueOf(nested))
-                                .contains("safe=kept", "nullable=null").doesNotContain("secret", "bearer")));
-    }
-
-    @Test
-    void hybridRetrieveRejectsMismatchedWorkerProfileVersion() {
-        UUID kbId = UUID.randomUUID();
-        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).topK(3).embeddingModel("embed")
-                .embeddingDimension(3).retrievalMode(RetrievalMode.HYBRID)
-                .activeRetrievalProfileId(UUID.randomUUID()).build();
-        RetrievalProfile profile = RetrievalProfile.builder()
-                .id(kb.getActiveRetrievalProfileId()).kbId(kbId).name("balanced").version(4)
-                .vectorCandidateCount(30).sparseCandidateCount(20).rrfConstant(60)
-                .rerankEnabled(false).rerankCandidateLimit(10).finalTopK(5).build();
-        RagProperties rag = new RagProperties();
-        rag.setDefaultTopK(5);
-        rag.setMaxContextChars(1000);
-        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK)
-                .header("Content-Type", "application/json")
-                .body("{\"profile_version\":5,\"hits\":[]}").build());
-        RetrievalService retrievalService = service(rag, WebClient.builder().exchangeFunction(exchange));
-        ReflectionTestUtils.setField(retrievalService, "workerBaseUrl", "http://worker");
-        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
-        when(retrievalProfileService.resolveActive(kb)).thenReturn(profile);
-        RetrieveRequest request = new RetrieveRequest();
-        request.setQuery("hello");
-
-        assertThatThrownBy(() -> retrievalService.retrieve(kbId, request))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("profile version");
     }
 
     @Test
@@ -615,6 +1171,63 @@ class RetrievalServiceTest {
                 .fileSize(1L)
                 .createdAt(Instant.now())
                 .updatedAt(Instant.now())
+                .build();
+    }
+
+    private void assertFallbackChunkIds(
+            UUID kbId,
+            RagProperties rag,
+            RetrievalProfile profile,
+            UUID... expectedIds
+    ) {
+        RetrieveRequest request = request("needle");
+        request.setRetrievalProfile(profile);
+
+        assertThat(service(rag).retrieve(kbId, request).getHits())
+                .extracting(RetrievalHit::getChunkId)
+                .containsExactlyInAnyOrder(expectedIds);
+    }
+
+    private static RetrieveRequest request(String query) {
+        RetrieveRequest request = new RetrieveRequest();
+        request.setQuery(query);
+        return request;
+    }
+
+    private static Chunk scopedChunk(
+            UUID kbId,
+            UUID docId,
+            String entryKind,
+            List<String> profileScope
+    ) {
+        return Chunk.builder()
+                .id(UUID.randomUUID())
+                .kbId(kbId)
+                .docId(docId)
+                .chunkIndex(profileScope.hashCode())
+                .content("needle content")
+                .metadata(Map.of("entry_kind", entryKind, "profile_scope", profileScope))
+                .build();
+    }
+
+    private static com.dupi.rag.domain.entity.RetrievalProfile persistedProfile(
+            UUID kbId,
+            UUID profileId,
+            int version
+    ) {
+        return com.dupi.rag.domain.entity.RetrievalProfile.builder()
+                .id(profileId)
+                .kbId(kbId)
+                .name("profile-" + version)
+                .version(version)
+                .vectorCandidateCount(20)
+                .sparseCandidateCount(20)
+                .rrfConstant(60)
+                .sparseIndexParams(Map.of("drop_ratio_build", 0.1))
+                .sparseSearchParams(Map.of("drop_ratio_search", 0.1))
+                .rerankEnabled(false)
+                .rerankCandidateLimit(10)
+                .finalTopK(5)
                 .build();
     }
 }

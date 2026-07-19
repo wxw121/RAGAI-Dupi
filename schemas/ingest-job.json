@@ -20,6 +20,13 @@
     },
     "embeddingModel": { "type": "string", "default": "text-embedding-3-small" },
     "embeddingDimension": { "type": "integer", "default": 1536 },
-    "sparseProfileVersion": { "type": ["integer", "null"] }
+    "retrievalProfile": {
+      "type": "string",
+      "enum": ["classic", "parent-child", "qa-assisted", "combined"],
+      "default": "classic"
+    },
+    "sparseProfileVersion": { "type": ["integer", "null"] },
+    "legacyWriteRequired": { "type": "boolean", "default": true },
+    "indexSchemaVersion": { "type": "integer", "default": 2 }
   }
 }

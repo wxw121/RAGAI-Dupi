@@ -200,10 +200,11 @@ def test_hybrid_retrieve_fuses_vector_and_bm25_then_reranks(monkeypatch):
 
     result = hybrid.hybrid_retrieve("kb", "hello", 1, "m", 3, use_rerank=True, corpus_fetcher=lambda _: corpus)
 
-    assert result[0] == {
-        "chunk_id": "b1", "doc_id": "d", "content": "hello bm25", "score": 9.0,
-        "sparse_rank": 1, "fusion_score": 1 / 61, "fusion_rank": 2,
-    }
+    assert result[0]["chunk_id"] == "b1"
+    assert result[0]["content"] == "hello bm25"
+    assert result[0]["score"] == 9.0
+    assert result[0]["sparse_rank"] == 1
+    assert result[0]["fusion_rank"] == 2
 
 
 def test_hybrid_retrieve_without_rerank_fetches_default_corpus(monkeypatch):
@@ -225,87 +226,400 @@ def test_hybrid_retrieve_without_rerank_fetches_default_corpus(monkeypatch):
     monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
     monkeypatch.setattr(hybrid, "fetch_kb_corpus", lambda kb_id: [{"chunk_id": "b1", "doc_id": "d", "content": "hello bm25"}])
 
-    result = hybrid.hybrid_retrieve(
-        "kb", "hello", 2, "m", 3, use_rerank=False, allow_legacy_bm25_fallback=True
-    )
+    result = hybrid.hybrid_retrieve("kb", "hello", 2, "m", 3, use_rerank=False)
 
     assert [hit["chunk_id"] for hit in result] == ["v1", "b1"]
 
 
-def test_shadow_validation_records_candidate_rank_without_changing_legacy_order(monkeypatch):
+def test_hybrid_retrieve_excludes_parent_chunks_from_bm25_entries(monkeypatch):
     class FakeEmbedder:
-        def __init__(self, model): pass
-        def embed(self, query): return [0.1]
+        def __init__(self, model):
+            self.model = model
+
+        def embed(self, query):
+            return [0.1]
 
     class FakeIndexer:
-        def __init__(self, dimension): pass
-        def search(self, kb_id, vector, top_k):
-            return [{"chunk_id": "legacy", "doc_id": "d", "content": "hello", "score": 0.8}]
+        def __init__(self, dimension, collection_name=None, profile_schema=False):
+            self.dimension = dimension
 
-    class FakeSparse:
-        def __init__(self, kb_id, version, params): assert kb_id == "kb" and version == 7
-        def search(self, kb_id, query, top_k, params):
-            return [{"chunk_id": "candidate", "doc_id": "d", "content": "other", "score": 3.0},
-                    {"chunk_id": "legacy", "doc_id": "d", "content": "hello", "score": 2.0}]
+        def search_profile(self, kb_id, vector, top_k, profile, entry_kind=None):
+            return []
+
+    corpus = [
+        {
+            "chunk_id": "parent",
+            "doc_id": "d",
+            "content": "target phrase",
+            "metadata": {"chunk_role": "parent", "profile_scope": ["parent-child"]},
+        },
+        {
+            "chunk_id": "child",
+            "doc_id": "d",
+            "content": "target phrase",
+            "metadata": {
+                "chunk_role": "child",
+                "parent_chunk_id": "parent",
+                "profile_scope": ["parent-child"],
+            },
+        },
+    ]
+    monkeypatch.setattr(hybrid, "Embedder", FakeEmbedder)
+    monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
+
+    result = hybrid.hybrid_retrieve(
+        "kb",
+        "target phrase",
+        5,
+        "m",
+        3,
+        retrieval_profile="parent-child",
+        profile_index_ready=True,
+        corpus_fetcher=lambda _: corpus,
+    )
+
+    assert [hit["chunk_id"] for hit in result] == ["child"]
+
+
+def test_hybrid_retrieve_attaches_retrieval_profile_metadata(monkeypatch):
+    class FakeEmbedder:
+        def __init__(self, model):
+            self.model = model
+
+        def embed(self, query):
+            return [0.1]
+
+    class FakeIndexer:
+        def __init__(self, dimension, collection_name=None, profile_schema=False):
+            self.dimension = dimension
+
+        def search_profile(self, kb_id, vector, top_k, profile, entry_kind=None):
+            return [{"chunk_id": "v1", "doc_id": "d", "content": "vector hello", "score": 0.8}]
 
     monkeypatch.setattr(hybrid, "Embedder", FakeEmbedder)
     monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
-    monkeypatch.setattr(hybrid, "SparseMilvusAdapter", FakeSparse)
 
     result = hybrid.hybrid_retrieve(
-        "kb", "hello", 2, "m", 3,
-        corpus_fetcher=lambda _: [{"chunk_id": "legacy", "doc_id": "d", "content": "hello"}],
-        shadow_profile_version=7,
+        "kb",
+        "hello",
+        1,
+        "m",
+        3,
+        retrieval_profile="qa-assisted",
+        profile_index_ready=True,
     )
 
-    assert result[0]["chunk_id"] == "legacy"
-    assert result[0]["shadow_sparse_rank"] == 2
-    assert result[0]["shadow_rank_delta"] == -1
+    assert result[0]["metadata"]["retrieval_profile"] == "qa-assisted"
 
 
-def test_hybrid_retrieve_applies_profile_limits_and_stage_ranks(monkeypatch):
-    calls = {}
+def test_hybrid_retrieve_hydrates_vector_hit_provenance_from_corpus(monkeypatch):
+    class FakeEmbedder:
+        def __init__(self, model):
+            self.model = model
+
+        def embed(self, query):
+            return [0.1]
+
+    class FakeIndexer:
+        def __init__(self, dimension, collection_name=None, profile_schema=False):
+            self.dimension = dimension
+
+        def search_profile(self, kb_id, vector, top_k, profile, entry_kind=None):
+            return [{
+                "chunk_id": "qa-vector",
+                "doc_id": "d",
+                "content": "generated question and answer",
+                "score": 0.8,
+            }]
+
+    corpus = [{
+        "chunk_id": "qa-vector",
+        "doc_id": "d",
+        "file_name": "guide.md",
+        "content": "generated question and answer",
+        "metadata": {
+            "chunk_role": "qa",
+            "entry_kind": "qa",
+            "source_chunk_id": "source-1",
+            "profile_scope": ["qa-assisted"],
+        },
+    }]
+    monkeypatch.setattr(hybrid, "Embedder", FakeEmbedder)
+    monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
+    monkeypatch.setattr(hybrid, "rerank_hits", lambda query, hits, top_k: hits[:top_k])
+
+    result = hybrid.hybrid_retrieve(
+        "kb",
+        "unmatched",
+        1,
+        "m",
+        3,
+        use_rerank=True,
+        retrieval_profile="qa-assisted",
+        profile_index_ready=True,
+        corpus_fetcher=lambda _: corpus,
+    )
+
+    assert result[0]["file_name"] == "guide.md"
+    assert result[0]["metadata"]["chunk_role"] == "qa"
+    assert result[0]["metadata"]["source_chunk_id"] == "source-1"
+    assert result[0]["metadata"]["retrieval_profile"] == "qa-assisted"
+
+
+def test_filter_profile_corpus_isolates_classic_parent_child_and_qa_entries():
+    corpus = [
+        {
+            "chunk_id": "classic",
+            "content": "classic",
+            "metadata": {"entry_kind": "original", "profile_scope": ["classic", "qa-assisted"]},
+        },
+        {
+            "chunk_id": "child",
+            "content": "child",
+            "metadata": {"entry_kind": "child", "profile_scope": ["parent-child", "combined"]},
+        },
+        {
+            "chunk_id": "qa-assisted",
+            "content": "qa assisted",
+            "metadata": {"entry_kind": "qa", "profile_scope": ["qa-assisted"]},
+        },
+        {
+            "chunk_id": "qa-combined",
+            "content": "qa combined",
+            "metadata": {"entry_kind": "qa", "profile_scope": ["combined"]},
+        },
+        {
+            "chunk_id": "parent",
+            "content": "parent",
+            "metadata": {"entry_kind": "parent", "profile_scope": ["parent-child", "combined"]},
+        },
+    ]
+
+    assert [hit["chunk_id"] for hit in hybrid.filter_profile_corpus(corpus, "classic", True)] == ["classic"]
+    assert [hit["chunk_id"] for hit in hybrid.filter_profile_corpus(corpus, "parent-child", True)] == ["child"]
+    assert [hit["chunk_id"] for hit in hybrid.filter_profile_corpus(corpus, "qa-assisted", True)] == [
+        "classic",
+        "qa-assisted",
+    ]
+    assert [hit["chunk_id"] for hit in hybrid.filter_profile_corpus(corpus, "combined", True, "qa")] == [
+        "qa-combined",
+    ]
+    assert [hit["chunk_id"] for hit in hybrid.filter_profile_corpus(corpus, "classic", False)] == ["classic"]
+
+
+def test_weighted_rrf_combines_routes_and_validates_parameters():
+    fused = hybrid.weighted_rrf([
+        (1.0, [{"chunk_id": "child-a", "content": "A"}, {"chunk_id": "child-b", "content": "B"}]),
+        (0.8, [{"chunk_id": "qa-a", "content": "QA"}]),
+        (1.0, []),
+    ], k=60)
+
+    assert [hit["chunk_id"] for hit in fused] == ["child-a", "child-b", "qa-a"]
+    assert fused[0]["score"] == pytest.approx(1.0 / 61.0)
+    assert [hit["fusion_rank"] for hit in fused] == [1, 2, 3]
+    assert fused[0]["fusion_score"] == fused[0]["score"]
+    assert fused[0]["route_ranks"] == {"route_1": 1}
+    with pytest.raises(ValueError, match="RRF K"):
+        hybrid.weighted_rrf([], k=0)
+    with pytest.raises(ValueError, match="weight"):
+        hybrid.weighted_rrf([(0, [])], k=60)
+
+
+def test_combined_hybrid_uses_four_weighted_routes_then_reranks(monkeypatch):
+    calls = []
+    rerank_inputs = []
 
     class FakeEmbedder:
         def __init__(self, model):
+            self.model = model
+
+        def embed(self, query):
+            return [0.1]
+
+    class FakeIndexer:
+        def __init__(self, dimension, collection_name=None, profile_schema=False):
+            calls.append(("init", dimension, collection_name, profile_schema))
+
+        def search_profile(self, kb_id, vector, top_k, profile, entry_kind=None):
+            calls.append(("search", profile, entry_kind, top_k))
+            return [{
+                "chunk_id": f"{entry_kind}-vector",
+                "doc_id": "d",
+                "content": f"{entry_kind} vector",
+                "score": 0.9,
+            }]
+
+    corpus = [
+        {
+            "chunk_id": "child-bm25",
+            "doc_id": "d",
+            "content": "child target",
+            "metadata": {"entry_kind": "child", "profile_scope": ["combined"]},
+        },
+        {
+            "chunk_id": "qa-bm25",
+            "doc_id": "d",
+            "content": "qa target",
+            "metadata": {"entry_kind": "qa", "profile_scope": ["combined"]},
+        },
+    ]
+
+    def fake_bm25(filtered, query, top_k):
+        calls.append(("bm25", filtered[0]["metadata"]["entry_kind"], top_k))
+        return [{**filtered[0], "score": 0.5}] if filtered else []
+
+    def fake_rerank(query, hits, top_k):
+        rerank_inputs.append([hit["chunk_id"] for hit in hits])
+        return hits[:top_k]
+
+    monkeypatch.setattr(hybrid, "Embedder", FakeEmbedder)
+    monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
+    monkeypatch.setattr(hybrid, "bm25_search", fake_bm25)
+    monkeypatch.setattr(hybrid, "rerank_hits", fake_rerank)
+    monkeypatch.setattr(hybrid.settings, "combined_child_weight", 1.0)
+    monkeypatch.setattr(hybrid.settings, "combined_qa_weight", 0.8)
+    monkeypatch.setattr(hybrid.settings, "rrf_k", 60)
+    monkeypatch.setattr(hybrid.settings, "milvus_profile_collection", "profiles-v2")
+
+    result = hybrid.hybrid_retrieve(
+        "kb",
+        "target",
+        4,
+        "m",
+        3,
+        use_rerank=True,
+        retrieval_profile="combined",
+        profile_index_ready=True,
+        corpus_fetcher=lambda _: corpus,
+    )
+
+    assert calls == [
+        ("init", 3, "profiles-v2", True),
+        ("search", "combined", "child", 8),
+        ("search", "combined", "qa", 8),
+        ("bm25", "child", 8),
+        ("bm25", "qa", 8),
+    ]
+    assert rerank_inputs == [["child-vector", "child-bm25", "qa-vector", "qa-bm25"]]
+    assert [hit["chunk_id"] for hit in result] == rerank_inputs[0]
+
+
+def test_combined_hybrid_preserves_child_results_when_qa_routes_are_empty(monkeypatch):
+    class FakeEmbedder:
+        def __init__(self, model):
+            self.model = model
+
+        def embed(self, query):
+            return [0.1]
+
+    class FakeIndexer:
+        def __init__(self, dimension, collection_name=None, profile_schema=False):
             pass
+
+        def search_profile(self, kb_id, vector, top_k, profile, entry_kind=None):
+            if entry_kind == "qa":
+                return []
+            return [{"chunk_id": "child-vector", "doc_id": "d", "content": "child", "score": 0.9}]
+
+    monkeypatch.setattr(hybrid, "Embedder", FakeEmbedder)
+    monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
+
+    result = hybrid.hybrid_retrieve(
+        "kb",
+        "missing",
+        3,
+        "m",
+        3,
+        retrieval_profile="combined",
+        profile_index_ready=True,
+        corpus_fetcher=lambda _: [],
+    )
+
+    assert [hit["chunk_id"] for hit in result] == ["child-vector"]
+
+
+def test_not_ready_classic_hybrid_uses_legacy_search(monkeypatch):
+    calls = []
+
+    class FakeEmbedder:
+        def __init__(self, model):
+            self.model = model
 
         def embed(self, query):
             return [0.1]
 
     class FakeIndexer:
         def __init__(self, dimension):
-            pass
+            calls.append(("init", dimension))
 
         def search(self, kb_id, vector, top_k):
-            calls["vector_limit"] = top_k
-            return [{"chunk_id": "same", "doc_id": "d", "content": "hello", "score": 0.8}]
+            calls.append(("search", kb_id, top_k))
+            return [{"chunk_id": "legacy", "doc_id": "d", "content": "legacy", "score": 0.9}]
 
     monkeypatch.setattr(hybrid, "Embedder", FakeEmbedder)
     monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
-    original_bm25 = hybrid.bm25_search
-
-    def tracked_bm25(corpus, query, top_k, index_params=None, search_params=None):
-        calls["sparse_limit"] = top_k
-        calls["index_params"] = index_params
-        calls["search_params"] = search_params
-        return original_bm25(corpus, query, top_k, index_params, search_params)
-
-    monkeypatch.setattr(hybrid, "bm25_search", tracked_bm25)
 
     result = hybrid.hybrid_retrieve(
-        "kb", "hello", 5, "m", 3, use_rerank=False,
-        corpus_fetcher=lambda _: [{"chunk_id": "same", "doc_id": "d", "content": "hello"}],
-        vector_candidate_count=30, sparse_candidate_count=20, rrf_constant=42,
-        rerank_candidate_limit=10, final_top_k=3,
-        sparse_index_params={"bm25_k1": 1.8}, sparse_search_params={"drop_ratio_search": 0.1},
+        "kb",
+        "target",
+        1,
+        "m",
+        3,
+        retrieval_profile="classic",
+        profile_index_ready=False,
+        corpus_fetcher=lambda _: [],
     )
 
-    assert calls == {
-        "vector_limit": 30, "sparse_limit": 20,
-        "index_params": {"bm25_k1": 1.8}, "search_params": {"drop_ratio_search": 0.1},
-    }
-    assert result[0]["vector_rank"] == 1
-    assert result[0]["sparse_rank"] == 1
-    assert result[0]["fusion_rank"] == 1
-    assert result[0]["fusion_score"] == 2 / 43
+    assert calls == [("init", 3), ("search", "kb", 2)]
+    assert [hit["chunk_id"] for hit in result] == ["legacy"]
+
+
+def test_ready_classic_hybrid_uses_versioned_sparse_search(monkeypatch):
+    calls = []
+
+    class FakeEmbedder:
+        def __init__(self, model):
+            self.model = model
+
+        def embed(self, query):
+            return [0.1]
+
+    class FakeIndexer:
+        def __init__(self, dimension, collection_name=None, profile_schema=False):
+            calls.append(("dense-init", collection_name, profile_schema))
+
+        def search_profile(self, kb_id, vector, top_k, profile, entry_kind=None):
+            calls.append(("dense-search", profile, entry_kind, top_k))
+            return [{"chunk_id": "dense", "doc_id": "d", "content": "dense", "score": 0.9}]
+
+    class FakeSparse:
+        def __init__(self, kb_id, profile_version, index_params=None):
+            calls.append(("sparse-init", profile_version, index_params))
+
+        def search(self, kb_id, query, top_k, search_params=None):
+            calls.append(("sparse-search", top_k, search_params))
+            return [{"chunk_id": "sparse", "doc_id": "d", "content": "sparse", "score": 0.8}]
+
+    monkeypatch.setattr(hybrid, "Embedder", FakeEmbedder)
+    monkeypatch.setattr(hybrid, "MilvusIndexer", FakeIndexer)
+    monkeypatch.setattr(hybrid, "SparseMilvusAdapter", FakeSparse)
+    monkeypatch.setattr(
+        hybrid,
+        "bm25_search",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy BM25 used")),
+    )
+
+    result = hybrid.hybrid_retrieve(
+        "kb",
+        "query",
+        2,
+        "m",
+        3,
+        retrieval_profile="classic",
+        profile_index_ready=True,
+        profile_version=7,
+        corpus_fetcher=lambda _: [],
+    )
+
+    assert [hit["chunk_id"] for hit in result] == ["dense", "sparse"]
+    assert ("sparse-init", 7, None) in calls

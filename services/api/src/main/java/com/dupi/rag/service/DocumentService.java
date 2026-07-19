@@ -53,6 +53,7 @@ public class DocumentService {
     private final RetrievalProfileRepository retrievalProfileRepository;
     private final KnowledgeBaseMaintenanceService maintenanceService;
     private final UploadQuotaService uploadQuotaService;
+    private final ProfileIndexStateService profileIndexStateService;
 
     public DocumentResponse upload(UUID kbId, MultipartFile file) {
         return upload(kbId, file, null);
@@ -135,6 +136,7 @@ public class DocumentService {
         boolean jobSaved = false;
         try {
             documentRepository.save(doc);
+            profileIndexStateService.bumpRevision(kb);
             uploadQuotaService.refreshAttemptLease(reservation);
             minioStorageService.upload(objectKey, file.getInputStream(), file.getSize(), doc.getMimeType());
             objectUploaded = true;
@@ -255,9 +257,16 @@ public class DocumentService {
     @Transactional
     public void delete(UUID kbId, UUID docId) {
         maintenanceService.assertMutationAllowed(kbId);
+        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
         Document doc = findOrThrow(kbId, docId);
         documentTombstoneService.recordDeleted(doc);
-        vectorCleanupTaskService.enqueueDocument(docId);
+        vectorCleanupTaskService.enqueueProfileDocument(docId);
+        vectorCleanupTaskService.enqueueLegacyDocument(docId);
+        try {
+            milvusVectorService.deleteProfileByDocId(docId);
+        } catch (Exception e) {
+            log.warn("Failed to delete profile Milvus vectors for doc {}", docId, e);
+        }
         try {
             milvusVectorService.deleteByDocId(docId);
             milvusVectorService.deleteSparseByDocId(kbId, docId,
@@ -274,6 +283,7 @@ public class DocumentService {
         }
         uploadQuotaService.releaseCommitted(doc.getQuotaReservationId(), "Document deleted");
         documentRepository.delete(doc);
+        profileIndexStateService.bumpRevision(kb);
         auditLogService.recordSuccess(
                 "DOCUMENT_DELETE",
                 "DOCUMENT",

@@ -153,6 +153,122 @@ describe('RagEvalPanel', () => {
     expect(api.deleteRagEvalCase).toHaveBeenCalledWith('kb-1', 'case-id-1')
   })
 
+
+  it('runs eval against selected retrieval profiles', async () => {
+    api.listRagEvalCases.mockResolvedValue([
+      { id: 'case-id-1', caseKey: 'case-1', query: 'Question?', minHits: 1, topK: 5, mustContainAny: [] },
+    ])
+    api.listRagEvalRuns.mockResolvedValue([])
+    api.runRagEval.mockResolvedValue({
+      id: 'run-1',
+      kbId: 'kb-1',
+      useRerank: false,
+      profileSet: ['CLASSIC', 'PARENT_CHILD'],
+      passedCount: 2,
+      totalCount: 2,
+      status: 'COMPLETED',
+      failureMessage: null,
+      createdAt: '2026-07-12T00:01:00Z',
+      results: [],
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(<RagEvalPanel kbId="kb-1" />)
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+
+    await act(async () => {
+      checkbox('profile-PARENT_CHILD').click()
+      await Promise.resolve()
+    })
+
+    const runButton = container?.querySelector<HTMLButtonElement>('[aria-label="Run RAG eval"]')
+    expect(runButton).toBeTruthy()
+    expect(runButton?.disabled).toBe(false)
+
+    await act(async () => {
+      runButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+    })
+
+    expect(api.runRagEval).toHaveBeenCalledWith('kb-1', {
+      useRerank: false,
+      profiles: ['CLASSIC', 'PARENT_CHILD'],
+    })
+  })
+
+  it('renders profile gate comparison metrics', async () => {
+    api.listRagEvalCases.mockResolvedValue([])
+    api.listRagEvalRuns.mockResolvedValue([
+      {
+        id: 'run-gate',
+        kbId: 'kb-1',
+        useRerank: false,
+        profileSet: ['CLASSIC', 'PARENT_CHILD'],
+        passedCount: 5,
+        totalCount: 6,
+        status: 'COMPLETED',
+        failureMessage: null,
+        createdAt: '2026-07-12T00:00:00Z',
+        gateSummary: {
+          PARENT_CHILD: {
+            candidate: 'PARENT_CHILD',
+            baseline: 'CLASSIC',
+            status: 'BLOCKED',
+            reason: 'hit_rate_regressed',
+            metrics: {
+              profile: 'PARENT_CHILD',
+              totalCases: 3,
+              passedCount: 2,
+              hitPassedCount: 2,
+              citationEligibleCount: 2,
+              citationPassedCount: 1,
+              passRate: 0.667,
+              hitRate: 0.667,
+              citationPassRate: 0.5,
+            },
+            classicMetrics: {
+              profile: 'CLASSIC',
+              totalCases: 3,
+              passedCount: 3,
+              hitPassedCount: 3,
+              citationEligibleCount: 2,
+              citationPassedCount: 2,
+              passRate: 1,
+              hitRate: 1,
+              citationPassRate: 1,
+            },
+            hitRateDelta: -0.333,
+            citationPassRateDelta: -0.5,
+          },
+        },
+        results: [],
+      },
+    ])
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(<RagEvalPanel kbId="kb-1" />)
+      await Promise.resolve()
+    })
+
+    expect(container.textContent).toContain('PARENT_CHILD BLOCKED')
+    expect(container.textContent).toContain('Hit 66.7%')
+    expect(container.textContent).toContain('Citation 50.0%')
+    expect(container.textContent).toContain('Hit delta -33.3%')
+    expect(container.textContent).toContain('hit_rate_regressed')
+  })
+
+
   function input(name: string): HTMLInputElement {
     const field = container?.querySelector<HTMLInputElement>(`input[name="${name}"]`)
     if (!field) throw new Error(`Missing input ${name}`)

@@ -130,7 +130,7 @@ class EntityLifecycleTest {
         assertThat(auditLog.getCreatedAt()).isNotNull();
 
         VectorCleanupTask task = VectorCleanupTask.builder()
-                .targetType(VectorCleanupTargetType.KNOWLEDGE_BASE)
+                .targetType(VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE)
                 .targetId(UUID.randomUUID())
                 .build();
         invoke(task, "onCreate");

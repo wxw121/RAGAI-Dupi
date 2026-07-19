@@ -3,6 +3,7 @@ package com.dupi.rag.controller;
 import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.enums.IngestJobStatus;
+import com.dupi.rag.domain.enums.RetrievalMode;
 import com.dupi.rag.config.ApiSecurityProperties;
 import com.dupi.rag.config.ApiTokenService;
 import com.dupi.rag.config.AuditProperties;
@@ -312,7 +313,7 @@ class ControllerLayerTest {
         when(ragEvalService.createCase(eq(kbId), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.updateCase(eq(kbId), eq(ragEvalCase.getId()), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.listRuns(kbId)).thenReturn(List.of(ragEvalRun));
-        when(ragEvalService.run(eq(kbId), eq(true), isNull(), isNull())).thenReturn(ragEvalRun);
+        when(ragEvalService.run(eq(kbId), eq(true), isNull(), eq(RetrievalMode.HYBRID))).thenReturn(ragEvalRun);
         when(ragEvalService.getPolicy(kbId)).thenReturn(qualityPolicy);
         when(ragEvalService.updatePolicy(kbId, qualityPolicyRequest)).thenReturn(qualityPolicy);
         when(ragEvalService.promoteBaseline(kbId, ragEvalRun.getId())).thenReturn(qualityPolicy);
@@ -364,6 +365,7 @@ class ControllerLayerTest {
         assertThat(controller.listRagEvalRuns(kbId)).containsExactly(ragEvalRun);
         RagEvalRunRequest ragEvalRunRequest = new RagEvalRunRequest();
         ragEvalRunRequest.setUseRerank(true);
+        ragEvalRunRequest.setRetrievalMode(RetrievalMode.HYBRID);
         assertThat(controller.runRagEval(kbId, ragEvalRunRequest)).isSameAs(ragEvalRun);
         assertThat(controller.getRagQualityPolicy(kbId)).isSameAs(qualityPolicy);
         assertThat(controller.updateRagQualityPolicy(kbId, qualityPolicyRequest)).isSameAs(qualityPolicy);
@@ -633,7 +635,9 @@ class ControllerLayerTest {
         KnowledgeBaseService kbService = mock(KnowledgeBaseService.class);
         ChunkRepository chunkRepository = mock(ChunkRepository.class);
         DocumentRepository documentRepository = mock(DocumentRepository.class);
-        InternalController controller = new InternalController(kbService, chunkRepository, documentRepository);
+        QaGenerationService qaGenerationService = mock(QaGenerationService.class);
+        InternalController controller = new InternalController(
+                kbService, chunkRepository, documentRepository, qaGenerationService);
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         UUID chunkId = UUID.randomUUID();

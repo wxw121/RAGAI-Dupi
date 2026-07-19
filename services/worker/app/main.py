@@ -28,6 +28,8 @@ class HybridRetrieveRequest(BaseModel):
     use_rerank: bool = False
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = 1536
+    retrieval_profile: str = "classic"
+    profile_index_ready: bool = False
     profile_version: int | None = None
     vector_candidate_count: int | None = None
     sparse_candidate_count: int | None = None
@@ -82,7 +84,10 @@ def _message_value(message: dict, camel: str, snake: str, default=None):
     return default if value is None else value
 
 
-def _normalize_job(message: dict) -> dict:
+def normalize_ingest_job(message: dict) -> dict:
+    legacy_write_required = _message_value(
+        message, "legacyWriteRequired", "legacy_write_required", True
+    )
     return {
         "jobId": _message_value(message, "jobId", "job_id"),
         "executionId": _message_value(message, "executionId", "execution_id"),
@@ -94,6 +99,9 @@ def _normalize_job(message: dict) -> dict:
         "chunkSize": _message_value(message, "chunkSize", "chunk_size", 512),
         "chunkOverlap": _message_value(message, "chunkOverlap", "chunk_overlap", 64),
         "chunkStrategy": _message_value(message, "chunkStrategy", "chunk_strategy", "recursive"),
+        "retrievalProfile": _message_value(
+            message, "retrievalProfile", "retrieval_profile", "classic"
+        ),
         "embeddingModel": _message_value(message, "embeddingModel", "embedding_model"),
         "embeddingDimension": _message_value(
             message, "embeddingDimension", "embedding_dimension", 1536
@@ -101,7 +109,15 @@ def _normalize_job(message: dict) -> dict:
         "sparseProfileVersion": _message_value(
             message, "sparseProfileVersion", "sparse_profile_version", 0
         ),
+        "legacyWriteRequired": bool(legacy_write_required),
+        "indexSchemaVersion": _message_value(
+            message, "indexSchemaVersion", "index_schema_version", 2
+        ),
     }
+
+
+def _normalize_job(message: dict) -> dict:
+    return normalize_ingest_job(message)
 
 
 _REQUIRED_JOB_FIELDS = (
@@ -252,6 +268,8 @@ def retrieve_hybrid(req: HybridRetrieveRequest):
         shadow_profile_version=req.shadow_profile_version,
         shadow_sparse_index_params=req.shadow_sparse_index_params,
         shadow_sparse_search_params=req.shadow_sparse_search_params,
+        retrieval_profile=req.retrieval_profile,
+        profile_index_ready=req.profile_index_ready,
     )
     rerank_applied = bool(req.use_rerank and any(hit.get("rerank_rank") is not None for hit in hits))
     return {

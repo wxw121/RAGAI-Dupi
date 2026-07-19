@@ -50,6 +50,14 @@ public class KnowledgeBaseController {
         return knowledgeBaseService.get(kbId);
     }
 
+    @PatchMapping("/{kbId}/retrieval-profile")
+    public KnowledgeBaseResponse updateRetrievalProfile(
+            @PathVariable UUID kbId,
+            @Valid @RequestBody UpdateKnowledgeBaseRetrievalProfileRequest request
+    ) {
+        return knowledgeBaseService.updateRetrievalProfile(kbId, request.getRetrievalProfile());
+    }
+
     @DeleteMapping("/{kbId}")
     public void delete(@PathVariable UUID kbId) {
         knowledgeBaseService.delete(kbId);
@@ -186,10 +194,14 @@ public class KnowledgeBaseController {
             @PathVariable UUID kbId,
             @RequestBody(required = false) RagEvalRunRequest request
     ) {
+        boolean useRerank = request != null && Boolean.TRUE.equals(request.getUseRerank());
+        if (request == null || request.getProfileId() == null && request.getRetrievalMode() == null) {
+            return ragEvalService.run(kbId, useRerank, request == null ? null : request.getProfiles());
+        }
         return ragEvalService.run(kbId,
-                request != null && Boolean.TRUE.equals(request.getUseRerank()),
-                request == null ? null : request.getProfileId(),
-                request == null ? null : request.getRetrievalMode());
+                useRerank,
+                request.getProfileId(),
+                request.getRetrievalMode());
     }
 
     @GetMapping("/{kbId}/rag-eval/policy")

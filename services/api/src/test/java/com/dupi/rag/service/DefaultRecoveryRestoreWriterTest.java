@@ -2,6 +2,7 @@ package com.dupi.rag.service;
 
 import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.domain.entity.*;
+import com.dupi.rag.domain.entity.RetrievalProfile;
 import com.dupi.rag.domain.enums.*;
 import com.dupi.rag.dto.recovery.*;
 import com.dupi.rag.repository.*;
@@ -42,6 +43,9 @@ class DefaultRecoveryRestoreWriterTest {
 
         assertThat(fixture.target.getLifecycleStatus()).isEqualTo(KnowledgeBaseLifecycleStatus.READY);
         assertThat(fixture.target.getName()).isEqualTo("Source KB (restored)");
+        assertThat(fixture.target.isProfileIndexActivated()).isTrue();
+        assertThat(fixture.target.getRetrievalProfile()).isEqualTo(com.dupi.rag.domain.enums.RetrievalProfile.COMBINED);
+        assertThat(fixture.target.getIndexRevision()).isEqualTo(9L);
         verify(fixture.documentStorage).upload(contains(fixture.target.getId().toString()), any(), eq(5L), eq("text/markdown"));
         verify(fixture.documents, atLeastOnce()).saveAll(argThat(values -> values.iterator().next().getKbId().equals(fixture.target.getId())));
         verify(fixture.uploadQuotaService).createCommittedReservation(
@@ -51,12 +55,19 @@ class DefaultRecoveryRestoreWriterTest {
         verify(fixture.chunks).saveAll(argThat(values -> values.iterator().next().getKbId().equals(fixture.target.getId())));
         verify(fixture.recoveryVectors).upsert(eq("chunks"), any(), argThat(rows -> rows.size() == 1
                 && rows.get(0).knowledgeBaseId().equals(fixture.target.getId().toString())));
+        verify(fixture.recoveryVectors).upsert(eq("profiles-target"), any(), argThat(rows -> rows.size() == 1
+                && rows.get(0).scalarPayload().get("entry_kind").equals("qa")));
         verify(fixture.provisioner).ensure(fixture.target.getId(), 2, 1, Map.of());
         verify(fixture.recoveryVectors).upsert(eq("sparse-target"), any(), anyList());
         ArgumentCaptor<Document> restoredDocument = ArgumentCaptor.forClass(Document.class);
         verify(fixture.uploadQuotaService).createCommittedReservation(
                 eq("tenant-a"), eq("admin"), eq(fixture.target.getId()), restoredDocument.capture(), eq("Recovery restore"));
         assertThat(restoredDocument.getValue().getKbId()).isEqualTo(fixture.target.getId());
+        assertThat(restoredDocument.getValue().getIndexSchemaVersion()).isEqualTo(2);
+        verify(fixture.chunks).saveAll(argThat(values -> {
+            Chunk restored = values.iterator().next();
+            return restored.getMetadata().get("source_chunk_id").equals(restored.getId().toString());
+        }));
         verify(fixture.jobs, atLeast(4)).save(fixture.job);
     }
 
@@ -80,6 +91,7 @@ class DefaultRecoveryRestoreWriterTest {
         verify(fixture.uploadQuotaService).releaseCommitted(targetReservationId, "Recovery restore abandoned");
         verify(fixture.documentStorage).delete("target/a.md");
         verify(fixture.onlineVectors).deleteByKbId(fixture.target.getId());
+        verify(fixture.onlineVectors).deleteProfileByKbId(fixture.target.getId());
         verify(fixture.onlineVectors).deleteSparseByKbId(fixture.target.getId(), List.of(3));
         verify(fixture.knowledgeBases).deleteById(fixture.target.getId());
     }
@@ -164,6 +176,8 @@ class DefaultRecoveryRestoreWriterTest {
         UUID sourceChunkId = UUID.randomUUID();
         KnowledgeBase sourceKb = KnowledgeBase.builder().id(sourceKbId).tenantId("tenant-a").name("Source KB")
                 .embeddingModel("embedding-2").embeddingDimension(2).retrievalMode(RetrievalMode.VECTOR)
+                .retrievalProfile(com.dupi.rag.domain.enums.RetrievalProfile.COMBINED)
+                .profileIndexActivated(true).indexRevision(9L)
                 .updatedAt(Instant.parse("2026-07-15T12:00:00Z")).build();
         KnowledgeBase target = KnowledgeBase.builder().id(targetKbId).tenantId("tenant-a").name("Restoring")
                 .embeddingModel("embedding-2").embeddingDimension(2)
@@ -171,7 +185,7 @@ class DefaultRecoveryRestoreWriterTest {
         Document sourceDocument = Document.builder().id(sourceDocId).kbId(sourceKbId).fileName("guide.md")
                 .objectKey("source/guide.md").mimeType("text/markdown").fileSize(5L)
                 .quotaReservationId(UUID.randomUUID())
-                .status(DocumentStatus.COMPLETED).build();
+                .status(DocumentStatus.COMPLETED).indexSchemaVersion(2).build();
         UploadQuotaReservation restoredReservation = UploadQuotaReservation.builder()
                 .id(UUID.randomUUID())
                 .tenantId("tenant-a")
@@ -183,7 +197,8 @@ class DefaultRecoveryRestoreWriterTest {
                 .fileFingerprint("guide.md:5:text/markdown")
                 .build();
         Chunk sourceChunk = Chunk.builder().id(sourceChunkId).kbId(sourceKbId).docId(sourceDocId)
-                .chunkIndex(0).content("hello").tokenCount(1).metadata(Map.of()).build();
+                .chunkIndex(0).content("hello").tokenCount(1)
+                .metadata(Map.of("chunk_role", "qa", "source_chunk_id", sourceChunkId.toString())).build();
         RagEvalCase sourceCase = RagEvalCase.builder().id(UUID.randomUUID()).kbId(sourceKbId)
                 .caseKey("case").query("hello").minHits(1).topK(3).mustContainAny(List.of()).build();
         RagQualityPolicy sourcePolicy = RagQualityPolicy.builder().id(UUID.randomUUID()).kbId(sourceKbId).build();
@@ -192,7 +207,9 @@ class DefaultRecoveryRestoreWriterTest {
                 .rrfConstant(60).rerankEnabled(false).rerankCandidateLimit(5).finalTopK(3).build();
         sourceKb.setActiveRetrievalProfileId(sourceProfile.getId());
         VectorSnapshotRow sourceVector = new VectorSnapshotRow(sourceChunkId.toString(), sourceKbId.toString(),
-                sourceDocId.toString(), "hello", List.of(0.1f, 0.2f), Map.of());
+                sourceDocId.toString(), "hello", List.of(0.1f, 0.2f), Map.of(
+                "entry_kind", "qa", "profile_classic", false, "profile_parent_child", false,
+                "profile_qa_assisted", true, "profile_combined", true));
 
         RecoveryArchive archive = RecoveryArchive.builder().id(archiveId).tenantId("tenant-a")
                 .sourceKnowledgeBaseId(sourceKbId).status(RecoveryArchiveStatus.COMPLETED)
@@ -203,6 +220,7 @@ class DefaultRecoveryRestoreWriterTest {
         RecoveryManifest manifest = manifests.seal(new RecoveryManifestHeader(1, archiveId, "tenant-a", sourceKbId,
                 sourceKb.getUpdatedAt(), "embedding-2", 2,
                 Map.of("retrievalMode", "HYBRID", "denseSchema", denseSchema,
+                        "profileSchema", denseSchema,
                         "sparseProfileVersion", 1, "sparseSchema", denseSchema)), List.of());
 
         Map<String, byte[]> payloads = new HashMap<>();
@@ -216,6 +234,7 @@ class DefaultRecoveryRestoreWriterTest {
         add(itemRows, payloads, archiveId, "record:retrieval-profiles", "records/profiles.ndjson", ndjson(mapper, sourceProfile), null);
         add(itemRows, payloads, archiveId, "object:" + sourceDocId, "objects/guide.md", "guide".getBytes(), sourceDocId.toString());
         add(itemRows, payloads, archiveId, "vector:dense", "vectors/dense.ndjson", ndjson(mapper, sourceVector), null);
+        add(itemRows, payloads, archiveId, "vector:profile", "vectors/profile.ndjson", ndjson(mapper, sourceVector), null);
         add(itemRows, payloads, archiveId, "vector:sparse", "vectors/sparse.ndjson", ndjson(mapper, sourceVector), null);
 
         when(archives.findById(archiveId)).thenReturn(Optional.of(archive));
@@ -232,14 +251,20 @@ class DefaultRecoveryRestoreWriterTest {
         when(documents.findByKbIdOrderByCreatedAtDesc(targetKbId)).thenReturn(List.of(sourceDocument));
         when(chunks.countByKbId(targetKbId)).thenReturn(1L);
         when(recoveryVectors.denseCollection()).thenReturn("chunks");
+        when(recoveryVectors.profileCollection()).thenReturn("profiles-target");
         when(recoveryVectors.sparseCollection(targetKbId, 1)).thenReturn("sparse-target");
         when(recoveryVectors.count("chunks", targetKbId)).thenReturn(1L);
+        when(recoveryVectors.count("profiles-target", targetKbId)).thenReturn(1L);
         VectorSnapshotRow targetVector = new VectorSnapshotRow(
                 DefaultRecoveryRestoreWriter.remap(jobId, sourceChunkId).toString(), targetKbId.toString(),
                 DefaultRecoveryRestoreWriter.remap(jobId, sourceDocId).toString(), "hello",
                 List.of(0.1f, 0.2f), Map.of());
         when(recoveryVectors.readDense(eq(targetKbId), any(), anyInt()))
                 .thenReturn(new VectorSnapshotPage(List.of(targetVector), null, "sum"));
+        when(recoveryVectors.readProfile(eq(targetKbId), any(), anyInt()))
+                .thenReturn(new VectorSnapshotPage(List.of(new VectorSnapshotRow(
+                        targetVector.chunkId(), targetVector.knowledgeBaseId(), targetVector.documentId(),
+                        targetVector.content(), targetVector.embedding(), sourceVector.scalarPayload())), null, "sum"));
         when(recoveryVectors.checksum(anyList())).thenReturn("same");
         when(uploadQuotaService.createCommittedReservation(anyString(), anyString(), any(), any(), anyString()))
                 .thenReturn(restoredReservation);

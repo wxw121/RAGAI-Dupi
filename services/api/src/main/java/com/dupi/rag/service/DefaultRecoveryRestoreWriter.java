@@ -74,7 +74,8 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
 
         job.setStatus(RecoveryRestoreStatus.RESTORING_VECTORS);
         jobs.save(job);
-        restoreVectors(job, archive, itemMap, manifest, sourceProfiles);
+        restoreVectors(job, archive, itemMap, manifest, sourceProfiles,
+                sourceKb.isProfileIndexActivated());
 
         job.setStatus(RecoveryRestoreStatus.VERIFYING);
         jobs.save(job);
@@ -93,6 +94,7 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
         targetDocuments.forEach(document -> documentStorage.delete(document.getObjectKey()));
         List<RetrievalProfile> targetProfiles = profiles.findByKbIdOrderByVersionDesc(targetId);
         onlineVectors.deleteByKbId(targetId);
+        onlineVectors.deleteProfileByKbId(targetId);
         onlineVectors.deleteSparseByKbId(targetId, targetProfiles.stream().map(RetrievalProfile::getVersion).toList());
         chunks.deleteByKbId(targetId);
         evalCases.deleteAll(evalCases.findByKbIdOrderByCreatedAtAsc(targetId));
@@ -147,6 +149,11 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
         target.setTopK(sourceKb.getTopK());
         target.setChunkStrategy(sourceKb.getChunkStrategy());
         target.setRetrievalMode(sourceKb.getRetrievalMode());
+        if (sourceKb.getRetrievalProfile() != null) {
+            target.setRetrievalProfile(sourceKb.getRetrievalProfile());
+        }
+        target.setIndexRevision(sourceKb.getIndexRevision());
+        target.setProfileIndexActivated(sourceKb.isProfileIndexActivated());
 
         for (Document source : sourceDocuments) {
             UUID sourceId = source.getId();
@@ -171,6 +178,9 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
         }
         documents.saveAll(sourceDocuments);
 
+        Map<UUID, UUID> chunkIdMap = new HashMap<>();
+        sourceChunks.forEach(source -> chunkIdMap.put(
+                source.getId(), remap(job.getId(), source.getId())));
         for (Chunk source : sourceChunks) {
             UUID sourceId = source.getId();
             UUID sourceDocumentId = source.getDocId();
@@ -178,6 +188,7 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
             source.setKbId(job.getTargetKnowledgeBaseId());
             source.setDocId(remap(job.getId(), sourceDocumentId));
             source.setMilvusId(source.getId().toString());
+            source.setMetadata(remapProvenance(source.getMetadata(), chunkIdMap));
         }
         chunks.saveAll(sourceChunks);
 
@@ -219,14 +230,25 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
     }
 
     private void restoreVectors(RecoveryRestoreJob job, RecoveryArchive archive,
-                                Map<String, RecoveryArchiveItem> itemMap, RecoveryManifest manifest,
-                                List<RetrievalProfile> restoredProfiles) {
+                                 Map<String, RecoveryArchiveItem> itemMap, RecoveryManifest manifest,
+                                 List<RetrievalProfile> restoredProfiles,
+                                 boolean profileRequired) {
         RecoveryArchiveItem denseItem = required(itemMap, "vector:dense");
         List<VectorSnapshotRow> denseRows = remapRows(job, readNdjson(
                 archive, denseItem, VectorSnapshotRow.class));
         MilvusRecoverySchema denseSchema = mapper.convertValue(
                 manifest.header().collectionSettings().get("denseSchema"), MilvusRecoverySchema.class);
         recoveryVectors.upsert(recoveryVectors.denseCollection(), denseSchema, denseRows);
+
+        RecoveryArchiveItem profileItem = itemMap.get("vector:profile");
+        if (profileItem != null) {
+            MilvusRecoverySchema profileSchema = mapper.convertValue(
+                    manifest.header().collectionSettings().get("profileSchema"), MilvusRecoverySchema.class);
+            recoveryVectors.upsert(recoveryVectors.profileCollection(), profileSchema,
+                    remapRows(job, readNdjson(archive, profileItem, VectorSnapshotRow.class)));
+        } else if (profileRequired || manifest.header().collectionSettings().containsKey("profileSchema")) {
+            throw new IllegalArgumentException("Recovery profile vector item is missing");
+        }
 
         RecoveryArchiveItem sparseItem = itemMap.get("vector:sparse");
         if (sparseItem != null) {
@@ -262,6 +284,20 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
         if (!recoveryVectors.checksum(expectedDense).equals(recoveryVectors.checksum(actualDense))) {
             throw new IllegalStateException("Restored dense vector payload checksum does not match archive");
         }
+        RecoveryArchiveItem profileItem = itemMap.get("vector:profile");
+        if (profileItem != null) {
+            List<VectorSnapshotRow> expectedProfile = remapRows(job, readNdjson(
+                    archives.findById(job.getArchiveId()).orElseThrow(), profileItem,
+                    VectorSnapshotRow.class));
+            if (recoveryVectors.count(recoveryVectors.profileCollection(), job.getTargetKnowledgeBaseId())
+                    != expectedProfile.size()) {
+                throw new IllegalStateException("Restored profile vector count does not match archive");
+            }
+            List<VectorSnapshotRow> actualProfile = readAllProfile(job.getTargetKnowledgeBaseId());
+            if (!recoveryVectors.checksum(expectedProfile).equals(recoveryVectors.checksum(actualProfile))) {
+                throw new IllegalStateException("Restored profile vector payload checksum does not match archive");
+            }
+        }
     }
 
     private List<VectorSnapshotRow> readAllDense(UUID knowledgeBaseId) {
@@ -273,6 +309,34 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
             cursor = page.nextCursor();
         } while (cursor != null);
         return rows;
+    }
+
+    private List<VectorSnapshotRow> readAllProfile(UUID knowledgeBaseId) {
+        List<VectorSnapshotRow> rows = new ArrayList<>();
+        String cursor = null;
+        do {
+            VectorSnapshotPage page = recoveryVectors.readProfile(knowledgeBaseId, cursor, 500);
+            rows.addAll(page.rows());
+            cursor = page.nextCursor();
+        } while (cursor != null);
+        return rows;
+    }
+
+    private Map<String, Object> remapProvenance(Map<String, Object> metadata,
+                                                Map<UUID, UUID> chunkIdMap) {
+        if (metadata == null || metadata.isEmpty()) return metadata;
+        Map<String, Object> remapped = new LinkedHashMap<>(metadata);
+        for (String key : List.of("parent_chunk_id", "source_chunk_id")) {
+            Object raw = remapped.get(key);
+            if (raw == null) continue;
+            try {
+                UUID target = chunkIdMap.get(UUID.fromString(String.valueOf(raw)));
+                if (target != null) remapped.put(key, target.toString());
+            } catch (IllegalArgumentException ignored) {
+                // Preserve non-UUID metadata values from older archives.
+            }
+        }
+        return remapped;
     }
 
     private List<VectorSnapshotRow> remapRows(RecoveryRestoreJob job, List<VectorSnapshotRow> rows) {

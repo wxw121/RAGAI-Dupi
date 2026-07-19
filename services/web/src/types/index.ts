@@ -1,3 +1,39 @@
+export type RetrievalIndexMode = 'CLASSIC' | 'PARENT_CHILD' | 'QA_ASSISTED' | 'COMBINED'
+
+export type RagEvalProfileGateStatus =
+  | 'PASSED'
+  | 'BLOCKED'
+  | 'INSUFFICIENT_DATA'
+  | 'STALE'
+  | 'INDEX_NOT_READY'
+  | 'NOT_EVALUATED'
+
+export interface RagEvalProfileMetrics {
+  profile: RetrievalIndexMode
+  totalCases: number
+  passedCount: number
+  hitPassedCount: number
+  citationEligibleCount: number
+  citationPassedCount: number
+  passRate: number
+  hitRate: number
+  citationPassRate: number
+}
+
+export interface RagEvalGateDecision {
+  candidate: RetrievalIndexMode
+  baseline?: RetrievalIndexMode
+  status: RagEvalProfileGateStatus
+  reason: string
+  metrics?: RagEvalProfileMetrics
+  classicMetrics?: RagEvalProfileMetrics
+  hitRateDelta?: number
+  citationPassRateDelta?: number
+  runRevision?: number | null
+  currentRevision?: number | null
+  indexReady?: boolean
+}
+
 export interface KnowledgeBase {
   id: string
   tenantId: string
@@ -12,6 +48,11 @@ export interface KnowledgeBase {
   embeddingConfigWarning: string | null
   chunkStrategy: string
   retrievalMode: string
+  retrievalProfile?: RetrievalIndexMode
+  indexSchemaVersion?: number
+  profileIndexReady?: boolean
+  indexRevision?: number
+  retrievalProfileGateDecisions?: Partial<Record<RetrievalIndexMode, RagEvalGateDecision>>
   createdAt: string
   updatedAt: string
 }
@@ -23,6 +64,7 @@ export interface CreateKnowledgeBaseRequest {
   chunkOverlap?: number
   topK?: number
   retrievalMode?: 'VECTOR' | 'HYBRID'
+  retrievalProfile?: RetrievalIndexMode
 }
 
 export interface Document {
@@ -80,7 +122,13 @@ export interface IngestDiagnosis {
 
 export interface VectorCleanupTask {
   id: string
-  targetType: 'KNOWLEDGE_BASE' | 'DOCUMENT'
+  targetType:
+    | 'KNOWLEDGE_BASE'
+    | 'DOCUMENT'
+    | 'PROFILE_KNOWLEDGE_BASE'
+    | 'PROFILE_DOCUMENT'
+    | 'LEGACY_KNOWLEDGE_BASE'
+    | 'LEGACY_DOCUMENT'
   targetId: string
   status: 'PENDING' | 'COMPLETED' | 'FAILED'
   attemptCount: number
@@ -279,11 +327,15 @@ export interface RagEvalResult {
   query: string
   passed: boolean
   failureReasons: string[]
+  hitPassed?: boolean
+  citationEligible?: boolean
+  citationPassed?: boolean
   hitCount: number
   expectedFileName: string | null
   matchedFileName: string | null
   matchedToken: string | null
   retrievalMode: string | null
+  retrievalProfile?: RetrievalIndexMode | null
   fallbackReason: string | null
   embeddingModel: string | null
   embeddingDimension: number | null
@@ -294,6 +346,9 @@ export interface RagEvalRun {
   id: string
   kbId: string
   useRerank: boolean
+  profileSet?: RetrievalIndexMode[]
+  indexRevision?: number | null
+  gateSummary?: Partial<Record<RetrievalIndexMode, RagEvalGateDecision>>
   passedCount: number
   totalCount: number
   status: 'RUNNING' | 'COMPLETED' | 'FAILED'
@@ -321,6 +376,7 @@ export interface UploadQuota {
 export interface RagEvalRunRequest {
   useRerank?: boolean
   profileId?: string
+  profiles?: RetrievalIndexMode[]
 }
 
 export interface RagQualityPolicy {

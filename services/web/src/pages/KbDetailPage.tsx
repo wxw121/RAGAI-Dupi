@@ -9,6 +9,7 @@ import {
   reindexKnowledgeBase,
   retryIngestJob,
   retryVectorCleanupTask,
+  updateKnowledgeBaseRetrievalProfile,
 } from '@/api/knowledgeBase'
 import {
   deleteDocument,
@@ -23,6 +24,7 @@ import type {
   IngestJob,
   KnowledgeBase,
   OpsGuardrails,
+  RetrievalIndexMode,
   UploadQuota,
   VectorCleanupTask,
 } from '@/types'
@@ -49,11 +51,19 @@ import {
   MessageSquare,
   RefreshCw,
   RotateCcw,
+  Save,
   ShieldCheck,
   XCircle,
 } from 'lucide-react'
 
 type Tab = 'documents' | 'chat' | 'eval' | 'recovery'
+
+const RETRIEVAL_PROFILE_OPTIONS: Array<{ value: RetrievalIndexMode; label: string }> = [
+  { value: 'CLASSIC', label: 'Classic' },
+  { value: 'PARENT_CHILD', label: 'Parent-child' },
+  { value: 'QA_ASSISTED', label: 'QA-assisted' },
+  { value: 'COMBINED', label: 'Combined' },
+]
 
 export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const { kbId } = useParams<{ kbId: string }>()
@@ -72,6 +82,8 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const [loading, setLoading] = useState(true)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [reindexing, setReindexing] = useState(false)
+  const [retrievalProfile, setRetrievalProfile] = useState<RetrievalIndexMode>('CLASSIC')
+  const [savingRetrievalProfile, setSavingRetrievalProfile] = useState(false)
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
   const [cancellingJobId, setCancellingJobId] = useState<string | null>(null)
   const [retryingCleanupTaskId, setRetryingCleanupTaskId] = useState<string | null>(null)
@@ -85,7 +97,9 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const loadKb = useCallback(async () => {
     if (!kbId) return
     try {
-      setKb(await getKnowledgeBase(kbId))
+      const loadedKb = await getKnowledgeBase(kbId)
+      setKb(loadedKb)
+      setRetrievalProfile(loadedKb.retrievalProfile ?? 'CLASSIC')
     } catch (e) {
       showError(e instanceof Error ? e.message : '加载知识库失败')
     }
@@ -344,6 +358,22 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
     }
   }
 
+  const handleRetrievalProfileUpdate = async () => {
+    if (!kbId) return
+    setSavingRetrievalProfile(true)
+    try {
+      const updatedKb = await updateKnowledgeBaseRetrievalProfile(kbId, retrievalProfile)
+      setKb(updatedKb)
+      setRetrievalProfile(updatedKb.retrievalProfile ?? 'CLASSIC')
+      showSuccess('索引模式已更新')
+      await Promise.all([loadDocs(), loadJobs()])
+    } catch (e) {
+      showError(e instanceof Error ? e.message : '索引模式更新失败')
+    } finally {
+      setSavingRetrievalProfile(false)
+    }
+  }
+
   if (loading || !kb) {
     return (
       <AppLayout onLogout={onLogout}>
@@ -441,6 +471,45 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       ) : tab === 'documents' ? (
         <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 md:px-8">
           <div className="rounded-3xl border border-border bg-background p-4">
+            <div className="mb-4 border-b border-border pb-4">
+              <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                <div className="min-w-0 flex-1">
+                  <label htmlFor="retrieval-profile" className="text-sm font-semibold">索引模式</label>
+                  <select
+                    id="retrieval-profile"
+                    name="retrievalProfile"
+                    value={retrievalProfile}
+                    onChange={(event) => setRetrievalProfile(event.target.value as RetrievalIndexMode)}
+                    className="mt-2 h-9 w-full rounded-md border border-input bg-background px-3 text-sm md:max-w-xs"
+                  >
+                    {RETRIEVAL_PROFILE_OPTIONS.map((option) => {
+                      const decision = kb.retrievalProfileGateDecisions?.[option.value]
+                      const blocked = option.value !== 'CLASSIC'
+                        && option.value !== kb.retrievalProfile
+                        && decision?.status !== 'PASSED'
+                      return <option key={option.value} value={option.value} disabled={blocked}>{option.label}</option>
+                    })}
+                  </select>
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                    <span>Profile index: {kb.profileIndexReady ? 'Ready' : 'Not ready'}</span>
+                    <span>Revision {kb.indexRevision ?? 0}</span>
+                    {RETRIEVAL_PROFILE_OPTIONS.filter((option) => option.value !== 'CLASSIC').map((option) => (
+                      <span key={option.value}>
+                        {option.label} {kb.retrievalProfileGateDecisions?.[option.value]?.status ?? 'NOT_EVALUATED'}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  disabled={savingRetrievalProfile || retrievalProfile === (kb.retrievalProfile ?? 'CLASSIC')}
+                  onClick={() => void handleRetrievalProfileUpdate()}
+                >
+                  {savingRetrievalProfile ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                  保存索引模式
+                </Button>
+              </div>
+            </div>
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
                 <h2 className="text-sm font-semibold">索引维护</h2>

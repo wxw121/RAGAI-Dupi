@@ -4,16 +4,22 @@ import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.config.LlmProperties;
 import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.enums.RagEvalGateStatus;
+import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.CreateKnowledgeBaseRequest;
 import com.dupi.rag.dto.KnowledgeBaseResponse;
+import com.dupi.rag.dto.RagEvalGateDecisionResponse;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.exception.RetrievalProfileConflictException;
 import com.dupi.rag.repository.KnowledgeBaseRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -26,9 +32,20 @@ public class KnowledgeBaseService {
     private final LlmProperties llmProperties;
     private final VectorCleanupTaskService vectorCleanupTaskService;
     private final AuditLogService auditLogService;
+    private final ProfileIndexStateService profileIndexStateService;
+    private final RetrievalProfileGateService retrievalProfileGateService;
+    private final KnowledgeBaseMaintenanceService maintenanceService;
 
     @Transactional
     public KnowledgeBaseResponse create(CreateKnowledgeBaseRequest request) {
+        if (request.getRetrievalProfile() != null && request.getRetrievalProfile() != RetrievalProfile.CLASSIC) {
+            throw RetrievalProfileConflictException.gateBlocked(RagEvalGateDecisionResponse.builder()
+                    .candidate(request.getRetrievalProfile())
+                    .baseline(RetrievalProfile.CLASSIC)
+                    .status(RagEvalGateStatus.NOT_EVALUATED)
+                    .reason("not_evaluated")
+                    .build());
+        }
         String embeddingModel = request.getEmbeddingModel() != null
                 ? request.getEmbeddingModel()
                 : llmProperties.getEmbedding().getModel();
@@ -46,6 +63,7 @@ public class KnowledgeBaseService {
                 .embeddingDimension(embeddingDimension)
                 .chunkStrategy(request.getChunkStrategy())
                 .retrievalMode(request.getRetrievalMode())
+                .retrievalProfile(RetrievalProfile.CLASSIC)
                 .tenantId(TenantContext.getTenantId())
                 .build();
         return toResponse(repository.save(kb));
@@ -53,6 +71,24 @@ public class KnowledgeBaseService {
 
     public KnowledgeBaseResponse get(UUID id) {
         return toResponse(findOrThrow(id));
+    }
+
+    @Transactional
+    public KnowledgeBaseResponse updateRetrievalProfile(UUID id, RetrievalProfile retrievalProfile) {
+        maintenanceService.assertMutationAllowed(id);
+        KnowledgeBase kb = findForUpdateOrThrow(id);
+        RetrievalProfile target = retrievalProfile == null ? RetrievalProfile.CLASSIC : retrievalProfile;
+        if (target != RetrievalProfile.CLASSIC) {
+            retrievalProfileGateService.assertCanActivate(id, target);
+        }
+        kb.setRetrievalProfile(target);
+        KnowledgeBase saved = repository.save(kb);
+        auditLogService.recordSuccessInCurrentTransaction(
+                "KNOWLEDGE_BASE_RETRIEVAL_PROFILE_UPDATE",
+                "KNOWLEDGE_BASE",
+                id,
+                "Updated retrieval profile to " + target.name());
+        return toResponse(saved);
     }
 
     public List<KnowledgeBaseResponse> list() {
@@ -64,8 +100,15 @@ public class KnowledgeBaseService {
     @Transactional
     public void delete(UUID id) {
         findOrThrow(id);
-        vectorCleanupTaskService.enqueueKnowledgeBase(id);
+        vectorCleanupTaskService.enqueueProfileKnowledgeBase(id);
+        vectorCleanupTaskService.enqueueLegacyKnowledgeBase(id);
         boolean compensationRequired = false;
+        try {
+            milvusVectorService.deleteProfileByKbId(id);
+        } catch (Exception e) {
+            compensationRequired = true;
+            log.warn("Failed to delete profile Milvus vectors for knowledge base {}", id, e);
+        }
         try {
             milvusVectorService.deleteByKbId(id);
         } catch (Exception e) {
@@ -102,6 +145,8 @@ public class KnowledgeBaseService {
 
     private KnowledgeBaseResponse toResponse(KnowledgeBase kb) {
         boolean embeddingConfigCurrent = isEmbeddingConfigCurrent(kb);
+        UUID kbId = kb.getId();
+        boolean profileIndexReady = kbId != null && profileIndexStateService.isV2Ready(kbId);
         return KnowledgeBaseResponse.builder()
                 .id(kb.getId())
                 .tenantId(kb.getTenantId())
@@ -116,9 +161,32 @@ public class KnowledgeBaseService {
                 .embeddingConfigWarning(embeddingConfigCurrent ? null : embeddingConfigWarning(kb))
                 .chunkStrategy(kb.getChunkStrategy())
                 .retrievalMode(kb.getRetrievalMode())
+                .retrievalProfile(kb.getRetrievalProfile())
+                .indexSchemaVersion(ProfileIndexStateService.TARGET_SCHEMA_VERSION)
+                .profileIndexReady(profileIndexReady)
+                .indexRevision(kb.getIndexRevision() == null ? 0L : kb.getIndexRevision())
+                .retrievalProfileGateDecisions(latestGateDecisions(kbId))
                 .createdAt(kb.getCreatedAt())
                 .updatedAt(kb.getUpdatedAt())
                 .build();
+    }
+
+    private Map<RetrievalProfile, RagEvalGateDecisionResponse> latestGateDecisions(UUID kbId) {
+        if (kbId == null) {
+            return Map.of();
+        }
+        Map<RetrievalProfile, RagEvalGateDecisionResponse> decisions = new LinkedHashMap<>();
+        for (RetrievalProfile profile : List.of(
+                RetrievalProfile.PARENT_CHILD,
+                RetrievalProfile.QA_ASSISTED,
+                RetrievalProfile.COMBINED
+        )) {
+            RagEvalGateDecisionResponse decision = retrievalProfileGateService.latestDecision(kbId, profile);
+            if (decision != null) {
+                decisions.put(profile, decision);
+            }
+        }
+        return decisions;
     }
 
     private boolean isEmbeddingConfigCurrent(KnowledgeBase kb) {

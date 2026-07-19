@@ -51,6 +51,10 @@ evidence/
 **/test-results/
 handoff.md
 .superpowers/
+.m2/
+.npm-cache/
+.pytest_cache/
+.pytest-tmp/
 .worktrees/
 
 # Docker local overrides

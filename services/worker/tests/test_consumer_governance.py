@@ -7,6 +7,7 @@ import pytest
 from app import consumer as consumer_module
 from app.consumer import process_ingest_job
 from app.models import TextChunk
+from app.profile_index_plan import ProfileIndexPlan
 
 
 def _job():
@@ -32,6 +33,17 @@ def _active_state():
     }
 
 
+def _profile_aware_indexer(fake_type):
+    def factory(dimension, collection_name=None, profile_schema=False):
+        indexer = fake_type(dimension)
+        if profile_schema:
+            indexer.delete_by_doc = lambda *args, **kwargs: None
+            indexer.delete_by_ids = lambda *args, **kwargs: None
+            indexer.index_profile_chunks = lambda *args, **kwargs: []
+        return indexer
+    return factory
+
+
 def _cancelled_state():
     return {
         "status": "CANCEL_REQUESTED",
@@ -48,6 +60,18 @@ def _avoid_live_redis_vector_lock(monkeypatch):
         yield None
 
     monkeypatch.setattr(consumer_module, "_document_vector_lock", unlocked)
+    monkeypatch.setattr(
+        consumer_module,
+        "build_profile_index_plan",
+        lambda nodes, **kwargs: ProfileIndexPlan(
+            persisted_chunks=(chunks := consumer_module.chunk_nodes(nodes, **{
+                key: kwargs[key]
+                for key in ("chunk_size", "chunk_overlap", "strategy", "embed_fn")
+            })),
+            v2_index_chunks=chunks,
+            legacy_chunks=chunks,
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -122,7 +146,7 @@ def test_process_ingest_job_claims_before_work_and_sends_monotonic_execution_cal
             chunks_arg[0].milvus_id = "m1"
 
     monkeypatch.setattr("app.consumer.Embedder", FakeEmbedder)
-    monkeypatch.setattr("app.consumer.MilvusIndexer", FakeIndexer)
+    monkeypatch.setattr("app.consumer.MilvusIndexer", _profile_aware_indexer(FakeIndexer))
     monkeypatch.setattr("app.consumer.settings.worker_id", "worker-a")
     monkeypatch.setattr("app.consumer.settings.ingest_lease_seconds", 30)
 
@@ -201,7 +225,7 @@ def test_process_ingest_job_cleans_vectors_when_cancel_arrives_after_index_start
             indexed["done"] = True
 
     monkeypatch.setattr("app.consumer.Embedder", FakeEmbedder)
-    monkeypatch.setattr("app.consumer.MilvusIndexer", FakeIndexer)
+    monkeypatch.setattr("app.consumer.MilvusIndexer", _profile_aware_indexer(FakeIndexer))
 
     process_ingest_job(_job())
 
@@ -331,7 +355,7 @@ def test_process_ingest_job_heartbeats_during_long_parse_chunk_and_index(monkeyp
             wait_for_heartbeat("index", None)
 
     monkeypatch.setattr("app.consumer.Embedder", FakeEmbedder)
-    monkeypatch.setattr("app.consumer.MilvusIndexer", FakeIndexer)
+    monkeypatch.setattr("app.consumer.MilvusIndexer", _profile_aware_indexer(FakeIndexer))
     monkeypatch.setattr("app.consumer.settings.ingest_heartbeat_interval_seconds", 0.01)
 
     process_ingest_job(_job())
@@ -394,7 +418,7 @@ def test_process_ingest_job_cleans_vectors_when_execution_turns_stale_during_ind
             raise RuntimeError("index connection dropped")
 
     monkeypatch.setattr("app.consumer.Embedder", FakeEmbedder)
-    monkeypatch.setattr("app.consumer.MilvusIndexer", FakeIndexer)
+    monkeypatch.setattr("app.consumer.MilvusIndexer", _profile_aware_indexer(FakeIndexer))
     monkeypatch.setattr("app.consumer.settings.ingest_heartbeat_interval_seconds", 0.01)
 
     process_ingest_job(_job())
@@ -453,7 +477,7 @@ def test_process_ingest_job_cleans_vectors_when_completion_callback_is_stale(mon
             events.append(("index", doc_id, kwargs))
 
     monkeypatch.setattr("app.consumer.Embedder", FakeEmbedder)
-    monkeypatch.setattr("app.consumer.MilvusIndexer", FakeIndexer)
+    monkeypatch.setattr("app.consumer.MilvusIndexer", _profile_aware_indexer(FakeIndexer))
 
     process_ingest_job(_job())
 
@@ -527,7 +551,7 @@ def test_process_ingest_job_cleans_partial_index_when_failure_callback_is_stale(
             raise RuntimeError("partial index failure")
 
     monkeypatch.setattr("app.consumer.Embedder", FakeEmbedder)
-    monkeypatch.setattr("app.consumer.MilvusIndexer", FakeIndexer)
+    monkeypatch.setattr("app.consumer.MilvusIndexer", _profile_aware_indexer(FakeIndexer))
 
     process_ingest_job(_job())
 
@@ -578,7 +602,7 @@ def test_process_ingest_job_cleans_owned_partial_index_when_failure_is_accepted(
             raise RuntimeError("partial index failure")
 
     monkeypatch.setattr("app.consumer.Embedder", FakeEmbedder)
-    monkeypatch.setattr("app.consumer.MilvusIndexer", FakeIndexer)
+    monkeypatch.setattr("app.consumer.MilvusIndexer", _profile_aware_indexer(FakeIndexer))
 
     process_ingest_job(_job())
 

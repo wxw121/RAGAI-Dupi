@@ -75,14 +75,24 @@ class RecoveryInfrastructureAdaptersTest {
         port.upsert("chunks", List.of(new VectorSnapshotRow(
                 UUID.randomUUID().toString(), UUID.randomUUID().toString(), UUID.randomUUID().toString(),
                 "content", List.of(0.1d, 0.2d), Map.of())), false);
+        port.upsertProfile("profiles", List.of(new VectorSnapshotRow(
+                UUID.randomUUID().toString(), UUID.randomUUID().toString(), UUID.randomUUID().toString(),
+                "content", List.of(0.1d, 0.2d), Map.of(
+                "entry_kind", "child", "profile_classic", false,
+                "profile_parent_child", true, "profile_qa_assisted", false,
+                "profile_combined", true))));
         assertThat(port.count("chunks", UUID.randomUUID())).isZero();
 
         ArgumentCaptor<UpsertParam> upsert = ArgumentCaptor.forClass(UpsertParam.class);
-        verify(client).upsert(upsert.capture());
-        List<?> embeddings = upsert.getValue().getFields().stream()
+        verify(client, times(2)).upsert(upsert.capture());
+        List<?> embeddings = upsert.getAllValues().get(0).getFields().stream()
                 .filter(field -> "embedding".equals(field.getName()))
                 .map(InsertParam.Field::getValues).findFirst().orElseThrow();
         assertThat((List<?>) embeddings.get(0)).allMatch(Float.class::isInstance);
+        assertThat(upsert.getAllValues().get(1).getFields())
+                .extracting(InsertParam.Field::getName)
+                .contains("entry_kind", "profile_classic", "profile_parent_child",
+                        "profile_qa_assisted", "profile_combined");
         ArgumentCaptor<QueryParam> queries = ArgumentCaptor.forClass(QueryParam.class);
         verify(client, times(2)).query(queries.capture());
         assertThat(queries.getAllValues())

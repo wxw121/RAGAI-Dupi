@@ -52,6 +52,7 @@ public class IngestJobService {
     private final VectorCleanupTaskService vectorCleanupTaskService;
     private final AuditLogService auditLogService;
     private final IngestFailureNotificationService failureNotificationService;
+    private final ProfileIndexStateService profileIndexStateService;
 
     public IngestJobResponse getLatestByDoc(UUID docId) {
         IngestJob job = ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(docId)
@@ -88,6 +89,7 @@ public class IngestJobService {
     public IngestCallbackAckResponse handleStatusUpdate(IngestStatusUpdate update) {
         UUID jobId = UUID.fromString(update.getJobId());
         UUID docId = UUID.fromString(update.getDocId());
+        boolean completedUpdate = "COMPLETED".equalsIgnoreCase(update.getStatus());
         if (documentTombstoneService.isDeleted(docId)) {
             log.info("Ignored ingest status update for tombstoned document {}, job {}", docId, jobId);
             return IngestCallbackAckResponse.ignored("document_tombstoned");
@@ -99,6 +101,8 @@ public class IngestJobService {
         if (!job.getDocId().equals(doc.getId()) || !job.getKbId().equals(doc.getKbId())) {
             throw new IllegalArgumentException("Ingest status update does not match job/document");
         }
+        boolean wasV2Ready = completedUpdate && profileIndexStateService.isV2Ready(doc.getKbId());
+        boolean wasV2Activated = completedUpdate && profileIndexStateService.isV2Activated(doc.getKbId());
 
         UUID callbackExecutionId = parseUuid(update.getExecutionId());
         if (job.getExecutionId() != null && callbackExecutionId == null) {
@@ -154,27 +158,41 @@ public class IngestJobService {
             }
         }
 
-        if ("COMPLETED".equalsIgnoreCase(update.getStatus())) {
+        if (completedUpdate) {
             doc.setStatus(DocumentStatus.COMPLETED);
             doc.setErrorMessage(null);
+            if (update.getIndexSchemaVersion() != null) {
+                doc.setIndexSchemaVersion(update.getIndexSchemaVersion());
+            }
             job.setStage(IngestStage.COMPLETED);
             job.setCompletedAt(Instant.now());
         } else if ("CANCELLED".equalsIgnoreCase(update.getStatus())) {
             doc.setStatus(DocumentStatus.CANCELLED);
+            doc.setIndexSchemaVersion(1);
             doc.setErrorMessage(null);
             job.setStage(IngestStage.CANCELLED);
             job.setCompletedAt(Instant.now());
         } else if ("FAILED".equalsIgnoreCase(update.getStatus())) {
             doc.setStatus(DocumentStatus.FAILED);
+            doc.setIndexSchemaVersion(1);
             doc.setErrorMessage(update.getErrorMessage());
             job.setStage(IngestStage.FAILED);
             failureNotificationService.recordTerminalFailure(job, doc);
         } else {
             doc.setStatus(DocumentStatus.PROCESSING);
+            doc.setIndexSchemaVersion(1);
         }
 
         documentRepository.save(doc);
         ingestJobRepository.save(job);
+        if (completedUpdate) {
+            KnowledgeBase kb = knowledgeBaseService.findSystemOrThrow(doc.getKbId());
+            profileIndexStateService.bumpRevision(kb);
+            if (!wasV2Activated && !wasV2Ready && profileIndexStateService.isV2Ready(doc.getKbId())) {
+                profileIndexStateService.activateV2Index(kb);
+                vectorCleanupTaskService.enqueueLegacyKnowledgeBase(doc.getKbId());
+            }
+        }
         return IngestCallbackAckResponse.ok();
     }
 
@@ -315,8 +333,10 @@ public class IngestJobService {
         Document doc = documentRepository.findById(job.getDocId())
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
         doc.setStatus(DocumentStatus.PENDING);
+        doc.setIndexSchemaVersion(1);
         doc.setErrorMessage(null);
         documentRepository.save(doc);
+        profileIndexStateService.bumpRevision(kb);
         ingestOutboxService.record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
         auditLogService.recordSuccess(
                 "INGEST_JOB_RETRY",
@@ -342,18 +362,10 @@ public class IngestJobService {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
         kb.setEmbeddingModel(embeddingModel);
         kb.setEmbeddingDimension(embeddingDimension);
-
-        vectorCleanupTaskService.enqueueKnowledgeBase(kbId);
-        try {
-            milvusVectorService.deleteByKbId(kbId);
-        } catch (Exception e) {
-            log.warn("Failed to delete Milvus vectors before reindexing knowledge base {}", kbId, e);
-            // 重建以数据库状态为主：向量库短暂不可用时，仍清理本地 chunks 并重建摄入任务；
-            // 残留向量交给补偿任务继续清理，避免 reindex 操作被外部存储抖动卡死。
-        }
-
-        chunkRepository.deleteByKbId(kbId);
-        List<IngestJobResponse> responses = documentRepository.findByKbIdOrderByCreatedAtDesc(kbId).stream()
+        List<Document> documents = documentRepository.findByKbIdOrderByCreatedAtDesc(kbId);
+        profileIndexStateService.resetForReindex(kb, documents);
+        vectorCleanupTaskService.completePendingProfileKnowledgeBase(kbId);
+        List<IngestJobResponse> responses = documents.stream()
                 .map(doc -> requeueDocumentForReindex(kb, doc))
                 .toList();
         auditLogService.recordSuccess(

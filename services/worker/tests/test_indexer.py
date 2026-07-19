@@ -5,24 +5,7 @@ import pytest
 
 from app import indexer as indexer_module
 from app.indexer import MilvusIndexer
-
-
-def test_execution_scoped_chunk_ids_are_stable_uuid_values_and_do_not_cross_attempts():
-    assert hasattr(indexer_module, "scope_chunk_ids"), (
-        "indexer must expose execution-scoped vector ownership"
-    )
-    first = types.SimpleNamespace(id="random-a", chunk_index=0)
-    retried = types.SimpleNamespace(id="random-b", chunk_index=0)
-    rotated = types.SimpleNamespace(id="random-c", chunk_index=0)
-
-    first_ids = indexer_module.scope_chunk_ids([first], "exec-a", "doc-1")
-    retry_ids = indexer_module.scope_chunk_ids([retried], "exec-a", "doc-1")
-    rotated_ids = indexer_module.scope_chunk_ids([rotated], "exec-b", "doc-1")
-
-    assert first_ids == retry_ids
-    assert first_ids != rotated_ids
-    assert str(uuid.UUID(first_ids[0])) == first_ids[0]
-    assert first.id == first_ids[0]
+from app.models import TextChunk
 
 
 def test_existing_collection_does_not_load_during_initialization(monkeypatch):
@@ -222,32 +205,141 @@ def test_index_chunks_does_not_wait_for_flush(monkeypatch):
     assert [call[0] for call in calls] == ["insert"]
 
 
-def test_delete_by_ids_targets_only_owned_dense_rows(monkeypatch):
-    delete_calls = []
+def test_profile_collection_creation_includes_filter_fields(monkeypatch):
+    created = {}
+
+    class FakeCollection:
+        def __init__(self, name, schema=None):
+            self.name = name
+            self.schema = schema
+            created["collection"] = self
+
+        def create_index(self, **kwargs):
+            created["index"] = kwargs
+
+    monkeypatch.setattr(indexer_module.utility, "has_collection", lambda name: False)
+    monkeypatch.setattr(indexer_module, "Collection", FakeCollection)
+    monkeypatch.setattr(indexer_module.DataType, "BOOL", "BOOL", raising=False)
+    monkeypatch.setattr(
+        indexer_module,
+        "FieldSchema",
+        lambda **kwargs: types.SimpleNamespace(**kwargs),
+    )
+    monkeypatch.setattr(
+        indexer_module,
+        "CollectionSchema",
+        lambda fields, description: types.SimpleNamespace(
+            fields=fields,
+            description=description,
+        ),
+    )
+
+    MilvusIndexer(
+        dimension=1024,
+        collection_name="dupi_chunks_profiles_v2",
+        profile_schema=True,
+    )
+
+    assert {field.name for field in created["collection"].schema.fields} == {
+        "chunk_id",
+        "kb_id",
+        "doc_id",
+        "content",
+        "entry_kind",
+        "profile_classic",
+        "profile_parent_child",
+        "profile_qa_assisted",
+        "profile_combined",
+        "embedding",
+    }
+
+
+def test_index_profile_chunks_derives_profile_flags(monkeypatch):
+    inserted = []
 
     class FakeCollection:
         def __init__(self, name):
             self.name = name
-            self.schema = types.SimpleNamespace(fields=[
-                types.SimpleNamespace(name="embedding", params={"dim": 1024}),
-            ])
+            self.schema = profile_schema(1024)
 
-        def delete(self, **kwargs):
-            delete_calls.append(kwargs)
+        def insert(self, rows):
+            inserted.append(rows)
 
-    monkeypatch.setattr(indexer_module.settings, "milvus_collection", "dupi_chunks")
-    monkeypatch.setattr(indexer_module.settings, "embedding_dimension", 1024)
     monkeypatch.setattr(indexer_module.utility, "has_collection", lambda name: True)
     monkeypatch.setattr(indexer_module, "Collection", FakeCollection)
-
-    indexer = MilvusIndexer(dimension=1024)
-    assert hasattr(indexer, "delete_by_ids"), (
-        "stale execution cleanup must not delete a whole document"
+    chunk = TextChunk(
+        "c1",
+        0,
+        "hello",
+        1,
+        {
+            "entry_kind": "child",
+            "profile_scope": ["parent-child", "combined"],
+        },
     )
 
-    indexer.delete_by_ids(["owned-a", "owned-b"])
+    MilvusIndexer(
+        dimension=1024,
+        collection_name="dupi_chunks_profiles_v2",
+        profile_schema=True,
+    ).index_profile_chunks("kb", "doc", [chunk], [[0.1] * 1024])
 
-    assert delete_calls == [{
-        "expr": 'chunk_id in ["owned-a", "owned-b"]',
-        "timeout": 10,
-    }]
+    assert inserted[0][4:9] == [
+        ["child"],
+        [False],
+        [True],
+        [False],
+        [True],
+    ]
+
+
+def test_search_profile_builds_whitelisted_expression(monkeypatch):
+    search_calls = []
+
+    class FakeCollection:
+        def __init__(self, name):
+            self.name = name
+            self.schema = profile_schema(1024)
+
+        def load(self, timeout=None):
+            pass
+
+        def search(self, **kwargs):
+            search_calls.append(kwargs)
+            return [[]]
+
+    monkeypatch.setattr(indexer_module.utility, "has_collection", lambda name: True)
+    monkeypatch.setattr(indexer_module, "Collection", FakeCollection)
+    kb_id = str(uuid.uuid4())
+    indexer = MilvusIndexer(
+        dimension=1024,
+        collection_name="dupi_chunks_profiles_v2",
+        profile_schema=True,
+    )
+
+    assert indexer.search_profile(kb_id, [0.1], 3, "combined", "qa") == []
+    assert search_calls[0]["expr"] == (
+        f'kb_id == "{kb_id}" and profile_combined == true and entry_kind == "qa"'
+    )
+
+    with pytest.raises(ValueError, match="Unsupported retrieval profile"):
+        indexer.search_profile(kb_id, [0.1], 3, "combined or true", None)
+    with pytest.raises(ValueError, match="Unsupported entry kind"):
+        indexer.search_profile(kb_id, [0.1], 3, "combined", 'qa" or true')
+
+
+def profile_schema(dimension):
+    names = [
+        "chunk_id",
+        "kb_id",
+        "doc_id",
+        "content",
+        "entry_kind",
+        "profile_classic",
+        "profile_parent_child",
+        "profile_qa_assisted",
+        "profile_combined",
+    ]
+    fields = [types.SimpleNamespace(name=name, params={}) for name in names]
+    fields.append(types.SimpleNamespace(name="embedding", params={"dim": dimension}))
+    return types.SimpleNamespace(fields=fields)

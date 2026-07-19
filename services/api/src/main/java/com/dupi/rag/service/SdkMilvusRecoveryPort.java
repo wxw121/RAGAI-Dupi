@@ -25,10 +25,27 @@ public class SdkMilvusRecoveryPort implements MilvusRecoveryPort {
     public List<VectorSnapshotRow> read(String collection, UUID knowledgeBaseId,
                                         long offset, int limit, boolean sparse) {
         String vectorField = sparse ? "sparse_embedding" : "embedding";
+        return read(collection, knowledgeBaseId, offset, limit, vectorField, List.of());
+    }
+
+    @Override
+    public List<VectorSnapshotRow> readProfile(String collection, UUID knowledgeBaseId,
+                                               long offset, int limit) {
+        return read(collection, knowledgeBaseId, offset, limit, "embedding", List.of(
+                "entry_kind", "profile_classic", "profile_parent_child",
+                "profile_qa_assisted", "profile_combined"));
+    }
+
+    private List<VectorSnapshotRow> read(String collection, UUID knowledgeBaseId,
+                                         long offset, int limit, String vectorField,
+                                         List<String> scalarFields) {
+        List<String> outputFields = new ArrayList<>(List.of(
+                "chunk_id", "kb_id", "doc_id", "content", vectorField));
+        outputFields.addAll(scalarFields);
         R<QueryResults> response = client.query(QueryParam.newBuilder()
                 .withCollectionName(collection)
                 .withExpr("kb_id == \"" + knowledgeBaseId + "\"")
-                .withOutFields(List.of("chunk_id", "kb_id", "doc_id", "content", vectorField))
+                .withOutFields(outputFields)
                 .withConsistencyLevel(ConsistencyLevelEnum.STRONG)
                 .withOffset(offset).withLimit((long) limit).build());
         requireSuccess(response, "query recovery vectors");
@@ -67,11 +84,7 @@ public class SdkMilvusRecoveryPort implements MilvusRecoveryPort {
     @Override
     public void upsert(String collection, List<VectorSnapshotRow> rows, boolean sparse) {
         if (rows.isEmpty()) return;
-        List<InsertParam.Field> fields = new ArrayList<>();
-        fields.add(new InsertParam.Field("chunk_id", rows.stream().map(VectorSnapshotRow::chunkId).toList()));
-        fields.add(new InsertParam.Field("kb_id", rows.stream().map(VectorSnapshotRow::knowledgeBaseId).toList()));
-        fields.add(new InsertParam.Field("doc_id", rows.stream().map(VectorSnapshotRow::documentId).toList()));
-        fields.add(new InsertParam.Field("content", rows.stream().map(VectorSnapshotRow::content).toList()));
+        List<InsertParam.Field> fields = baseFields(rows);
         if (!sparse) {
             fields.add(new InsertParam.Field("embedding", rows.stream()
                     .map(row -> denseEmbedding(row.embedding())).toList()));
@@ -79,6 +92,23 @@ public class SdkMilvusRecoveryPort implements MilvusRecoveryPort {
         R<MutationResult> response = client.upsert(UpsertParam.newBuilder()
                 .withCollectionName(collection).withFields(fields).build());
         requireSuccess(response, "upsert recovery vectors");
+    }
+
+    @Override
+    public void upsertProfile(String collection, List<VectorSnapshotRow> rows) {
+        if (rows.isEmpty()) return;
+        List<InsertParam.Field> fields = baseFields(rows);
+        for (String field : List.of(
+                "entry_kind", "profile_classic", "profile_parent_child",
+                "profile_qa_assisted", "profile_combined")) {
+            fields.add(new InsertParam.Field(field, rows.stream()
+                    .map(row -> requiredProfileScalar(row, field)).toList()));
+        }
+        fields.add(new InsertParam.Field("embedding", rows.stream()
+                .map(row -> denseEmbedding(row.embedding())).toList()));
+        R<MutationResult> response = client.upsert(UpsertParam.newBuilder()
+                .withCollectionName(collection).withFields(fields).build());
+        requireSuccess(response, "upsert recovery profile vectors");
     }
 
     @Override
@@ -102,6 +132,29 @@ public class SdkMilvusRecoveryPort implements MilvusRecoveryPort {
         return new VectorSnapshotRow(String.valueOf(values.get("chunk_id")),
                 String.valueOf(values.get("kb_id")), String.valueOf(values.get("doc_id")),
                 String.valueOf(values.get("content")), embedding, scalar);
+    }
+
+    private List<InsertParam.Field> baseFields(List<VectorSnapshotRow> rows) {
+        List<InsertParam.Field> fields = new ArrayList<>();
+        fields.add(new InsertParam.Field("chunk_id", rows.stream().map(VectorSnapshotRow::chunkId).toList()));
+        fields.add(new InsertParam.Field("kb_id", rows.stream().map(VectorSnapshotRow::knowledgeBaseId).toList()));
+        fields.add(new InsertParam.Field("doc_id", rows.stream().map(VectorSnapshotRow::documentId).toList()));
+        fields.add(new InsertParam.Field("content", rows.stream().map(VectorSnapshotRow::content).toList()));
+        return fields;
+    }
+
+    private Object requiredProfileScalar(VectorSnapshotRow row, String field) {
+        Object value = row.scalarPayload() == null ? null : row.scalarPayload().get(field);
+        if (value == null) {
+            throw new IllegalArgumentException("Profile recovery row missing scalar field: " + field);
+        }
+        if ("entry_kind".equals(field) && !(value instanceof String)) {
+            throw new IllegalArgumentException("Profile recovery entry_kind must be a string");
+        }
+        if (!"entry_kind".equals(field) && !(value instanceof Boolean)) {
+            throw new IllegalArgumentException("Profile recovery flags must be booleans");
+        }
+        return value;
     }
 
     private List<Float> denseEmbedding(Object value) {

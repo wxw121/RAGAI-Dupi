@@ -265,6 +265,9 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
         if ("POST".equalsIgnoreCase(method) && uri.endsWith("/reindex")) {
             return List.of("MAINTENANCE");
         }
+        if ("PATCH".equalsIgnoreCase(method) && uri.endsWith("/retrieval-profile")) {
+            return List.of("MAINTENANCE");
+        }
         if ("GET".equalsIgnoreCase(method) && "/api/v1/upload-quota".equals(uri)) {
             return List.of("DOCUMENT_UPLOAD");
         }

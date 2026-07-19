@@ -37,6 +37,13 @@ class Settings:
     milvus_host: str = os.getenv("MILVUS_HOST", "localhost")
     milvus_port: int = int(os.getenv("MILVUS_PORT", "19530"))
     milvus_collection: str = os.getenv("MILVUS_COLLECTION", "dupi_chunks")
+    milvus_profile_collection: str = os.getenv(
+        "MILVUS_PROFILE_COLLECTION",
+        os.getenv("MILVUS_COLLECTION", "dupi_chunks") + "_profiles_v2",
+    )
+    combined_child_weight: float = float(os.getenv("COMBINED_CHILD_WEIGHT", "1.0"))
+    combined_qa_weight: float = float(os.getenv("COMBINED_QA_WEIGHT", "0.8"))
+    rrf_k: int = int(os.getenv("RRF_K", "60"))
     sparse_dual_write_profile_version: int = int(os.getenv("SPARSE_DUAL_WRITE_PROFILE_VERSION", "0"))
     allow_legacy_bm25_fallback: bool = os.getenv("ALLOW_LEGACY_BM25_FALLBACK", "false").lower() == "true"
 

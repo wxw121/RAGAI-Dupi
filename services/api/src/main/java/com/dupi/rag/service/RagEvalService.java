@@ -7,10 +7,13 @@ import com.dupi.rag.domain.entity.RagQualityPolicy;
 import com.dupi.rag.domain.entity.RetrievalProfile;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
 import com.dupi.rag.domain.enums.RagEvalComparisonStatus;
+import com.dupi.rag.domain.enums.RagEvalGateStatus;
 import com.dupi.rag.domain.enums.RagQualityGateStatus;
 import com.dupi.rag.domain.enums.RetrievalMode;
 import com.dupi.rag.dto.RagEvalCaseRequest;
 import com.dupi.rag.dto.RagEvalCaseResponse;
+import com.dupi.rag.dto.RagEvalGateDecisionResponse;
+import com.dupi.rag.dto.RagEvalProfileMetricsResponse;
 import com.dupi.rag.dto.RagEvalRunResponse;
 import com.dupi.rag.dto.RagEvalRunResultResponse;
 import com.dupi.rag.dto.RagQualityPolicyRequest;
@@ -32,6 +35,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -52,6 +56,8 @@ public class RagEvalService {
     private final AuditLogService auditLogService;
     private final RetrievalProfileService retrievalProfileService;
     private final KnowledgeBaseMaintenanceService maintenanceService;
+    private final ProfileIndexStateService profileIndexStateService;
+    private final RetrievalProfileGateService retrievalProfileGateService;
 
     @Transactional
     public List<RagEvalCaseResponse> listCases(UUID kbId) {
@@ -94,11 +100,71 @@ public class RagEvalService {
     }
 
     public RagEvalRunResponse run(UUID kbId, boolean useRerank) {
-        return run(kbId, useRerank, null, null);
+        return run(kbId, useRerank, List.of(com.dupi.rag.domain.enums.RetrievalProfile.CLASSIC));
     }
 
     public RagEvalRunResponse run(UUID kbId, boolean useRerank, UUID profileId) {
         return run(kbId, useRerank, profileId, null);
+    }
+
+    public RagEvalRunResponse run(
+            UUID kbId,
+            boolean useRerank,
+            List<com.dupi.rag.domain.enums.RetrievalProfile> requestedProfiles
+    ) {
+        maintenanceService.assertMutationAllowed(kbId);
+        List<RagEvalCase> cases = caseCoordinator.loadOrSeed(kbId);
+        List<com.dupi.rag.domain.enums.RetrievalProfile> profiles = normalizeProfiles(requestedProfiles);
+        long runRevision = profileIndexStateService.currentRevision(kbId);
+        RagEvalRun run = RagEvalRun.builder()
+                .kbId(kbId)
+                .useRerank(useRerank)
+                .profileSet(profiles)
+                .indexRevision(runRevision)
+                .totalCount(cases.size() * profiles.size())
+                .passedCount(0)
+                .status(RagEvalRunStatus.RUNNING)
+                .profileSnapshot(Map.of(
+                        "profiles", profiles.stream().map(com.dupi.rag.domain.enums.RetrievalProfile::wireValue).toList(),
+                        "useRerank", useRerank
+                ))
+                .createdAt(Instant.now())
+                .build();
+        run = runRepository.save(run);
+
+        List<RagEvalRunResult> results = new ArrayList<>();
+        try {
+            for (com.dupi.rag.domain.enums.RetrievalProfile profile : profiles) {
+                for (RagEvalCase evalCase : cases) {
+                    RagEvalRunResult result = evaluate(
+                            kbId, run.getId(), evalCase, useRerank, null, null, profile);
+                    RagEvalRunResult saved = resultRepository.save(result);
+                    results.add(saved == null ? result : saved);
+                }
+            }
+            long currentRevision = profileIndexStateService.currentRevision(kbId);
+            boolean indexReady = profileIndexStateService.isV2Ready(kbId);
+            Map<com.dupi.rag.domain.enums.RetrievalProfile, RagEvalGateDecisionResponse> decisions =
+                    retrievalProfileGateService.calculate(results, runRevision, currentRevision, indexReady);
+            run.setPassedCount((int) results.stream().filter(RagEvalRunResult::isPassed).count());
+            run.setTotalCount(results.size());
+            run.setStatus(RagEvalRunStatus.COMPLETED);
+            run.setFailureMessage(null);
+            run.setMetrics(metrics(cases, results));
+            run.setGateSummary(toGateSummaryMap(decisions));
+            run = runRepository.save(run);
+            return toRunResponse(run, results);
+        } catch (Exception ex) {
+            run.setPassedCount((int) results.stream().filter(RagEvalRunResult::isPassed).count());
+            run.setStatus(RagEvalRunStatus.FAILED);
+            run.setFailureMessage(truncateFailure(ex));
+            try {
+                runRepository.save(run);
+            } catch (Exception statusError) {
+                ex.addSuppressed(statusError);
+            }
+            throw new IllegalStateException("RAG evaluation failed: " + truncateFailure(ex), ex);
+        }
     }
 
     public RagEvalRunResponse run(UUID kbId, boolean useRerank, UUID profileId, RetrievalMode retrievalMode) {
@@ -172,19 +238,37 @@ public class RagEvalService {
 
     private RagEvalRunResult evaluate(UUID kbId, UUID runId, RagEvalCase evalCase, boolean useRerank,
                                       RetrievalProfile profile, RetrievalMode retrievalMode) {
+        return evaluate(kbId, runId, evalCase, useRerank, profile, retrievalMode, null);
+    }
+
+    private RagEvalRunResult evaluate(
+            UUID kbId,
+            UUID runId,
+            RagEvalCase evalCase,
+            boolean useRerank,
+            RetrievalProfile profile,
+            RetrievalMode retrievalMode,
+            com.dupi.rag.domain.enums.RetrievalProfile qualityProfile
+    ) {
         long startedAt = System.nanoTime();
         List<String> failureReasons = new ArrayList<>();
         RetrieveResponse response = null;
         List<RetrievalHit> hits = List.of();
         String matchedFile = null;
         String matchedToken = null;
+        boolean hitPassed = false;
+        boolean citationEligible = hasExpectedFile(evalCase);
+        boolean citationPassed = false;
 
         try {
             RetrieveRequest request = new RetrieveRequest();
             request.setQuery(evalCase.getQuery());
             request.setTopK(safeTopK(evalCase));
             request.setUseRerank(useRerank);
-            response = profile != null
+            request.setRetrievalProfile(qualityProfile);
+            response = qualityProfile != null
+                    ? retrievalService.retrieve(kbId, request)
+                    : profile != null
                     ? retrievalService.retrieveForProfile(kbId, request, profile.getId())
                     : retrievalMode == null
                     ? retrievalService.retrieve(kbId, request)
@@ -193,12 +277,14 @@ public class RagEvalService {
             boolean expectsNoHits = safeMinHits(evalCase) == 0
                     && (evalCase.getExpectedFileName() == null || evalCase.getExpectedFileName().isBlank())
                     && (evalCase.getMustContainAny() == null || evalCase.getMustContainAny().isEmpty());
+            hitPassed = expectsNoHits ? hits.isEmpty() : hits.size() >= safeMinHits(evalCase);
             if (expectsNoHits && !hits.isEmpty()) {
                 failureReasons.add("expected no hits, got " + hits.size());
             } else if (hits.size() < safeMinHits(evalCase)) {
                 failureReasons.add("expected at least " + safeMinHits(evalCase) + " hits, got " + hits.size());
             }
             matchedFile = matchFile(evalCase, hits, failureReasons);
+            citationPassed = citationEligible && matchedFile != null;
             matchedToken = matchToken(evalCase, hits, failureReasons);
         } catch (Exception ex) {
             failureReasons.add(ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage());
@@ -217,12 +303,18 @@ public class RagEvalService {
                         evalCase.getQuery(), safeMinHits(evalCase), safeTopK(evalCase),
                         evalCase.getExpectedFileName(), evalCase.getMustContainAny())))
                 .passed(failureReasons.isEmpty())
+                .hitPassed(hitPassed)
+                .citationEligible(citationEligible)
+                .citationPassed(citationPassed)
                 .failureReasons(failureReasons)
                 .hitCount(hits.size())
                 .expectedFileName(evalCase.getExpectedFileName())
                 .matchedFileName(matchedFile)
                 .matchedToken(matchedToken)
                 .retrievalMode(stringDiagnostic(diagnostics, "retrievalMode", response == null ? null : response.getRetrievalMode()))
+                .retrievalProfile(qualityProfile == null
+                        ? com.dupi.rag.domain.enums.RetrievalProfile.CLASSIC
+                        : qualityProfile)
                 .fallbackReason(stringDiagnostic(diagnostics, "fallbackReason", null))
                 .embeddingModel(stringDiagnostic(diagnostics, "embeddingModel", null))
                 .embeddingDimension(intDiagnostic(diagnostics, "embeddingDimension"))
@@ -349,6 +441,36 @@ public class RagEvalService {
 
     private int safeMinHits(RagEvalCase evalCase) {
         return evalCase.getMinHits() == null ? 1 : evalCase.getMinHits();
+    }
+
+    private boolean hasExpectedFile(RagEvalCase evalCase) {
+        return evalCase.getExpectedFileName() != null && !evalCase.getExpectedFileName().isBlank();
+    }
+
+    private List<com.dupi.rag.domain.enums.RetrievalProfile> normalizeProfiles(
+            List<com.dupi.rag.domain.enums.RetrievalProfile> requestedProfiles
+    ) {
+        if (requestedProfiles == null || requestedProfiles.isEmpty()) {
+            return List.of(com.dupi.rag.domain.enums.RetrievalProfile.CLASSIC);
+        }
+        List<com.dupi.rag.domain.enums.RetrievalProfile> profiles = requestedProfiles.stream()
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .toList();
+        if (profiles.isEmpty()) {
+            return List.of(com.dupi.rag.domain.enums.RetrievalProfile.CLASSIC);
+        }
+        boolean hasCandidate = profiles.stream()
+                .anyMatch(profile -> profile != com.dupi.rag.domain.enums.RetrievalProfile.CLASSIC);
+        if (!hasCandidate) {
+            return List.of(com.dupi.rag.domain.enums.RetrievalProfile.CLASSIC);
+        }
+        List<com.dupi.rag.domain.enums.RetrievalProfile> normalized = new ArrayList<>();
+        normalized.add(com.dupi.rag.domain.enums.RetrievalProfile.CLASSIC);
+        profiles.stream()
+                .filter(profile -> profile != com.dupi.rag.domain.enums.RetrievalProfile.CLASSIC)
+                .forEach(normalized::add);
+        return normalized;
     }
 
     private RagQualityPolicy getOrCreatePolicy(UUID kbId) {
@@ -544,6 +666,9 @@ public class RagEvalService {
                 .id(run.getId())
                 .kbId(run.getKbId())
                 .useRerank(Boolean.TRUE.equals(run.getUseRerank()))
+                .profileSet(run.getProfileSet())
+                .indexRevision(run.getIndexRevision())
+                .gateSummary(toGateSummaryResponse(run.getGateSummary()))
                 .passedCount(run.getPassedCount())
                 .totalCount(run.getTotalCount())
                 .status(run.getStatus())
@@ -568,11 +693,15 @@ public class RagEvalService {
                 .query(result.getQuery())
                 .passed(result.isPassed())
                 .failureReasons(result.getFailureReasons())
+                .hitPassed(result.isHitPassed())
+                .citationEligible(result.isCitationEligible())
+                .citationPassed(result.isCitationPassed())
                 .hitCount(result.getHitCount())
                 .expectedFileName(result.getExpectedFileName())
                 .matchedFileName(result.getMatchedFileName())
                 .matchedToken(result.getMatchedToken())
                 .retrievalMode(result.getRetrievalMode())
+                .retrievalProfile(result.getRetrievalProfile())
                 .fallbackReason(result.getFallbackReason())
                 .embeddingModel(result.getEmbeddingModel())
                 .embeddingDimension(result.getEmbeddingDimension())
@@ -586,6 +715,115 @@ public class RagEvalService {
                 .comparisonStatus(result.getComparisonStatus())
                 .latencyMs(result.getLatencyMs())
                 .build();
+    }
+
+    private Map<String, Object> toGateSummaryMap(
+            Map<com.dupi.rag.domain.enums.RetrievalProfile, RagEvalGateDecisionResponse> decisions
+    ) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        decisions.forEach((profile, decision) -> summary.put(profile.wireValue(), decision));
+        return summary;
+    }
+
+    private Map<com.dupi.rag.domain.enums.RetrievalProfile, RagEvalGateDecisionResponse> toGateSummaryResponse(
+            Map<String, Object> rawSummary
+    ) {
+        if (rawSummary == null || rawSummary.isEmpty()) {
+            return Map.of();
+        }
+        Map<com.dupi.rag.domain.enums.RetrievalProfile, RagEvalGateDecisionResponse> summary = new LinkedHashMap<>();
+        rawSummary.forEach((key, value) -> {
+            com.dupi.rag.domain.enums.RetrievalProfile profile =
+                    com.dupi.rag.domain.enums.RetrievalProfile.fromWireValue(key);
+            summary.put(profile, toGateDecision(value, profile));
+        });
+        return summary;
+    }
+
+    private RagEvalGateDecisionResponse toGateDecision(
+            Object value,
+            com.dupi.rag.domain.enums.RetrievalProfile fallbackCandidate
+    ) {
+        if (value instanceof RagEvalGateDecisionResponse decision) {
+            return decision;
+        }
+        if (!(value instanceof Map<?, ?> map)) {
+            return RagEvalGateDecisionResponse.builder()
+                    .candidate(fallbackCandidate)
+                    .baseline(com.dupi.rag.domain.enums.RetrievalProfile.CLASSIC)
+                    .status(RagEvalGateStatus.NOT_EVALUATED)
+                    .reason("not_evaluated")
+                    .build();
+        }
+        return RagEvalGateDecisionResponse.builder()
+                .candidate(profileValue(map.get("candidate"), fallbackCandidate))
+                .baseline(profileValue(
+                        map.get("baseline"), com.dupi.rag.domain.enums.RetrievalProfile.CLASSIC))
+                .status(statusValue(map.get("status")))
+                .reason(stringValue(map.get("reason")))
+                .metrics(metricsValue(map.get("metrics"), fallbackCandidate))
+                .classicMetrics(metricsValue(
+                        map.get("classicMetrics"), com.dupi.rag.domain.enums.RetrievalProfile.CLASSIC))
+                .hitRateDelta(doubleValue(map.get("hitRateDelta")))
+                .citationPassRateDelta(doubleValue(map.get("citationPassRateDelta")))
+                .runRevision(longValue(map.get("runRevision")))
+                .currentRevision(longValue(map.get("currentRevision")))
+                .indexReady(Boolean.TRUE.equals(map.get("indexReady")))
+                .build();
+    }
+
+    private RagEvalProfileMetricsResponse metricsValue(
+            Object value,
+            com.dupi.rag.domain.enums.RetrievalProfile fallbackProfile
+    ) {
+        if (value instanceof RagEvalProfileMetricsResponse metrics) {
+            return metrics;
+        }
+        if (!(value instanceof Map<?, ?> map)) {
+            return RagEvalProfileMetricsResponse.builder().profile(fallbackProfile).build();
+        }
+        return RagEvalProfileMetricsResponse.builder()
+                .profile(profileValue(map.get("profile"), fallbackProfile))
+                .totalCases(intValue(map.get("totalCases")))
+                .passedCount(intValue(map.get("passedCount")))
+                .hitPassedCount(intValue(map.get("hitPassedCount")))
+                .citationEligibleCount(intValue(map.get("citationEligibleCount")))
+                .citationPassedCount(intValue(map.get("citationPassedCount")))
+                .passRate(doubleValue(map.get("passRate")))
+                .hitRate(doubleValue(map.get("hitRate")))
+                .citationPassRate(doubleValue(map.get("citationPassRate")))
+                .build();
+    }
+
+    private com.dupi.rag.domain.enums.RetrievalProfile profileValue(
+            Object value,
+            com.dupi.rag.domain.enums.RetrievalProfile fallback
+    ) {
+        return value == null
+                ? fallback
+                : com.dupi.rag.domain.enums.RetrievalProfile.fromWireValue(String.valueOf(value));
+    }
+
+    private RagEvalGateStatus statusValue(Object value) {
+        return value == null
+                ? RagEvalGateStatus.NOT_EVALUATED
+                : RagEvalGateStatus.valueOf(String.valueOf(value));
+    }
+
+    private String stringValue(Object value) {
+        return value == null ? null : String.valueOf(value);
+    }
+
+    private int intValue(Object value) {
+        return value instanceof Number number ? number.intValue() : 0;
+    }
+
+    private double doubleValue(Object value) {
+        return value instanceof Number number ? number.doubleValue() : 0.0;
+    }
+
+    private Long longValue(Object value) {
+        return value instanceof Number number ? number.longValue() : null;
     }
 
     private RankEvidence rankEvidence(RagEvalCase evalCase, List<RetrievalHit> hits) {

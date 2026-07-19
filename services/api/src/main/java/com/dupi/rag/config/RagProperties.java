@@ -12,4 +12,7 @@ import org.springframework.context.annotation.Configuration;
 public class RagProperties {
     private int defaultTopK;
     private int maxContextChars;
+    private double combinedChildWeight = 1.0;
+    private double combinedQaWeight = 0.8;
+    private int rrfK = 60;
 }

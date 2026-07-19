@@ -105,6 +105,12 @@ public class RecoveryArchiveService {
             collectionSettings.put("denseSchema", recoveryVectors.describe(recoveryVectors.denseCollection()));
             evidence.add(captureVectors(archive, kb.getId(), null));
 
+            if (kb.isProfileIndexActivated()) {
+                collectionSettings.put("profileCollection", recoveryVectors.profileCollection());
+                collectionSettings.put("profileSchema", recoveryVectors.describe(recoveryVectors.profileCollection()));
+                evidence.add(captureProfileVectors(archive, kb.getId()));
+            }
+
             RetrievalProfile activeProfile = profileRows.stream()
                     .filter(profile -> profile.getId().equals(kb.getActiveRetrievalProfileId()))
                     .findFirst().orElse(null);
@@ -245,6 +251,26 @@ public class RecoveryArchiveService {
             try (InputStream input = Files.newInputStream(temporary)) {
                 return write(archive, "vector:" + kind, "VECTOR", null,
                         "vectors/" + kind + ".ndjson", input);
+            }
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
+    }
+
+    private RecoveryManifestItem captureProfileVectors(RecoveryArchive archive,
+                                                       UUID knowledgeBaseId) throws Exception {
+        Path temporary = Files.createTempFile("dupi-recovery-profile-", ".ndjson");
+        try {
+            String cursor = null;
+            do {
+                VectorSnapshotPage page = recoveryVectors.readProfile(
+                        knowledgeBaseId, cursor, properties.getPageSize());
+                Files.write(temporary, recoveryVectors.serializeRows(page.rows()), StandardOpenOption.APPEND);
+                cursor = page.nextCursor();
+            } while (cursor != null);
+            try (InputStream input = Files.newInputStream(temporary)) {
+                return write(archive, "vector:profile", "VECTOR", null,
+                        "vectors/profile.ndjson", input);
             }
         } finally {
             Files.deleteIfExists(temporary);

@@ -13,4 +13,11 @@ public class MilvusProperties {
     private String host;
     private int port;
     private String collection;
+    private String profileCollection;
+
+    public String getProfileCollection() {
+        return profileCollection == null || profileCollection.isBlank()
+                ? collection + "_profiles_v2"
+                : profileCollection;
+    }
 }

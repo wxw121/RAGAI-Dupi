@@ -45,12 +45,27 @@ public class MilvusRecoveryService {
         return read(sparseCollection(knowledgeBaseId, profileVersion), knowledgeBaseId, cursor, requestedLimit, true);
     }
 
+    public VectorSnapshotPage readProfile(UUID knowledgeBaseId, String cursor, int requestedLimit) {
+        long offset = parseCursor(cursor);
+        int limit = Math.max(1, Math.min(requestedLimit, recovery.getPageSize()));
+        List<VectorSnapshotRow> rows = port.readProfile(
+                        profileCollection(), knowledgeBaseId, offset, limit).stream()
+                .sorted(Comparator.comparing(VectorSnapshotRow::chunkId))
+                .toList();
+        String next = rows.size() < limit ? null : Long.toString(offset + rows.size());
+        return new VectorSnapshotPage(rows, next, checksum(rows));
+    }
+
     public MilvusRecoverySchema describe(String collection) {
         return port.describe(collection);
     }
 
     public String denseCollection() {
         return milvus.getCollection();
+    }
+
+    public String profileCollection() {
+        return milvus.getProfileCollection();
     }
 
     public void upsert(String collection, MilvusRecoverySchema expected, List<VectorSnapshotRow> rows) {
@@ -61,7 +76,11 @@ public class MilvusRecoveryService {
                 || expected.dimension() != actual.dimension()) {
             throw new IllegalArgumentException("Milvus recovery schema mismatch");
         }
-        port.upsert(collection, rows, sparse);
+        if (collection.equals(profileCollection())) {
+            port.upsertProfile(collection, rows);
+        } else {
+            port.upsert(collection, rows, sparse);
+        }
     }
 
     public long count(String collection, UUID knowledgeBaseId) {
