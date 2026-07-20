@@ -1,4 +1,4 @@
-﻿# 待办清单
+# 待办清单
 
 <!-- language-switch -->
 [English](../en/todo.md)
@@ -10,26 +10,26 @@
 V1.5.0版本关闭包
 
 - [x]将API， Web和lockfile发布元数据调整为1.5.0。
-—[x] V18-V20版本文档升级、配置文件V2 rollout、质检关、监控、回退。
+- [x] V18-V20版本文档升级、配置文件V2 rollout、质检关、监控、回退。
 - [x]通过API， Worker, Web, Pester, Compose， diff和release-scan闸门在最终的发布diff。
 
 V1.4.2治理操作稳定性
 
 - [x]增加OPS_ADMIN操作符的只读权限GET /api/v1/ops/governance-summary。
-—[x]汇总上传配额、摄取作业、摄取发件箱、故障通知、矢量清理和现有警报。
+- [x]汇总上传配额、摄取作业、摄取发件箱、故障通知、矢量清理和现有警报。
 - [x]添加烟雾脚本scripts/smoke-governance-summary。ps1和Pester测试覆盖率。
 - [x]忽略local。npm-cache工件。
 - [x]记录节点16本地Web验证约束：使用npm脚本所以services/ Web /scripts/node16-webcrypto。cj加载;不要运行未加工的葡萄或葡萄。
--[]在任何合并，标记或发布声明之前运行完整的V1.4.2 gate。
+- [ ] 在任何合并，标记或发布声明之前运行完整的V1.4.2 gate。
 
 V1.4.1上传治理
 
-—[x]保留租户/用户保留的字节、文档和滚动窗口上传配额。
+- [x]保留租户/用户保留的字节、文档和滚动窗口上传配额。
 - [x]增加每个文件的幂等保留，重播，冲突，配额和有效负载大小响应。
 - [x]增加执行id、索赔/租赁状态、取消、回调序列保护和终端不可变性。
 通过处理列表移动Worker消耗，并添加取消清理检查点。
 - [x]保留重复数据删除失败/DEAD_LETTER通知事件与webhook调度/重试/耗尽，不通知取消。
-—[x]将Web批处理工作流替换为有边界的每个文件上传、配额、中止/重试、摄取取消和序列化轮询。
+- [x]将Web批处理工作流替换为有边界的每个文件上传、配额、中止/重试、摄取取消和序列化轮询。
 - [x]对齐API/Web版本并同步发布文档。
 - [x]通过完整的API/Worker/Web/Pester/Compose/release-scan gate，然后创建本地V1.4.1发布提交和标签。
 
@@ -40,13 +40,13 @@ V1.4.0可验证恢复
 - [x]保存存档/还原状态并隐藏“还原”目标。
 - [x]捕获和验证记录，对象，密集向量，稀疏向量和密封清单。
 - [x]用重试和放弃恢复到一个隐藏目标。
-- [x]增加‘ KB_RECOVERY ’，审计事件，有界执行，范围API和恢复UI。
+- [x]增加`KB_RECOVERY`，审计事件，有界执行，范围API和恢复UI。
 - [x]添加纠缠策略门和确定性恢复浏览器流。
 - [x]保留一个真正的'工件/v1.4-恢复/排练。Json '具有两个固定装置，9项/ 10,946字节，对象/矢量校验和，恢复的记录计数，检索等价，损坏阻塞和范围清理。
 - [x]运行凭据剧作家门对整个撰写堆栈（' 1 passed '）。
 - [x]在V1.4.0关闭前注入经典对象损坏并保留一个带有‘ corruptionBlocked=true ’的排练工件
 - [x]通过非根CPU Worker映像和过期结构化异常的dependency/SBOM/license/CVE/image-size扫描。
-—[x]在V1.4.0关闭后启动V1.4.1上传配额、取消和通知。
+- [x]在V1.4.0关闭后启动V1.4.1上传配额、取消和通知。
 
 - [x] Milvus Sparse 回填、双写、Shadow、Cutover、Rollback 和删除同步。
 - [x] 质量策略、baseline 和 Retrieval Profile 控制台。

@@ -22,7 +22,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rehearse-v1.4-recove
 
 ```
 
-策略套件至少需要两个固定文档，拒绝不完整/损坏的清单证据，将清理限制为“v14-recovery-*”，并检查工件编订。2026-07-16凭据的Compose浏览器大门通过了1/1，最终的实际工件包含2个文档、9个条目/ 10,946字节、校验和/计数/检索匹配、标准对象损坏拒绝和完成清理。上面的短命令不足以释放，因为它省略了损坏钩子；使用‘ docs/v1.4-recovery-runbook.md ’中的完整撰写命令。“剧作家测试列表”只是发现证据。
+策略套件至少需要两个固定文档，拒绝不完整/损坏的清单证据，将清理限制为“v14-recovery-*”，并检查工件编订。2026-07-16凭据的Compose浏览器大门通过了1/1，最终的实际工件包含2个文档、9个条目/ 10,946字节、校验和/计数/检索匹配、标准对象损坏拒绝和完成清理。上面的短命令不足以释放，因为它省略了损坏钩子；使用`docs/v1.4-recovery-runbook.md`中的完整撰写命令。“剧作家测试列表”只是发现证据。
 
 `scripts/e2e-llm-stub.py` 提供确定性的 8 维 OpenAI-compatible embeddings，仅用于隔离 E2E，不代表生产模型质量。真实浏览器门禁用真实登录/Cookie/CSRF 创建临时知识库和 Retrieval Profile，检查 console、page error、失败网络请求，并在成功后清理资源。
 
@@ -33,7 +33,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rehearse-v1.4-recove
 从 **Web 控制台按钮操作** 出发，用脚本自动调用同一套 HTTP 接口，验证「健康检查 → 知识库 → 上传 → 摄入 → 检索 → 问答」主链路；V1.2 的真实浏览器门禁进一步覆盖混合检索建库、持久化 RAG 用例和真实账号写操作，并拦截 Cookie/CSRF、控制台、网络和页面错误。
 
 脚本路径：[`scripts/e2e-main-flow.ps1`](../../scripts/e2e-main-flow.ps1)
-最近一次运行报告：[`scripts/e2e-last-run.json`](../../scripts/e2e-last-run.json)（每次运行覆盖）
+最近一次运行报告：`scripts/e2e-last-run.json`（本地生成，每次运行覆盖）
 
 补充脚本：
 

@@ -17,7 +17,7 @@ curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs/{jo
 
 ```
 
-See [the V1.4.1 release runbook](../v1.4.1-release-runbook.md) and the [design](../superpowers/specs/2026-07-18-v1.4.1-upload-governance-design.md). The latest local V1.4.1 release scan records image digest `sha256:eec613fab9cdd1d873b95172f98d42ade5989238e2b0f76761b6b4f63b86515a`, image size 640,389,450 bytes, no Python findings, and 22 accepted upstream-unfixed OS findings expiring 2026-08-15.
+See [the V1.4.1 release runbook](../v1.4.1-release-runbook.md) and the design（local note）. The latest local V1.4.1 release scan records image digest `sha256:eec613fab9cdd1d873b95172f98d42ade5989238e2b0f76761b6b4f63b86515a`, image size 640,389,450 bytes, no Python findings, and 22 accepted upstream-unfixed OS findings expiring 2026-08-15.
 
 > V1.4.0 adds tenant-scoped, checksum-verified knowledge-base archives and idempotent restore into a new hidden knowledge base. It is an application recovery layer, not a replacement for PostgreSQL, MinIO, etcd, or Milvus infrastructure backups.
 
@@ -72,9 +72,9 @@ The script will check the actual mode, Profile switch, use-by-case phase ranking
 Worker uses CPU-only PyTorch and `BAAI/bge-reranker-base`, and by default loads the model and performs preheating inference during the startup lifecycle. Compose persists the model cache through `hf_model_cache`. A preheating failure will mark Rerank unavailable in `/health`, but will not block VECTOR/HYBRID. Cold start delay must not be mixed with hot P95.
 
 Account/RBAC and ops administrative permission update records can be found at [docs/rbac-ops-admin-2026-07-06.md](../rbac-ops-admin-2026-07-06.md); See [docs/ outbox-tombstone-rbac-OPs-2026-07-07.md](../outbox-tombstone-rbac-ops-2026-07-07.md) for ingroving outbox, removing tombstone, instance authorization and audit operations enhancement.
-V1.1 (API `0.1.1-SNAPSHOT` / Web `0.1.1`) adds real browser E2E access control, intake diagnosis, knowledge base details `RAG 评估`, upload governance prompts and aggregated operation and maintenance alerts; Design and implementation of records to see [docs/superpowers/specs / 2026-07-12 - v1.1 - observability - evaluation - design. Md] (../superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md) with [docs/superpowers/plans / 2026-07-12 v1.1 - observability - evaluation - implementation. Md] (../superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md).
-> V1.2 (API `0.1.2-SNAPSHOT` / Web `0.1.2`) Extended Real Browser Access New document index details, structured Chat errors, persistent RAG evaluation use cases/history, hybrid search and Rerank control, audit alert Webhook, and knowledge base metadata/block snapshot export recovery have been added. Implementation plan see [docs/superpowers/plans / 2026-07-12 - v1.2 - quality - loop - implementation. Md] (../superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md).
-> V1.2.1 Closure: Isolate the real browser access control business data to the `e2e` tenant; A successful run will delete the temporary knowledge base and accounts, while a failed run will only retain the `e2e` evidence. Design see [docs/superpowers/specs / 2026-07-14 - v1.2.1 - e2e - isolation - the cleanup - design. Md] (../superpowers/specs/2026-07-14-v1.2.1-e2e-isolation-cleanup-design.md).
+> V1.1 (API `0.1.1-SNAPSHOT` / Web `0.1.1`) adds the real-browser E2E gate, ingest diagnostics, RAG evaluation, upload-governance guidance, and aggregated operations alerts.
+> V1.2 expands browser coverage with document-index details, structured chat errors, persistent RAG evaluation cases and history, hybrid retrieval and Rerank controls, audit webhooks, and metadata or chunk-snapshot recovery.
+> V1.2.1 isolates real-browser gate data in the `e2e` tenant and removes temporary knowledge bases and accounts after successful runs.
 > V1.5 (RAG Quality Upgrade) adds Parent-Child/QA-assisted indexing, a filterable profile v2 Milvus superset Combined weighted RRF, revision-bound eval quality gates, and Web readiness/gate comparisons.
 
 Enterprise-level RAG knowledge base engine - similar to the Dify/ Douzi underlying knowledge base module.

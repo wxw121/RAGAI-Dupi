@@ -1,4 +1,4 @@
-﻿# 进展记录
+# 进展记录
 
 <!-- language-switch -->
 [English](../en/progress.md)
@@ -10,46 +10,46 @@
 ## V1.5.0发布结束（2026-07-20）
 
 API和Web发布元数据与“1.5.0”保持一致。
--增加了V1.5.0版本说明和' docs/v1.5-release-runbook。md '用于Flyway V18-V20、Profile V2的推出、修订绑定评估、激活、监控和回滚。
--最终的本地产品闸门通过了发布diff: API 482/482与95% JaCoCo闸门，Worker 96/96, Web 82/82，和1794模块生产构建。
-—撰写编辑配置和V1.5.0版本扫描通过。扫描记录图像摘要‘ sha256:74043096b1740cad517a78f0792d79ea25a6bed99d17c1d8c96a7af98b05121c ’，大小为640,310,825字节，没有Python发现，以及22个精确的上游未修复的操作系统异常，到期日期为2026-08-15。
+- 增加了V1.5.0版本说明和' docs/v1.5-release-runbook。md '用于Flyway V18-V20、Profile V2的推出、修订绑定评估、激活、监控和回滚。
+- 最终的本地产品闸门通过了发布diff: API 482/482与95% JaCoCo闸门，Worker 96/96, Web 82/82，和1794模块生产构建。
+- 撰写编辑配置和V1.5.0版本扫描通过。扫描记录图像摘要‘ sha256:74043096b1740cad517a78f0792d79ea25a6bed99d17c1d8c96a7af98b05121c ’，大小为640,310,825字节，没有Python发现，以及22个精确的上游未修复的操作系统异常，到期日期为2026-08-15。
 发布分支推送CI #30和PR CI #31通过API、Worker、Web、存储库固定的Pester 4.10.1契约和Docker Compose。在最终文档提交和合并‘ main ’重复绿色之前，带注释的标记一直被阻塞。
 
 V1.4.2治理操作稳定性（2026-07-18）
 
-—增加OPS_ADMIN操作符的只读GET /api/v1/ops/governance-summary界面。
-—汇总包括generatedAt、uploadQuota、ingestJobs、ingestOutbox、failureNotifications、vectorCleanup和alerts。
+- 增加OPS_ADMIN操作符的只读GET /api/v1/ops/governance-summary界面。
+- 汇总包括generatedAt、uploadQuota、ingestJobs、ingestOutbox、failureNotifications、vectorCleanup和alerts。
 增加了scripts/smoke-governance-summary。ps1和Pester覆盖端点路径、安全参数、模式验证、样本模式和编校证据。
--目前重点验证：API GovernanceOpsServiceTest和ControllerLayerTest通过；鬼烟测试通过了4 / 4。
--。在本地Web依赖设置中忽略npm-cache。
+- 目前重点验证：API GovernanceOpsServiceTest和ControllerLayerTest通过；鬼烟测试通过了4 / 4。
+- 。在本地Web依赖设置中忽略npm-cache。
 本地Web验证必须使用npm脚本，所以services/ Web /scripts/node16-webcrypto。cjs加载Node 16 WebCrypto shim；不要在此工作站上直接运行原始访问或访问测试。
--此条目仅记录正在进行的V1.4.2开发；它不是一个合并、标记或发布记录。
+- 此条目仅记录正在进行的V1.4.2开发；它不是一个合并、标记或发布记录。
 
 V1.4.1上传治理（2026-07-18）
 
--版本元数据与API ‘ 1.4.1- snapshot ’和Web ‘ 1.4.1 ’对齐；航路推进到V17。
--增加了持续保留字节/文档和滚动窗口上传记帐，显式配额保留，每个文件的幂等重放/冲突处理，‘ GET /api/v1/upload-quota ’，以及带有Retry-After的409/413/429映射。
--增加了摄取执行id，索赔，租约，单调回调序列，排队/运行取消状态，陈旧回调确认和终端状态保护。
--增加了一个单独的重复数据删除终端故障通知表/服务，带有可选的webhook交付，有界的回退重试和明确的‘ EXHAUSTED ’；取消不会创建失败事件。
-- Worker使用ready-to-processing Redis move，仅在终端处理后才确认处理有效负载，在工作之前声明执行，刷新租约，检查取消，并在索引开始后取消时清除向量。发布映像使用仅cpu的火炬‘ 2.13.0+cpu ’，删除了可修复的‘ PYSEC-2025-194 ’发现。
+- 版本元数据与API `1.4.1- snapshot`和Web `1.4.1`对齐；航路推进到V17。
+- 增加了持续保留字节/文档和滚动窗口上传记帐，显式配额保留，每个文件的幂等重放/冲突处理，`GET /api/v1/upload-quota`，以及带有Retry-After的409/413/429映射。
+- 增加了摄取执行id，索赔，租约，单调回调序列，排队/运行取消状态，陈旧回调确认和终端状态保护。
+- 增加了一个单独的重复数据删除终端故障通知表/服务，带有可选的webhook交付，有界的回退重试和明确的`EXHAUSTED`；取消不会创建失败事件。
+- Worker使用ready-to-processing Redis move，仅在终端处理后才确认处理有效负载，在工作之前声明执行，刷新租约，检查取消，并在索引开始后取消时清除向量。发布映像使用仅cpu的火炬`2.13.0+cpu`，删除了可修复的`PYSEC-2025-194`发现。
 Web使用有边界的每个文件上传，具有稳定的等幂键，配额显示，retry - after消息，传输abort/重试，获取取消，显式‘ currentJob ’，故障通知重复数据删除和序列化轮询。
--重点验证通过：摄取失败通知webhook交付/重试5/5，API文档/当前作业和摄取端点套件，Web管理的上传套件和Worker可靠队列套件。
--最终本地gate通过：API ' mvn clean verify ‘ 430/430 with JaCoCo 95.1306%, Worker pytest 75/75, Web Vitest 78/78， Web生产构建（1,794个模块），Pester发布策略14/14，Compose config exit 0和’ git diff -check ' exit 0。
--最终版本扫描没有Python发现，一个640,389,450字节的非根CPU Worker映像，摘要‘ sha256:eec613fab9cdd1d873b95172f98d42ade5989238e2b0f76761b6b4f63b86515a ’，以及22个确切的上游未修复的操作系统异常（19 HIGH, 3 CRITICAL）将于2026-08-15到期。证据:“工件/ v1.4.1-release-scan /总结。md '，依赖锁，SBOM格式，pip-audit JSON和Trivy JSON。
+- 重点验证通过：摄取失败通知webhook交付/重试5/5，API文档/当前作业和摄取端点套件，Web管理的上传套件和Worker可靠队列套件。
+- 最终本地gate通过：API ' mvn clean verify `430/430 with JaCoCo 95.1306%, Worker pytest 75/75, Web Vitest 78/78， Web生产构建（1,794个模块），Pester发布策略14/14，Compose config exit 0和` git diff -check ' exit 0。
+- 最终版本扫描没有Python发现，一个640,389,450字节的非根CPU Worker映像，摘要‘ sha256:eec613fab9cdd1d873b95172f98d42ade5989238e2b0f76761b6b4f63b86515a ’，以及22个确切的上游未修复的操作系统异常（19 HIGH, 3 CRITICAL）将于2026-08-15到期。证据:“工件/ v1.4.1-release-scan /总结。md '，依赖锁，SBOM格式，pip-audit JSON和Trivy JSON。
 
 V1.3 RAG质量和稀疏迁移（2026-07-15）
 
 V1.4.0可验证恢复（2026-07-16）
 
--实现了私人确定性档案的记录，原始对象，密集向量，活跃稀疏向量，和一个清单最后写。
--使用确定性标识符实现隐藏目标恢复，重试，放弃，只有在验证后才准备好。
--增加了‘ KB_RECOVERY ’，审计有界后台命令，租户/ kb范围的路由，流式ZIP下载和恢复操作面板。
+- 实现了私人确定性档案的记录，原始对象，密集向量，活跃稀疏向量，和一个清单最后写。
+- 使用确定性标识符实现隐藏目标恢复，重试，放弃，只有在验证后才准备好。
+- 增加了`KB_RECOVERY`，审计有界后台命令，租户/ kb范围的路由，流式ZIP下载和恢复操作面板。
 - Real Compose排练于2026-07-16通过，包含2个文档，9个存档项，10,946字节，匹配对象/矢量校验和，匹配恢复的记录计数和检索命中，标准对象损坏拒绝，以及范围清理。证据:“工件/ v1.4-recovery / rehearsal.json”。
-凭据铬通过1/1对‘ http://localhost:8080 ’，包括恢复面板和成功的E2E清理。
--真实演练暴露和固定管理实体时间戳丢失，密集向量“Double”/“Float”转换，强读后写验证，终端异步故障记录，V15/V16存档证据清理约束。
+凭据铬通过1/1对`http://localhost:8080`，包括恢复面板和成功的E2E清理。
+- 真实演练暴露和固定管理实体时间戳丢失，密集向量“Double”/“Float”转换，强读后写验证，终端异步故障记录，V15/V16存档证据清理约束。
 - V1.4.0恢复范围完成：最终工件记录‘ corruptionBlocked=true ’。
--正式发布扫描在2026-07-17通过了一个634,098,035字节的非根CPU Worker映像和23个确切的上游未固定异常在2026-08-15到期。证据:“工件/ v1.4-release-scan /总结。md '，图像依赖锁，SBOM， pip-audit和Trivy JSON。
--最终通过的本地门：API 351测试与JaCoCo检查，Worker 45测试，Web 68测试加上生产构建，和Pester 26测试。V1.4.1在V1.4.0发布之后启动。
+- 正式发布扫描在2026-07-17通过了一个634,098,035字节的非根CPU Worker映像和23个确切的上游未固定异常在2026-08-15到期。证据:“工件/ v1.4-release-scan /总结。md '，图像依赖锁，SBOM， pip-audit和Trivy JSON。
+- 最终通过的本地门：API 351测试与JaCoCo检查，Worker 45测试，Web 68测试加上生产构建，和Pester 26测试。V1.4.1在V1.4.0发布之后启动。
 
 - 已完成质量策略、baseline、不可变评测证据和门禁。
 - 已完成 Retrieval Profile 控制台、激活和受 PASS 证据约束的 rollback。
@@ -65,10 +65,10 @@ V1.5.0 RAG质量升级P2完成：现有的VECTOR / HYBRID / RERANK模式和CLASS
 ## 最近进展
 
 2026-07-19 （V1.5.0 RAG质量升级P2）
-- [Profile v2隔离索引]Worker摄取现在构建一个可重用的原始/父/子/QA超集，并写入一个可过滤的‘ MILVUS_PROFILE_COLLECTION ’；遗留的原始向量被双重写入，直到知识库安全切换，之后持久的切换状态防止回退到已删除的遗留索引。
--[准备和修订]API要求每个文档在‘ index_schema_version=2 ’时‘ COMPLETED ’，跟踪知识库‘ index_revision ’，并分离遗留/配置文件清理目标，因此eval决策仍然与当前索引状态相关联。Reindex将文档滚动到位，而不是在事务性作业创建之前删除整个动态概要索引。
--[联合加权融合]API向量和Worker混合检索独立查询子路由和QA路由，然后应用‘ COMBINED_CHILD_WEIGHT=1.0 ’， ‘ COMBINED_QA_WEIGHT=0.8 ’和‘ RRF_K=60 ’的加权RRF；重新排名在融合后运行。
--[质量门]RAG eval自动比较非经典候选与经典，存储命中/引用布尔值，并返回PASSED/BLOCKED/INSUFFICIENT_DATA/STALE/INDEX_NOT_READY/ not_evaluate决策。非经典默认激活需要当前通过的门或返回‘ 409 retrieval_profile_gate_blocked ’。
+- [Profile v2隔离索引]Worker摄取现在构建一个可重用的原始/父/子/QA超集，并写入一个可过滤的`MILVUS_PROFILE_COLLECTION`；遗留的原始向量被双重写入，直到知识库安全切换，之后持久的切换状态防止回退到已删除的遗留索引。
+- [准备和修订]API要求每个文档在`index_schema_version=2`时`COMPLETED`，跟踪知识库`index_revision`，并分离遗留/配置文件清理目标，因此eval决策仍然与当前索引状态相关联。Reindex将文档滚动到位，而不是在事务性作业创建之前删除整个动态概要索引。
+- [联合加权融合]API向量和Worker混合检索独立查询子路由和QA路由，然后应用`COMBINED_CHILD_WEIGHT=1.0`， `COMBINED_QA_WEIGHT=0.8`和`RRF_K=60`的加权RRF；重新排名在融合后运行。
+- [质量门]RAG eval自动比较非经典候选与经典，存储命中/引用布尔值，并返回PASSED/BLOCKED/INSUFFICIENT_DATA/STALE/INDEX_NOT_READY/ not_evaluate决策。非经典默认激活需要当前通过的门或返回`409 retrieval_profile_gate_blocked`。
 - [Web面板]知识库设置显示配置文件准备，模式/修订，和大门徽章；被阻止的候选对象在本地被禁用，RAG评估面板显示候选对象与经典对象的比率、差值和原因。
 
 ### 2026-07-19 (V1.5.0 RAG Quality Upgrade P1)
@@ -188,7 +188,7 @@ V1.5.0 RAG质量升级P2完成：现有的VECTOR / HYBRID / RERANK模式和CLASS
 
 ### 2026-06-20（Canonical Markdown 摄入）
 - [摄入统一 MD] — 各格式上传后先经 `canonicalize` 转为规范 Markdown，再按标题/代码块/表格边界分块，替代纯 token 切断
-  - **新增** [`services/worker/app/canonical/`](../../services/worker/app/canonical)：`md_sanitizer`、`text_to_md`、`docx_to_md`、`xlsx_to_md`、`pdf_to_md`（pymupdf4llm）、`to_markdown`
+  - **新增** `services/worker/app/canonical/`：`md_sanitizer`、`text_to_md`、`docx_to_md`、`xlsx_to_md`、`pdf_to_md`（pymupdf4llm）、`to_markdown`
   - **新增** [`markdown_chunker.py`](../../services/worker/app/chunker/markdown_chunker.py)：section 拆分、`heading`/`block_type` 元数据、表格/代码块原子切分
   - **接入** [`consumer.py`](../../services/worker/app/consumer.py)：canonicalize → markdown chunk；`recursive` 策略亦走 markdown chunker
   - **API** [`RetrievalService.buildContext`](../../services/api/src/main/java/com/dupi/rag/service/RetrievalService.java) 带 `section`/`type`；[`ChatService`](../../services/api/src/main/java/com/dupi/rag/service/ChatService.java) prompt 要求保持上下文 MD 结构
@@ -215,7 +215,7 @@ V1.5.0 RAG质量升级P2完成：现有的VECTOR / HYBRID / RERANK模式和CLASS
 - [智谱 Embedding] — `deploy/.env` 配置 `EMBEDDING_BASE_URL=https://open.bigmodel.cn/api/paas/v4`、`embedding-2`、维度 `1024`；[`KnowledgeBaseService`](../../services/api/src/main/java/com/dupi/rag/service/KnowledgeBaseService.java) 新建 KB 时从 `LlmProperties` 读取默认 `embeddingModel`/`embeddingDimension`
 - [摄入 400] — 旧知识库元数据仍为 `text-embedding-3-small`/1536，Worker 将其发给智谱导致 400；**规避**：新建知识库后上传，或删除旧库；切换维度时需重置 Milvus `dupi_chunks` 集合
 - [Chat SSE] — DeepSeek 流式无 `event:token`；**修复**：[`LlmClient.chatStream`](../../services/api/src/main/java/com/dupi/rag/client/LlmClient.java) 使用 `bodyToMono` + SSE 行解析
-- [E2E 全绿] — 8 步全部 PASS（智谱摄入 + 检索 + Chat SSE）；报告 [`scripts/e2e-last-run.json`](../../scripts/e2e-last-run.json)
+- [E2E 全绿] — 8 步全部 PASS（智谱摄入 + 检索 + Chat SSE）；报告 `scripts/e2e-last-run.json`（本地生成）
 - [文档] — 本批更新 `progress.md`、`todo.md`、`decisions.md`、`e2e-testing.md`、`architecture.md`
 
 ### 2026-06-19（E2E 主流程自动化）

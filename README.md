@@ -70,7 +70,7 @@ curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/documents \
 curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs/{jobId}/cancel
 ```
 
-See [the V1.4.1 release runbook](docs/v1.4.1-release-runbook.md) and the [design](docs/superpowers/specs/2026-07-18-v1.4.1-upload-governance-design.md). The latest local V1.4.1 release scan records image digest `sha256:eec613fab9cdd1d873b95172f98d42ade5989238e2b0f76761b6b4f63b86515a`, image size 640,389,450 bytes, no Python findings, and 22 accepted upstream-unfixed OS findings expiring 2026-08-15.
+See [the V1.4.1 release runbook](docs/v1.4.1-release-runbook.md) and the design（local note）. The latest local V1.4.1 release scan records image digest `sha256:eec613fab9cdd1d873b95172f98d42ade5989238e2b0f76761b6b4f63b86515a`, image size 640,389,450 bytes, no Python findings, and 22 accepted upstream-unfixed OS findings expiring 2026-08-15.
 
 > V1.4.0 adds tenant-scoped, checksum-verified knowledge-base archives and idempotent restore into a new hidden knowledge base. It is an application recovery layer, not a replacement for PostgreSQL, MinIO, etcd, or Milvus infrastructure backups.
 
@@ -121,9 +121,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rag-retrieval-benchm
 Worker 浣跨敤 CPU-only PyTorch 鍜?`BAAI/bge-reranker-base`锛岄粯璁ゅ湪鍚姩鐢熷懡鍛ㄦ湡鍔犺浇妯″瀷骞舵墽琛岄鐑帹鐞嗭紱Compose 閫氳繃 `hf_model_cache` 鎸佷箙鍖栨ā鍨嬬紦瀛樸€傞鐑け璐ヤ細鍦?`/health` 涓爣璁?Rerank 涓嶅彲鐢紝浣嗕笉闃绘柇 VECTOR/HYBRID锛涘喎鍚姩寤惰繜涓嶅緱涓庣儹鎬?P95 娣风敤銆?
 
 > 璐﹀彿 / RBAC 涓?ops 绠＄悊鏉冮檺鏇存柊璁板綍瑙?[docs/rbac-ops-admin-2026-07-06.md](docs/rbac-ops-admin-2026-07-06.md)锛涙憚鍏?outbox銆佸垹闄?tombstone銆佸疄渚嬬骇鎺堟潈涓庡璁¤繍缁村寮鸿 [docs/outbox-tombstone-rbac-ops-2026-07-07.md](docs/outbox-tombstone-rbac-ops-2026-07-07.md)銆?
-> V1.1锛圓PI `0.1.1-SNAPSHOT` / Web `0.1.1`锛夋柊澧炵湡瀹炴祻瑙堝櫒 E2E 闂ㄧ銆佹憚鍏ヨ瘖鏂€佺煡璇嗗簱璇︽儏 `RAG 璇勪及`銆佷笂浼犳不鐞嗘彁绀轰笌鑱氬悎杩愮淮鍛婅锛涜璁′笌瀹炴柦璁板綍瑙?[docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md](docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md) 涓?[docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md](docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md)銆?
-> V1.2锛圓PI `0.1.2-SNAPSHOT` / Web `0.1.2`锛夋墿灞曠湡瀹炴祻瑙堝櫒闂ㄧ锛屾柊澧炴枃妗ｇ储寮曡鎯呫€佺粨鏋勫寲 Chat 閿欒銆佹寔涔呭寲 RAG 璇勪及鐢ㄤ緥/鍘嗗彶銆佹贩鍚堟绱笌 Rerank 鎺у埗銆佸璁″憡璀?Webhook锛屼互鍙婄煡璇嗗簱鍏冩暟鎹?鍒嗗潡蹇収瀵煎嚭鎭㈠锛涘疄鏂借鍒掕 [docs/superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md](docs/superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md)銆?
-> V1.2.1 鏀跺熬灏嗙湡瀹炴祻瑙堝櫒闂ㄧ涓氬姟鏁版嵁闅旂鍒?`e2e` 绉熸埛锛涙垚鍔熻繍琛屼細鍒犻櫎涓存椂鐭ヨ瘑搴撳拰璐﹀彿锛屽け璐ヨ繍琛屼粎淇濈暀 `e2e` 璇佹嵁銆傝璁¤ [docs/superpowers/specs/2026-07-14-v1.2.1-e2e-isolation-cleanup-design.md](docs/superpowers/specs/2026-07-14-v1.2.1-e2e-isolation-cleanup-design.md)銆?
+> V1.1 (API `0.1.1-SNAPSHOT` / Web `0.1.1`) adds the real-browser E2E gate, ingest diagnostics, RAG evaluation, upload-governance guidance, and aggregated operations alerts.
+> V1.2 expands browser coverage with document-index details, structured chat errors, persistent RAG evaluation cases and history, hybrid retrieval and Rerank controls, audit webhooks, and metadata or chunk-snapshot recovery.
+> V1.2.1 isolates real-browser gate data in the `e2e` tenant and removes temporary knowledge bases and accounts after successful runs.
 > V1.5 (RAG Quality Upgrade) adds Parent-Child / QA-assisted indexing, a filterable profile v2 Milvus superset, Combined weighted RRF, revision-bound eval quality gates, and Web readiness/gate comparisons.
 
 浼佷笟绾?RAG 鐭ヨ瘑搴撳紩鎿?鈥?绫讳技 Dify/鎵ｅ瓙搴曞眰鐭ヨ瘑搴撴ā鍧椼€?

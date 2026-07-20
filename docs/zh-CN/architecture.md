@@ -1,4 +1,4 @@
-﻿# 架构概览
+# 架构概览
 
 <!-- language-switch -->
 [English](../en/architecture.md)
@@ -17,7 +17,7 @@ V1.4.2增加了GovernanceOpsService和GET /api/v1/ops/governance-summary作为V1
 
 V1.4.1上传和摄取治理
 
-PostgreSQL同时拥有上传容量和摄取执行状态。‘ upload_quota_reservations ’提供持久的保留字节/文档保留，状态为‘ PENDING ’， ‘ COMMITTED ’和‘ RELEASED ’；活动保留使用是' PENDING ' + ' COMMITTED ', ‘ RELEASED ’保留不包括在内。飞行中的尝试使用‘ attempt_id ’和‘ attempt_expires_at ’租用；旧文件上传协调器使用“FOR UPDATE SKIP LOCKED”来促进持久的文档/作业/发件箱尝试“COMMITTED”，或者在“RELEASED”之前清理部分MinIO/作业/发件箱/文档工作。‘ upload_window_events ’记录滚动窗口的可接受字节；重新尝试释放的等幂键会重新检查保留的配额，但不会对这些滚动窗口字节进行双重收费。可选的“幂等密钥”在租户、用户和知识库中是唯一的；匹配的重播返回原始文档/当前作业，而不同的文件指纹返回409。
+PostgreSQL同时拥有上传容量和摄取执行状态。`upload_quota_reservations`提供持久的保留字节/文档保留，状态为`PENDING`， `COMMITTED`和`RELEASED`；活动保留使用是' PENDING ' + ' COMMITTED ', `RELEASED`保留不包括在内。飞行中的尝试使用`attempt_id`和`attempt_expires_at`租用；旧文件上传协调器使用“FOR UPDATE SKIP LOCKED”来促进持久的文档/作业/发件箱尝试“COMMITTED”，或者在“RELEASED”之前清理部分MinIO/作业/发件箱/文档工作。`upload_window_events`记录滚动窗口的可接受字节；重新尝试释放的等幂键会重新检查保留的配额，但不会对这些滚动窗口字节进行双重收费。可选的“幂等密钥”在租户、用户和知识库中是唯一的；匹配的重播返回原始文档/当前作业，而不同的文件指纹返回409。
 
 摄取传输使用两个Redis列表：
 
@@ -32,13 +32,13 @@ ready list -> atomic move -> processing list
 
 ```
 
-‘ ingest_jobs ’存储‘ execution_id ’、回调序列、索赔所有者、租约到期、开始/完成时间和取消请求时间。Retry将旋转执行ID。API忽略过时的执行id，非递增序列，终端回归和‘ CANCEL_REQUESTED ’之后的非取消回调。‘ GET /api/v1/internal/ingest/jobs/{jobId}/executions/{executionId}/state ’返回‘ status ’、‘ executionCurrent ’、‘ terminal ’、‘ leaseExpired ’和‘ requeueEligible ’，因此Worker reaper只请求符合条件的处理有效负载。排队取消立即变为‘ CANCELLED ’；正在运行的取消仍然是‘ CANCEL_REQUESTED ’，直到工作线程清理和确认。
+`ingest_jobs`存储`execution_id`、回调序列、索赔所有者、租约到期、开始/完成时间和取消请求时间。Retry将旋转执行ID。API忽略过时的执行id，非递增序列，终端回归和`CANCEL_REQUESTED`之后的非取消回调。`GET /api/v1/internal/ingest/jobs/{jobId}/executions/{executionId}/state`返回‘ status ’、‘ executionCurrent ’、‘ terminal ’、‘ leaseExpired ’和‘ requeueEligible ’，因此Worker reaper只请求符合条件的处理有效负载。排队取消立即变为`CANCELLED`；正在运行的取消仍然是`CANCEL_REQUESTED`，直到工作线程清理和确认。
 
-终端‘ FAILED ’和‘ DEAD_LETTER ’转换创建一个重复数据删除的‘ ingest_failure_notifications ’记录，由‘ jobId:executionId:status ’键接；用户取消不会创建失败事件。当配置了‘ INGEST_FAILURE_NOTIFICATION_WEBHOOK_URL ’时，API会调度事件id/key、租户/kb/doc/job/execution/status/stage/error有效负载。由于' PENDING ' / ‘ FAILED ‘行使用有界重试/回退，2xx响应变为’ DELIVERED ‘，并且在尝试限制的行变为’ EXHAUSTED ’。Webhook传递默认为HTTPS-only，阻塞本地/元数据主机，除非‘ INGEST_FAILURE_NOTIFICATION_ALLOW_INSECURE_WEBHOOK=true ’，可以包含‘ X-Dupi-Webhook-Secret ’，并清理/截断错误消息。Web还可以用相同的身份删除终端故障通知。
+终端`FAILED`和`DEAD_LETTER`转换创建一个重复数据删除的`ingest_failure_notifications`记录，由‘ jobId:executionId:status ’键接；用户取消不会创建失败事件。当配置了`INGEST_FAILURE_NOTIFICATION_WEBHOOK_URL`时，API会调度事件id/key、租户/kb/doc/job/execution/status/stage/error有效负载。由于' PENDING ' / ‘ FAILED `行使用有界重试/回退，2xx响应变为` DELIVERED ‘，并且在尝试限制的行变为’ EXHAUSTED ’。Webhook传递默认为HTTPS-only，阻塞本地/元数据主机，除非`INGEST_FAILURE_NOTIFICATION_ALLOW_INSECURE_WEBHOOK=true`，可以包含‘ X-Dupi-Webhook-Secret ’，并清理/截断错误消息。Web还可以用相同的身份删除终端故障通知。
 
-Web不再使用批量上传路由作为其主要工作流。它调度独立的单文件请求，具有并发性3、稳定的等幂键、每个文件错误、retry - after处理、传输中止和重试。重新尝试失败的文件会保留项目批ID，因此重用其稳定的“idempotent - key”；新的批处理生成新的批处理ID。‘ GET /api/v1/upload-quota ’需要‘ DOCUMENT_UPLOAD ’。文档响应包括‘ currentJob ’和序列化的abortcontroller支持的轮询，以防止重叠或过时的更新。
+Web不再使用批量上传路由作为其主要工作流。它调度独立的单文件请求，具有并发性3、稳定的等幂键、每个文件错误、retry - after处理、传输中止和重试。重新尝试失败的文件会保留项目批ID，因此重用其稳定的“idempotent - key”；新的批处理生成新的批处理ID。`GET /api/v1/upload-quota`需要`DOCUMENT_UPLOAD`。文档响应包括‘ currentJob ’和序列化的abortcontroller支持的轮询，以防止重叠或过时的更新。
 
-工作向量突变由每个文档的Redis锁和执行范围的确定性块id来隔离。密集和稀疏清理使用精确的‘ delete_by_ids ’，因此过时的执行不能删除或覆盖新执行的向量；没有‘ executionId ’的遗留消息保留以前的文档范围行为以保持兼容性。
+工作向量突变由每个文档的Redis锁和执行范围的确定性块id来隔离。密集和稀疏清理使用精确的`delete_by_ids`，因此过时的执行不能删除或覆盖新执行的向量；没有‘ executionId ’的遗留消息保留以前的文档范围行为以保持兼容性。
 
 恢复还原写入带有“COMMITTED”配额保留的恢复文档，放弃释放带有“恢复还原已放弃”原因的链接保留，以便恢复的配额可以与正常的上传治理分类账协调。
 
