@@ -1,7 +1,7 @@
 # dupi-RAG
 
 > 账号 / RBAC 与 ops 管理权限更新记录见 [docs/rbac-ops-admin-2026-07-06.md](docs/rbac-ops-admin-2026-07-06.md)；摄入 outbox、删除 tombstone、实例级授权与审计运维增强见 [docs/outbox-tombstone-rbac-ops-2026-07-07.md](docs/outbox-tombstone-rbac-ops-2026-07-07.md)。
-> V1.1（API `0.1.1-SNAPSHOT` / Web `0.1.1`）新增真实浏览器 E2E 门禁、摄入诊断、知识库详情 `RAG 评估`、上传治理提示与聚合运维告警；设计与实施记录见 [docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md](docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md) 与 [docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md](docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md)。
+> V1.1（API `0.1.1-SNAPSHOT` / Web `0.1.1`）新增真实浏览器 E2E 门禁、摄入诊断、知识库详情 `RAG 评估`、上传治理提示与聚合运维告警；设计与实施记录见 local design note 与 local design note。
 
 企业级 RAG 知识库引擎 — 类似 Dify/扣子底层知识库模块。
 
