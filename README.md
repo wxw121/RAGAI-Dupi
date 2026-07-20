@@ -66,7 +66,7 @@ curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/documents \
 curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs/{jobId}/cancel
 ```
 
-See [the V1.4.1 release runbook](docs/v1.4.1-release-runbook.md) and the [design](docs/superpowers/specs/2026-07-18-v1.4.1-upload-governance-design.md). The latest local V1.4.1 release scan records image digest `sha256:eec613fab9cdd1d873b95172f98d42ade5989238e2b0f76761b6b4f63b86515a`, image size 640,389,450 bytes, no Python findings, and 22 accepted upstream-unfixed OS findings expiring 2026-08-15.
+See [the V1.4.1 release runbook](docs/v1.4.1-release-runbook.md) and the local design note. The latest local V1.4.1 release scan records image digest `sha256:eec613fab9cdd1d873b95172f98d42ade5989238e2b0f76761b6b4f63b86515a`, image size 640,389,450 bytes, no Python findings, and 22 accepted upstream-unfixed OS findings expiring 2026-08-15.
 
 > V1.4.0 adds tenant-scoped, checksum-verified knowledge-base archives and idempotent restore into a new hidden knowledge base. It is an application recovery layer, not a replacement for PostgreSQL, MinIO, etcd, or Milvus infrastructure backups.
 
@@ -117,9 +117,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rag-retrieval-benchm
 Worker 使用 CPU-only PyTorch 和 `BAAI/bge-reranker-base`，默认在启动生命周期加载模型并执行预热推理；Compose 通过 `hf_model_cache` 持久化模型缓存。预热失败会在 `/health` 中标记 Rerank 不可用，但不阻断 VECTOR/HYBRID；冷启动延迟不得与热态 P95 混用。
 
 > 账号 / RBAC 与 ops 管理权限更新记录见 [docs/rbac-ops-admin-2026-07-06.md](docs/rbac-ops-admin-2026-07-06.md)；摄入 outbox、删除 tombstone、实例级授权与审计运维增强见 [docs/outbox-tombstone-rbac-ops-2026-07-07.md](docs/outbox-tombstone-rbac-ops-2026-07-07.md)。
-> V1.1（API `0.1.1-SNAPSHOT` / Web `0.1.1`）新增真实浏览器 E2E 门禁、摄入诊断、知识库详情 `RAG 评估`、上传治理提示与聚合运维告警；设计与实施记录见 [docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md](docs/superpowers/specs/2026-07-12-v1.1-observability-evaluation-design.md) 与 [docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md](docs/superpowers/plans/2026-07-12-v1.1-observability-evaluation-implementation.md)。
-> V1.2（API `0.1.2-SNAPSHOT` / Web `0.1.2`）扩展真实浏览器门禁，新增文档索引详情、结构化 Chat 错误、持久化 RAG 评估用例/历史、混合检索与 Rerank 控制、审计告警 Webhook，以及知识库元数据/分块快照导出恢复；实施计划见 [docs/superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md](docs/superpowers/plans/2026-07-12-v1.2-quality-loop-implementation.md)。
-> V1.2.1 收尾将真实浏览器门禁业务数据隔离到 `e2e` 租户；成功运行会删除临时知识库和账号，失败运行仅保留 `e2e` 证据。设计见 [docs/superpowers/specs/2026-07-14-v1.2.1-e2e-isolation-cleanup-design.md](docs/superpowers/specs/2026-07-14-v1.2.1-e2e-isolation-cleanup-design.md)。
+> V1.1（API `0.1.1-SNAPSHOT` / Web `0.1.1`）新增真实浏览器 E2E 门禁、摄入诊断、知识库详情 `RAG 评估`、上传治理提示与聚合运维告警；设计与实施记录见 local design note 与 local design note。
+> V1.2（API `0.1.2-SNAPSHOT` / Web `0.1.2`）扩展真实浏览器门禁，新增文档索引详情、结构化 Chat 错误、持久化 RAG 评估用例/历史、混合检索与 Rerank 控制、审计告警 Webhook，以及知识库元数据/分块快照导出恢复；实施计划见 local design note。
+> V1.2.1 收尾将真实浏览器门禁业务数据隔离到 `e2e` 租户；成功运行会删除临时知识库和账号，失败运行仅保留 `e2e` 证据。设计见 local design note。
 > V1.5 (RAG Quality Upgrade) adds Parent-Child / QA-assisted indexing, a filterable profile v2 Milvus superset, Combined weighted RRF, revision-bound eval quality gates, and Web readiness/gate comparisons.
 
 企业级 RAG 知识库引擎 — 类似 Dify/扣子底层知识库模块。
