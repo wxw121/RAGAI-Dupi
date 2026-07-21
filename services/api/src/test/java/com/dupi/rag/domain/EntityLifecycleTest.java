@@ -1,4 +1,4 @@
-﻿package com.dupi.rag.domain;
+package com.dupi.rag.domain;
 
 import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.AuditLog;

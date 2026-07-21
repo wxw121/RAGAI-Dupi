@@ -1,4 +1,4 @@
-﻿package com.dupi.rag.controller;
+package com.dupi.rag.controller;
 
 import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;

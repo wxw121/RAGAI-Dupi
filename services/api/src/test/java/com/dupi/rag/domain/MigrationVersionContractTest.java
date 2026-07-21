@@ -1,4 +1,4 @@
-﻿package com.dupi.rag.domain;
+package com.dupi.rag.domain;
 
 import org.junit.jupiter.api.Test;
 

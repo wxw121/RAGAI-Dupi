@@ -1,4 +1,4 @@
-﻿package com.dupi.rag.service;
+package com.dupi.rag.service;
 
 import com.dupi.rag.domain.entity.RagEvalCase;
 import com.dupi.rag.domain.entity.RagEvalRun;

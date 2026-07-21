@@ -1,4 +1,4 @@
-﻿package com.dupi.rag.dto;
+package com.dupi.rag.dto;
 
 import com.dupi.rag.domain.enums.RagEvalCaseCategory;
 import com.dupi.rag.domain.enums.RetrievalProfile;

@@ -1,4 +1,4 @@
-﻿package com.dupi.rag.controller;
+package com.dupi.rag.controller;
 
 import com.dupi.rag.dto.*;
 import com.dupi.rag.service.ChatService;

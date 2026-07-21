@@ -1,4 +1,4 @@
-﻿package com.dupi.rag.domain.entity;
+package com.dupi.rag.domain.entity;
 
 import com.dupi.rag.domain.enums.RagEvalCaseCategory;
 import jakarta.persistence.Column;
