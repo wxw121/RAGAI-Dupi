@@ -1,5 +1,6 @@
-package com.dupi.rag.service;
+﻿package com.dupi.rag.service;
 
+import com.dupi.rag.domain.enums.RagEvalCaseCategory;
 import com.dupi.rag.domain.enums.RagEvalComparisonStatus;
 import com.dupi.rag.domain.enums.RagQualityGateStatus;
 import org.junit.jupiter.api.Test;
@@ -118,6 +119,42 @@ class RagQualityGateServiceTest {
 
         assertThat(service.fingerprint(first)).isEqualTo(service.fingerprint(equivalent));
         assertThat(service.fingerprint(first)).isNotEqualTo(service.fingerprint(changedAssertion));
+    }
+
+    @Test
+    void fingerprintsCategoryAndAdditionalSourcesWithoutDependingOnSourceOrder() {
+        var first = new RagQualityGateService.CaseDefinition(
+                "Compare release and recovery", 2, 5, "release.md", List.of("rollback"),
+                RagEvalCaseCategory.MULTI_DOCUMENT, List.of("security.md", "recovery.md"));
+        var equivalent = new RagQualityGateService.CaseDefinition(
+                "Compare release and recovery", 2, 5, "release.md", List.of("rollback"),
+                RagEvalCaseCategory.MULTI_DOCUMENT, List.of("recovery.md", "security.md"));
+        var changedCategory = new RagQualityGateService.CaseDefinition(
+                "Compare release and recovery", 2, 5, "release.md", List.of("rollback"),
+                RagEvalCaseCategory.AMBIGUOUS, List.of("recovery.md", "security.md"));
+        var changedSources = new RagQualityGateService.CaseDefinition(
+                "Compare release and recovery", 2, 5, "release.md", List.of("rollback"),
+                RagEvalCaseCategory.MULTI_DOCUMENT, List.of("recovery.md"));
+
+        assertThat(service.fingerprint(first)).isEqualTo(service.fingerprint(equivalent));
+        assertThat(service.fingerprint(first)).isNotEqualTo(service.fingerprint(changedCategory));
+        assertThat(service.fingerprint(first)).isNotEqualTo(service.fingerprint(changedSources));
+    }
+
+    @Test
+    void fingerprintsV16bSourceUnionWithoutDependingOnPrimarySourceSlotOrDuplicates() {
+        var first = new RagQualityGateService.CaseDefinition(
+                "Compare release and recovery", 2, 5, "release.md", List.of("rollback"),
+                RagEvalCaseCategory.MULTI_DOCUMENT, List.of("recovery.md"));
+        var swappedPrimary = new RagQualityGateService.CaseDefinition(
+                "Compare release and recovery", 2, 5, "recovery.md", List.of("rollback"),
+                RagEvalCaseCategory.MULTI_DOCUMENT, List.of("release.md"));
+        var duplicatePrimary = new RagQualityGateService.CaseDefinition(
+                "Compare release and recovery", 2, 5, "release.md", List.of("rollback"),
+                RagEvalCaseCategory.MULTI_DOCUMENT, List.of("recovery.md", "release.md"));
+
+        assertThat(service.fingerprint(first)).isEqualTo(service.fingerprint(swappedPrimary));
+        assertThat(service.fingerprint(first)).isEqualTo(service.fingerprint(duplicatePrimary));
     }
 
     @Test

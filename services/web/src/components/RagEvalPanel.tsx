@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+﻿import { useEffect, useMemo, useState } from 'react'
 import {
   createRagEvalCase,
   deleteRagEvalCase,
@@ -16,9 +16,11 @@ import { Badge } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import type {
   RagEvalCase,
+  RagEvalCaseCategory,
   RagEvalCaseRequest,
   RagEvalGateDecision,
   RagEvalRun,
+  RagEvalRunRequest,
   RagQualityPolicy,
   RetrievalIndexMode,
 } from '@/types'
@@ -35,6 +37,13 @@ const RETRIEVAL_PROFILE_OPTIONS: Array<{ value: RetrievalIndexMode; label: strin
   { value: 'COMBINED', label: 'combined' },
 ]
 
+const CASE_CATEGORY_OPTIONS: Array<{ value: RagEvalCaseCategory; label: string }> = [
+  { value: 'REAL_QUERY', label: '真实查询' },
+  { value: 'HARD_NEGATIVE', label: '困难负样本' },
+  { value: 'MULTI_DOCUMENT', label: '多文档' },
+  { value: 'AMBIGUOUS', label: '歧义问题' },
+]
+
 const formatPercent = (value: number | null | undefined) => `${((value ?? 0) * 100).toFixed(1)}%`
 const formatDelta = (value: number | null | undefined) => `${(value ?? 0) >= 0 ? '+' : ''}${formatPercent(value)}`
 
@@ -43,7 +52,9 @@ const EMPTY_FORM: RagEvalCaseRequest = {
   query: '',
   minHits: 1,
   topK: 5,
+  category: 'REAL_QUERY',
   expectedFileName: '',
+  expectedFileNames: [],
   mustContainAny: [],
 }
 
@@ -57,6 +68,11 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
   const [running, setRunning] = useState(false)
   const [useRerank, setUseRerank] = useState(false)
   const [selectedProfiles, setSelectedProfiles] = useState<RetrievalIndexMode[]>(['CLASSIC'])
+  const [experimentLabel, setExperimentLabel] = useState('')
+  const [topKOverride, setTopKOverride] = useState('')
+  const [diagnosticCategory, setDiagnosticCategory] = useState<'ALL' | RagEvalCaseCategory>('ALL')
+  const [diagnosticStatus, setDiagnosticStatus] = useState<'ALL' | 'PASS' | 'FAIL'>('ALL')
+  const [diagnosticFailureCategory, setDiagnosticFailureCategory] = useState('ALL')
   const [policy, setPolicy] = useState<RagQualityPolicy | null>(null)
   const { showError, showSuccess } = useToast()
 
@@ -83,6 +99,64 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
 
   const latestRun = runs[0]
   const latestResults = latestRun?.results ?? []
+  const latestMetrics = latestRun?.metrics
+  const releaseGate = latestMetrics?.releaseGate
+  const categorySummaryEntries = Object.entries(latestMetrics?.categorySummaries ?? {})
+  const profileComparisonEntries = Object.entries(latestMetrics?.profileComparisons ?? {})
+  const qualitySystemCards = [
+    latestMetrics?.releaseReadiness && {
+      title: 'Release readiness',
+      version: latestMetrics.releaseReadiness.version ?? 'V1.9',
+      value: latestMetrics.releaseReadiness.status ?? 'UNKNOWN',
+      detail: `Score ${(latestMetrics.releaseReadiness.readinessScore ?? 0).toFixed(1)} · Blockers ${latestMetrics.releaseReadiness.blockerCount ?? 0}`,
+    },
+    latestMetrics?.realQueryFeedback && {
+      title: 'Real query feedback',
+      version: latestMetrics.realQueryFeedback.version ?? 'V2.0',
+      value: `${latestMetrics.realQueryFeedback.candidateCount ?? 0} candidates`,
+      detail: latestMetrics.realQueryFeedback.source ?? 'rag_eval_failures_and_degraded_signals',
+    },
+    latestMetrics?.experimentMatrix && {
+      title: 'Experiment matrix',
+      version: latestMetrics.experimentMatrix.version ?? 'V2.1',
+      value: `${latestMetrics.experimentMatrix.evaluationCount ?? 0} evals`,
+      detail: `TopK ${(latestMetrics.experimentMatrix.topKValues ?? []).join(', ') || '-'} · Profiles ${(latestMetrics.experimentMatrix.profiles ?? []).join(', ') || '-'}`,
+    },
+    latestMetrics?.answerQuality && {
+      title: 'Answer quality',
+      version: latestMetrics.answerQuality.version ?? 'V2.2',
+      value: formatPercent(latestMetrics.answerQuality.groundedPassRate),
+      detail: `Citation ${latestMetrics.answerQuality.citationPassedCount ?? 0}/${latestMetrics.answerQuality.citationEligibleCount ?? 0} · Risk ${latestMetrics.answerQuality.hallucinationRiskCount ?? 0}`,
+    },
+    latestMetrics?.onlineObservability && {
+      title: 'Online observability',
+      version: latestMetrics.onlineObservability.version ?? 'V2.3',
+      value: `${latestMetrics.onlineObservability.fallbackCount ?? 0} fallback`,
+      detail: `Fallback ${formatPercent(latestMetrics.onlineObservability.fallbackRate)} · P95 ${latestMetrics.onlineObservability.latencyP95Ms ?? 0} ms`,
+    },
+    latestMetrics?.dataIndexGovernance && {
+      title: 'Data/index governance',
+      version: latestMetrics.dataIndexGovernance.version ?? 'V2.4',
+      value: formatPercent(latestMetrics.dataIndexGovernance.expectedSourceCoverageRate),
+      detail: `Sources ${latestMetrics.dataIndexGovernance.matchedExpectedSourceCount ?? 0}/${latestMetrics.dataIndexGovernance.expectedSourceCount ?? 0} · Missing ${latestMetrics.dataIndexGovernance.missingSourceCount ?? 0}`,
+    },
+  ].filter((card): card is { title: string; version: string; value: string; detail: string } => Boolean(card))
+  const failureCategoryOptions = useMemo(
+    () => Array.from(new Set(latestResults.flatMap((result) => result.failureCategories ?? []))).sort(),
+    [latestResults],
+  )
+  const filteredResults = useMemo(
+    () => latestResults.filter((result) => {
+      if (diagnosticCategory !== 'ALL' && (result.category ?? 'REAL_QUERY') !== diagnosticCategory) return false
+      if (diagnosticStatus === 'PASS' && !result.passed) return false
+      if (diagnosticStatus === 'FAIL' && result.passed) return false
+      if (diagnosticFailureCategory !== 'ALL' && !(result.failureCategories ?? []).includes(diagnosticFailureCategory)) {
+        return false
+      }
+      return true
+    }),
+    [diagnosticCategory, diagnosticFailureCategory, diagnosticStatus, latestResults],
+  )
   const latestGateDecisions = Object.entries(latestRun?.gateSummary ?? {})
     .filter((entry): entry is [string, RagEvalGateDecision] => Boolean(entry[1]))
   const canSave = form.caseKey.trim().length > 0 && form.query.trim().length > 0
@@ -106,10 +180,18 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
     })
   }
 
-  const evalRunRequest = () => {
-    const base = { useRerank }
-    if (selectedProfiles.length === 1 && selectedProfiles[0] === 'CLASSIC') return base
-    return { ...base, profiles: selectedProfiles }
+  const evalRunRequest = (): RagEvalRunRequest => {
+    const request: RagEvalRunRequest = { useRerank }
+    if (!(selectedProfiles.length === 1 && selectedProfiles[0] === 'CLASSIC')) {
+      request.profiles = selectedProfiles
+    }
+    const label = experimentLabel.trim()
+    if (label) request.experimentLabel = label
+    const topKValue = Number(topKOverride)
+    if (topKOverride.trim() && Number.isFinite(topKValue)) {
+      request.topKOverride = Math.min(50, Math.max(1, Math.trunc(topKValue)))
+    }
+    return request
   }
 
   const resetForm = () => {
@@ -124,7 +206,9 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
       query: caseDef.query,
       minHits: caseDef.minHits,
       topK: caseDef.topK ?? 5,
+      category: caseDef.category ?? 'REAL_QUERY',
       expectedFileName: caseDef.expectedFileName ?? '',
+      expectedFileNames: caseDef.expectedFileNames ?? [],
       mustContainAny: caseDef.mustContainAny ?? [],
     })
   }
@@ -137,7 +221,9 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
       query: form.query.trim(),
       minHits: Math.max(0, Number(form.minHits) || 0),
       topK: Math.max(1, Number(form.topK) || 5),
+      category: form.category ?? 'REAL_QUERY',
       expectedFileName: form.expectedFileName?.trim() || undefined,
+      expectedFileNames: (form.expectedFileNames ?? []).map((fileName) => fileName.trim()).filter(Boolean),
       mustContainAny: (form.mustContainAny ?? []).map((token) => token.trim()).filter(Boolean),
     }
     try {
@@ -239,6 +325,25 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
               </label>
             ))}
           </div>
+          <Input
+            name="experimentLabel"
+            value={experimentLabel}
+            onChange={(event) => setExperimentLabel(event.target.value)}
+            placeholder="Experiment label"
+            aria-label="Experiment label"
+            className="w-44"
+          />
+          <Input
+            name="topKOverride"
+            type="number"
+            min={1}
+            max={50}
+            value={topKOverride}
+            onChange={(event) => setTopKOverride(event.target.value)}
+            placeholder="TopK override"
+            aria-label="TopK override"
+            className="w-32"
+          />
           <Button aria-label="Run RAG eval" onClick={run} disabled={running || loading || cases.length === 0}>
             {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
             运行评估
@@ -280,6 +385,88 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
         </section>
       )}
 
+      {(releaseGate || qualitySystemCards.length > 0 || categorySummaryEntries.length > 0 || profileComparisonEntries.length > 0) && (
+        <section className="border-y border-border py-4">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold">Quality dashboard</h3>
+            {latestRun?.profileSnapshot?.experimentLabel && (
+              <Badge variant="muted">Experiment {latestRun.profileSnapshot.experimentLabel}</Badge>
+            )}
+          </div>
+          {qualitySystemCards.length > 0 && (
+            <div className="mb-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+              {qualitySystemCards.map((card) => (
+                <div key={card.title} className="rounded border border-border p-3 text-xs">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="font-semibold">{card.title}</span>
+                    <Badge variant="muted">{card.version}</Badge>
+                  </div>
+                  <p className="text-sm font-semibold">{card.value}</p>
+                  <p className="mt-1 text-muted-foreground">{card.detail}</p>
+                </div>
+              ))}
+            </div>
+          )}
+          {releaseGate && (
+            <div className="mb-4 rounded border border-border p-3 text-xs">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="font-semibold">Release gate rollup</span>
+                <Badge variant={releaseGate.status === 'PASS' ? 'success' : 'error'}>{releaseGate.status ?? 'UNKNOWN'}</Badge>
+                <span>Pass {releaseGate.passed ?? latestRun?.passedCount ?? 0}/{releaseGate.total ?? latestRun?.totalCount ?? 0}</span>
+                <span>{formatPercent(releaseGate.passRate)}</span>
+              </div>
+              <p className="mt-2 text-muted-foreground">
+                Category blockers {(releaseGate.categoryBlockers ?? []).join(', ') || '-'} · Profile blockers {(releaseGate.profileGateBlockers ?? []).join(', ') || '-'}
+              </p>
+            </div>
+          )}
+          {categorySummaryEntries.length > 0 && (
+            <div className="mb-4">
+              <h4 className="mb-2 text-xs font-semibold uppercase text-muted-foreground">Category summaries / trend</h4>
+              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                {categorySummaryEntries.map(([category, summary]) => (
+                  <div key={category} className="rounded border border-border p-3 text-xs">
+                    <p className="font-mono font-semibold">{category}</p>
+                    <p className="mt-1">Pass {summary.passed ?? 0}/{summary.total ?? 0} ({formatPercent(summary.passRate)})</p>
+                    <p className="text-muted-foreground">Hit {formatPercent(summary.hitPassRate ?? summary.hitRate)} · Citation {formatPercent(summary.citationPassRate ?? summary.citationRate)}</p>
+                    <p className="text-muted-foreground">Trend {runs.slice(0, 5).map((run) => {
+                      const item = run.metrics?.categorySummaries?.[category]
+                      return item ? `${item.passed ?? 0}/${item.total ?? 0}` : '-'
+                    }).join(' → ')}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {profileComparisonEntries.length > 0 && (
+            <div className="overflow-x-auto rounded border border-border">
+              <table className="w-full text-xs">
+                <thead className="border-b bg-muted/50 text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Profile A/B comparison</th>
+                    <th className="px-3 py-2 text-left">Pass delta</th>
+                    <th className="px-3 py-2 text-left">Hit delta</th>
+                    <th className="px-3 py-2 text-left">Citation delta</th>
+                    <th className="px-3 py-2 text-left">P95 delta</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {profileComparisonEntries.map(([profile, comparison]) => (
+                    <tr key={profile} className="border-b last:border-0">
+                      <td className="px-3 py-2 font-mono">{comparison.candidate ?? profile} vs {comparison.baseline ?? 'classic'}</td>
+                      <td className="px-3 py-2">{formatDelta(comparison.passRateDelta)}</td>
+                      <td className="px-3 py-2">{formatDelta(comparison.hitRateDelta)}</td>
+                      <td className="px-3 py-2">{formatDelta(comparison.citationRateDelta)}</td>
+                      <td className="px-3 py-2">{comparison.latencyP95MsDelta ?? 0} ms</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
       <section className="border-y border-border py-5">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div>
@@ -289,7 +476,7 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
           <Badge variant="muted">{cases.length} 条</Badge>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-8">
           <Input
             name="caseKey"
             value={form.caseKey}
@@ -305,12 +492,30 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
             aria-label="检索问题"
             className="md:col-span-2"
           />
+          <select
+            name="category"
+            value={form.category ?? 'REAL_QUERY'}
+            onChange={(event) => updateForm('category', event.target.value as RagEvalCaseCategory)}
+            aria-label="场景分类"
+            className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground"
+          >
+            {CASE_CATEGORY_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
           <Input
             name="expectedFileName"
             value={form.expectedFileName ?? ''}
             onChange={(event) => updateForm('expectedFileName', event.target.value)}
             placeholder="期望文件"
             aria-label="期望文件"
+          />
+          <Input
+            name="expectedFileNames"
+            value={(form.expectedFileNames ?? []).join(', ')}
+            onChange={(event) => updateForm('expectedFileNames', event.target.value.split(','))}
+            placeholder="附加来源，逗号分隔"
+            aria-label="附加期望文件"
           />
           <Input
             name="mustContainAny"
@@ -370,12 +575,15 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
               ) : cases.map((caseDef) => (
                 <tr key={caseDef.id} className="border-b last:border-0">
                   <td className="px-3 py-3">
-                    <p className="font-mono text-xs font-semibold">{caseDef.caseKey ?? caseDef.id}</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-mono text-xs font-semibold">{caseDef.caseKey ?? caseDef.id}</p>
+                      <Badge variant="muted">{caseDef.category ?? 'REAL_QUERY'}</Badge>
+                    </div>
                     <p className="mt-1 max-w-xl text-xs text-muted-foreground">{caseDef.query}</p>
                   </td>
                   <td className="px-3 py-3 text-xs text-muted-foreground">
                     <p>命中 ≥ {caseDef.minHits} · TopK {caseDef.topK ?? 5}</p>
-                    <p className="mt-1">文件 {caseDef.expectedFileName || '-'} · 关键词 {(caseDef.mustContainAny ?? []).join(', ') || '-'}</p>
+                    <p className="mt-1">文件 {[caseDef.expectedFileName, ...(caseDef.expectedFileNames ?? [])].filter(Boolean).join(', ') || '-'} · 关键词 {(caseDef.mustContainAny ?? []).join(', ') || '-'}</p>
                   </td>
                   <td className="px-3 py-3">
                     <div className="flex justify-end gap-1">
@@ -403,7 +611,10 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
           <p className="border-y border-border py-8 text-center text-sm text-muted-foreground">尚未运行评估</p>
         ) : (
           <div className="flex gap-2 overflow-x-auto pb-2">
-            {runSummary.map((item) => (
+            {runSummary.map((item) => {
+              const failureCategoryEntries = Object.entries(item.metrics?.failureCategoryCounts ?? {})
+                .filter(([, count]) => Number(count) > 0)
+              return (
               <div key={item.id} className="min-w-52 rounded border border-border px-3 py-2 text-xs">
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <Badge variant={item.gateStatus === 'PASS' ? 'success' : item.gateStatus === 'WARN' || item.gateStatus === 'UNBASELINED' ? 'warning' : 'error'}>{item.gateStatus ?? 'NO GATE'}</Badge>
@@ -417,12 +628,66 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
                   </Badge>
                 </div>
                 <p className="mt-2 text-muted-foreground">{item.useRerank ? 'Rerank 已启用' : 'Rerank 未启用'}</p>
+                {failureCategoryEntries.length > 0 && (
+                  <div className="mt-2 rounded bg-muted/50 px-2 py-1">
+                    <p className="font-semibold text-foreground">失败分类</p>
+                    <div className="mt-1 space-y-1 text-muted-foreground">
+                      {failureCategoryEntries.map(([category, count]) => (
+                        <p key={category} className="font-mono">{category} {count}</p>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {item.failureMessage && <p className="mt-1 text-destructive">{item.failureMessage}</p>}
                 <p className="mt-1 text-muted-foreground">{new Date(item.createdAt).toLocaleString()}</p>
               </div>
-            ))}
+            )})}
           </div>
         )}
+      </section>
+
+      <section className="rounded-lg border border-border p-3">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <h3 className="text-sm font-semibold">Diagnostic drilldown</h3>
+          <span className="text-xs text-muted-foreground">Showing {filteredResults.length}/{latestResults.length} results</span>
+        </div>
+        <div className="grid gap-2 md:grid-cols-3">
+          <select
+            name="diagnosticCategory"
+            value={diagnosticCategory}
+            onChange={(event) => setDiagnosticCategory(event.target.value as 'ALL' | RagEvalCaseCategory)}
+            aria-label="Diagnostic category"
+            className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground"
+          >
+            <option value="ALL">All categories</option>
+            {CASE_CATEGORY_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.value}</option>
+            ))}
+          </select>
+          <select
+            name="diagnosticStatus"
+            value={diagnosticStatus}
+            onChange={(event) => setDiagnosticStatus(event.target.value as 'ALL' | 'PASS' | 'FAIL')}
+            aria-label="Diagnostic status"
+            className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground"
+          >
+            <option value="ALL">All statuses</option>
+            <option value="PASS">PASS</option>
+            <option value="FAIL">FAIL</option>
+          </select>
+          <select
+            name="diagnosticFailureCategory"
+            value={diagnosticFailureCategory}
+            onChange={(event) => setDiagnosticFailureCategory(event.target.value)}
+            aria-label="Diagnostic failure category"
+            className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground"
+          >
+            <option value="ALL">All failure categories</option>
+            {failureCategoryOptions.map((category) => (
+              <option key={category} value={category}>{category}</option>
+            ))}
+          </select>
+        </div>
       </section>
 
       <div className="overflow-x-auto rounded-lg border border-border bg-background">
@@ -439,12 +704,15 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
             </tr>
           </thead>
           <tbody>
-            {latestResults.length === 0 ? (
+            {filteredResults.length === 0 ? (
               <tr><td colSpan={7} className="px-4 py-10 text-center text-muted-foreground">最新运行暂无结果</td></tr>
-            ) : latestResults.map((result) => (
+            ) : filteredResults.map((result) => (
               <tr key={result.id} className="border-b last:border-0">
                 <td className="px-4 py-3">
-                  <p className="font-mono text-xs">{result.caseKey ?? result.caseId ?? result.id}</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-mono text-xs">{result.caseKey ?? result.caseId ?? result.id}</p>
+                    <Badge variant="muted">{result.category ?? 'REAL_QUERY'}</Badge>
+                  </div>
                   <p className="mt-1 max-w-xs text-xs text-muted-foreground">{result.query}</p>
                 </td>
                 <td className="px-4 py-3">
@@ -455,8 +723,10 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
                 </td>
                 <td className="px-4 py-3 text-muted-foreground">{result.hitCount}</td>
                 <td className="px-4 py-3">
-                  <p className="font-mono text-xs">{result.matchedFileName ?? '-'}</p>
-                  {result.expectedFileName && <p className="mt-1 text-xs text-muted-foreground">期望 {result.expectedFileName}</p>}
+                  <p className="font-mono text-xs">{(result.matchedFileNames ?? []).join(', ') || result.matchedFileName || '-'}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    期望 {[result.expectedFileName, ...(result.expectedFileNames ?? [])].filter(Boolean).join(', ') || '-'}
+                  </p>
                 </td>
                 <td className="px-4 py-3 text-muted-foreground">{result.matchedToken ?? '-'}</td>
                 <td className="px-4 py-3">

@@ -1,4 +1,4 @@
-package com.dupi.rag.service;
+﻿package com.dupi.rag.service;
 
 import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;
@@ -132,7 +132,9 @@ public class KnowledgeBaseExportService {
                 .query(evalCase.getQuery())
                 .minHits(evalCase.getMinHits())
                 .topK(evalCase.getTopK())
+                .category(evalCase.getCategory())
                 .expectedFileName(evalCase.getExpectedFileName())
+                .expectedFileNames(evalCase.getExpectedFileNames())
                 .mustContainAny(evalCase.getMustContainAny())
                 .createdAt(evalCase.getCreatedAt())
                 .updatedAt(evalCase.getUpdatedAt())

@@ -1,4 +1,4 @@
-export type RetrievalIndexMode = 'CLASSIC' | 'PARENT_CHILD' | 'QA_ASSISTED' | 'COMBINED'
+﻿export type RetrievalIndexMode = 'CLASSIC' | 'PARENT_CHILD' | 'QA_ASSISTED' | 'COMBINED'
 
 export type RagEvalProfileGateStatus =
   | 'PASSED'
@@ -298,6 +298,8 @@ export interface RetrieveResponse {
   diagnostics?: RetrievalDiagnostics | null
 }
 
+export type RagEvalCaseCategory = 'REAL_QUERY' | 'HARD_NEGATIVE' | 'MULTI_DOCUMENT' | 'AMBIGUOUS'
+
 export interface RagEvalCase {
   id: string
   kbId?: string
@@ -305,7 +307,9 @@ export interface RagEvalCase {
   query: string
   minHits: number
   topK?: number
+  category?: RagEvalCaseCategory
   expectedFileName?: string
+  expectedFileNames?: string[]
   mustContainAny?: string[]
   createdAt?: string
   updatedAt?: string
@@ -316,7 +320,9 @@ export interface RagEvalCaseRequest {
   query: string
   minHits: number
   topK?: number
+  category?: RagEvalCaseCategory
   expectedFileName?: string
+  expectedFileNames?: string[]
   mustContainAny?: string[]
 }
 
@@ -327,12 +333,16 @@ export interface RagEvalResult {
   query: string
   passed: boolean
   failureReasons: string[]
+  failureCategories?: string[]
   hitPassed?: boolean
   citationEligible?: boolean
   citationPassed?: boolean
   hitCount: number
+  category?: RagEvalCaseCategory
   expectedFileName: string | null
+  expectedFileNames?: string[]
   matchedFileName: string | null
+  matchedFileNames?: string[]
   matchedToken: string | null
   retrievalMode: string | null
   retrievalProfile?: RetrievalIndexMode | null
@@ -340,6 +350,118 @@ export interface RagEvalResult {
   embeddingModel: string | null
   embeddingDimension: number | null
   topK: number | null
+}
+
+export interface RagEvalMetrics {
+  passRate?: number
+  eligibleExpectedFileHitRate?: number
+  eligibleKeywordHitRate?: number
+  averageHitCount?: number
+  fallbackCount?: number
+  latencyP50Ms?: number
+  latencyP95Ms?: number
+  failureCategoryCounts?: Record<string, number>
+  categorySummaries?: Record<string, RagEvalSummaryMetrics>
+  profileSummaries?: Record<string, RagEvalSummaryMetrics>
+  profileComparisons?: Record<string, RagEvalProfileComparison>
+  releaseGate?: RagEvalReleaseGate
+  releaseReadiness?: RagEvalReleaseReadiness
+  realQueryFeedback?: RagEvalRealQueryFeedback
+  experimentMatrix?: RagEvalExperimentMatrix
+  answerQuality?: RagEvalAnswerQuality
+  onlineObservability?: RagEvalOnlineObservability
+  dataIndexGovernance?: RagEvalDataIndexGovernance
+  [key: string]: unknown
+}
+
+export interface RagEvalSummaryMetrics {
+  total?: number
+  passed?: number
+  passRate?: number
+  hitPassRate?: number
+  hitRate?: number
+  citationPassRate?: number
+  citationRate?: number
+  avgHitCount?: number
+  latencyP50Ms?: number
+  latencyP95Ms?: number
+  fallbackCount?: number
+  failureCategoryCounts?: Record<string, number>
+}
+
+export interface RagEvalProfileComparison {
+  baseline?: string
+  candidate?: string
+  passRateDelta?: number
+  hitRateDelta?: number
+  citationRateDelta?: number
+  latencyP95MsDelta?: number
+  fallbackCountDelta?: number
+}
+
+export interface RagEvalReleaseGate {
+  status?: string
+  passRate?: number
+  passed?: number
+  total?: number
+  failureCategoryCounts?: Record<string, number>
+  categoryBlockers?: string[]
+  profileGateBlockers?: string[]
+}
+
+export interface RagEvalReleaseReadiness {
+  version?: string
+  status?: string
+  readinessScore?: number
+  blockerCount?: number
+  requiredEvidence?: string[]
+}
+
+export interface RagEvalRealQueryFeedback {
+  version?: string
+  source?: string
+  candidateCount?: number
+  candidates?: Array<Record<string, unknown>>
+}
+
+export interface RagEvalExperimentMatrix {
+  version?: string
+  topKValues?: number[]
+  profiles?: string[]
+  retrievalModes?: string[]
+  evaluationCount?: number
+}
+
+export interface RagEvalAnswerQuality {
+  version?: string
+  citationEligibleCount?: number
+  citationPassedCount?: number
+  groundedPassRate?: number
+  hallucinationRiskCount?: number
+}
+
+export interface RagEvalOnlineObservability {
+  version?: string
+  fallbackCount?: number
+  fallbackRate?: number
+  noAnswerCorrectnessRate?: number
+  latencyP95Ms?: number
+}
+
+export interface RagEvalDataIndexGovernance {
+  version?: string
+  expectedSourceCount?: number
+  matchedExpectedSourceCount?: number
+  expectedSourceCoverageRate?: number
+  missingSourceCount?: number
+}
+
+export interface RagEvalRunProfileSnapshot {
+  experimentLabel?: string
+  topKOverride?: number
+  useRerank?: boolean
+  profiles?: string[]
+  [key: string]: unknown
 }
 
 export interface RagEvalRun {
@@ -356,7 +478,8 @@ export interface RagEvalRun {
   createdAt: string
   results: RagEvalResult[]
   gateStatus?: 'PASS' | 'WARN' | 'BLOCKED' | 'UNBASELINED'
-  metrics?: Record<string, number>
+  metrics?: RagEvalMetrics
+  profileSnapshot?: RagEvalRunProfileSnapshot
   baselineRunId?: string | null
 }
 
@@ -377,6 +500,8 @@ export interface RagEvalRunRequest {
   useRerank?: boolean
   profileId?: string
   profiles?: RetrievalIndexMode[]
+  topKOverride?: number
+  experimentLabel?: string
 }
 
 export interface RagQualityPolicy {
@@ -491,7 +616,9 @@ export interface RagEvalCaseSnapshot {
   query: string
   minHits: number
   topK: number
+  category?: RagEvalCaseCategory
   expectedFileName: string | null
+  expectedFileNames?: string[]
   mustContainAny: string[]
   createdAt: string
   updatedAt: string

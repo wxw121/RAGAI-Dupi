@@ -1,4 +1,4 @@
-import { act } from 'react'
+﻿import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RagEvalPanel } from './RagEvalPanel'
@@ -50,7 +50,9 @@ describe('RagEvalPanel', () => {
         query: 'What formats are supported?',
         minHits: 1,
         topK: 5,
+        category: 'MULTI_DOCUMENT',
         expectedFileName: 'sample.md',
+        expectedFileNames: ['operations.md'],
         mustContainAny: ['PDF'],
       },
     ])
@@ -64,6 +66,77 @@ describe('RagEvalPanel', () => {
         status: 'COMPLETED',
         failureMessage: null,
         createdAt: '2026-07-12T00:00:00Z',
+        metrics: {
+          failureCategoryCounts: {
+            UNEXPECTED_EVIDENCE: 2,
+            MISSING_EXPECTED_FILE: 1,
+          },
+          categorySummaries: {
+            MULTI_DOCUMENT: {
+              totalCases: 1,
+              passedCount: 1,
+              passRate: 1,
+              hitPassRate: 1,
+              citationPassRate: 1,
+              latencyP95Ms: 12,
+              failureCategoryCounts: { MISSING_EXPECTED_FILE: 1 },
+            },
+          },
+          profileComparisons: {
+            PARENT_CHILD: {
+              baseline: 'CLASSIC',
+              candidate: 'PARENT_CHILD',
+              passRateDelta: -0.1,
+              hitPassRateDelta: -0.2,
+              citationPassRateDelta: -0.3,
+              latencyP95DeltaMs: 5,
+            },
+          },
+          releaseGate: {
+            status: 'BLOCKED',
+            blockers: ['MISSING_EXPECTED_FILE'],
+            passRate: 0.5,
+          },
+          releaseReadiness: {
+            version: 'V1.9',
+            status: 'BLOCKED',
+            readinessScore: 48,
+            blockerCount: 2,
+            requiredEvidence: ['categorySummaries', 'releaseGate'],
+          },
+          realQueryFeedback: {
+            version: 'V2.0',
+            candidateCount: 3,
+            source: 'rag_eval_failures_and_degraded_signals',
+          },
+          experimentMatrix: {
+            version: 'V2.1',
+            topKValues: [8],
+            profiles: ['classic', 'parent-child'],
+            retrievalModes: ['hybrid'],
+            evaluationCount: 8,
+          },
+          answerQuality: {
+            version: 'V2.2',
+            citationEligibleCount: 4,
+            citationPassedCount: 2,
+            groundedPassRate: 0.5,
+            hallucinationRiskCount: 2,
+          },
+          onlineObservability: {
+            version: 'V2.3',
+            fallbackCount: 1,
+            fallbackRate: 0.125,
+            latencyP95Ms: 120,
+          },
+          dataIndexGovernance: {
+            version: 'V2.4',
+            expectedSourceCount: 4,
+            matchedExpectedSourceCount: 2,
+            expectedSourceCoverageRate: 0.5,
+            missingSourceCount: 2,
+          },
+        },
         results: [
           {
             id: 'result-1',
@@ -72,9 +145,13 @@ describe('RagEvalPanel', () => {
             query: 'What formats are supported?',
             passed: true,
             failureReasons: [],
+            failureCategories: [],
             hitCount: 2,
+            category: 'MULTI_DOCUMENT',
             expectedFileName: 'sample.md',
+            expectedFileNames: ['operations.md'],
             matchedFileName: 'sample.md',
+            matchedFileNames: ['sample.md', 'operations.md'],
             matchedToken: 'PDF',
             retrievalMode: 'HYBRID',
             fallbackReason: null,
@@ -109,17 +186,35 @@ describe('RagEvalPanel', () => {
     expect(api.listRagEvalCases).toHaveBeenCalledWith('kb-1')
     expect(api.listRagEvalRuns).toHaveBeenCalledWith('kb-1')
     expect(container.textContent).toContain('case-1')
+    expect(container.textContent).toContain('MULTI_DOCUMENT')
     expect(container.textContent).toContain('sample.md')
+    expect(container.textContent).toContain('operations.md')
     expect(container.textContent).toContain('1/1')
     expect(container.textContent).toContain('已完成')
     expect(container.textContent).toContain('HYBRID')
+    expect(container.textContent).toContain('失败分类')
+    expect(container.textContent).toContain('UNEXPECTED_EVIDENCE 2')
+    expect(container.textContent).toContain('MISSING_EXPECTED_FILE 1')
+    expect(container.textContent).toContain('Quality dashboard')
+    expect(container.textContent).toContain('Release gate rollup')
+    expect(container.textContent).toContain('Category summaries / trend')
+    expect(container.textContent).toContain('Profile A/B comparison')
+    expect(container.textContent).toContain('MISSING_EXPECTED_FILE')
+    expect(container.textContent).toContain('Release readiness')
+    expect(container.textContent).toContain('Real query feedback')
+    expect(container.textContent).toContain('Experiment matrix')
+    expect(container.textContent).toContain('Answer quality')
+    expect(container.textContent).toContain('Online observability')
+    expect(container.textContent).toContain('Data/index governance')
 
     await act(async () => {
       setInput('caseKey', 'new-case')
       setInput('query', 'New eval query')
       setInput('minHits', '2')
       setInput('topK', '3')
+      setSelect('category', 'AMBIGUOUS')
       setInput('expectedFileName', 'doc.md')
+      setInput('expectedFileNames', 'current.md, legacy.md')
       setInput('mustContainAny', 'alpha, beta')
     })
 
@@ -133,16 +228,24 @@ describe('RagEvalPanel', () => {
       query: 'New eval query',
       minHits: 2,
       topK: 3,
+      category: 'AMBIGUOUS',
       expectedFileName: 'doc.md',
+      expectedFileNames: ['current.md', 'legacy.md'],
       mustContainAny: ['alpha', 'beta'],
     })
 
     await act(async () => {
+      setInput('experimentLabel', 'topk sweep')
+      setInput('topKOverride', '8')
       checkbox('useRerank').click()
       button('运行评估')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
       await Promise.resolve()
     })
-    expect(api.runRagEval).toHaveBeenCalledWith('kb-1', { useRerank: true })
+    expect(api.runRagEval).toHaveBeenCalledWith('kb-1', {
+      useRerank: true,
+      experimentLabel: 'topk sweep',
+      topKOverride: 8,
+    })
 
     await act(async () => {
       container
@@ -286,6 +389,14 @@ describe('RagEvalPanel', () => {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
     setter?.call(field, value)
     field.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+
+  function setSelect(name: string, value: string) {
+    const field = container?.querySelector<HTMLSelectElement>(`select[name="${name}"]`)
+    if (!field) throw new Error(`Missing select ${name}`)
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set
+    setter?.call(field, value)
+    field.dispatchEvent(new Event('change', { bubbles: true }))
   }
 
   function button(label: string): HTMLButtonElement | undefined {

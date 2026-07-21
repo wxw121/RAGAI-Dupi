@@ -1,9 +1,10 @@
-package com.dupi.rag.service;
+﻿package com.dupi.rag.service;
 
 import com.dupi.rag.domain.entity.RagEvalCase;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.entity.RagEvalRunResult;
 import com.dupi.rag.domain.entity.RagQualityPolicy;
+import com.dupi.rag.domain.enums.RagEvalCaseCategory;
 import com.dupi.rag.domain.enums.RagEvalGateStatus;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
 import com.dupi.rag.domain.enums.RagQualityGateStatus;
@@ -11,6 +12,7 @@ import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.RagEvalGateDecisionResponse;
 import com.dupi.rag.dto.RagEvalProfileMetricsResponse;
 import com.dupi.rag.dto.RagEvalCaseRequest;
+import com.dupi.rag.dto.RagEvalRunRequest;
 import com.dupi.rag.dto.RagQualityPolicyResponse;
 import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
@@ -37,6 +39,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.entry;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -262,9 +265,11 @@ class RagEvalServiceTest {
         RagEvalCaseRequest request = new RagEvalCaseRequest();
         request.setCaseKey("install");
         request.setQuery("How to install?");
-        request.setMinHits(1);
+        request.setMinHits(2);
         request.setTopK(3);
+        request.setCategory(RagEvalCaseCategory.MULTI_DOCUMENT);
         request.setExpectedFileName("guide.md");
+        request.setExpectedFileNames(List.of("operations.md"));
         request.setMustContainAny(List.of("install", "setup"));
 
         var created = service().createCase(kbId, request);
@@ -274,6 +279,8 @@ class RagEvalServiceTest {
         service().deleteCase(kbId, caseId);
 
         assertThat(created.getId()).isEqualTo(caseId);
+        assertThat(created.getCategory()).isEqualTo(RagEvalCaseCategory.MULTI_DOCUMENT);
+        assertThat(created.getExpectedFileNames()).containsExactly("operations.md");
         assertThat(updated.getQuery()).isEqualTo("How to setup?");
         assertThat(listed).hasSize(1);
         verify(knowledgeBaseService, times(2)).findOrThrow(kbId);
@@ -411,6 +418,114 @@ class RagEvalServiceTest {
     }
 
     @Test
+    void runAppliesExperimentTopKOverrideAndStoresMetadata() {
+        UUID kbId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        RagEvalCase evalCase = caseEntity(kbId, UUID.randomUUID());
+        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(retrievalService.retrieve(eq(kbId), any())).thenAnswer(invocation -> {
+            RetrieveRequest request = invocation.getArgument(1);
+            return RetrieveResponse.builder()
+                    .query(request.getQuery())
+                    .retrievalMode("vector")
+                    .hits(List.of(RetrievalHit.builder()
+                            .chunkId(UUID.randomUUID())
+                            .docId(UUID.randomUUID())
+                            .fileName("guide.md")
+                            .content("install command")
+                            .score(0.9)
+                            .metadata(Map.of())
+                            .build()))
+                    .build();
+        });
+        when(resultRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(runRepository.save(any(RagEvalRun.class))).thenAnswer(invocation -> {
+            RagEvalRun run = invocation.getArgument(0);
+            run.setId(runId);
+            return run;
+        });
+
+        RagEvalRunRequest request = new RagEvalRunRequest();
+        request.setUseRerank(true);
+        request.setTopKOverride(9);
+        request.setExperimentLabel(" candidate-topk-9 ");
+
+        var response = service().run(kbId, request);
+
+        ArgumentCaptor<RetrieveRequest> requestCaptor = ArgumentCaptor.forClass(RetrieveRequest.class);
+        verify(retrievalService).retrieve(eq(kbId), requestCaptor.capture());
+        assertThat(requestCaptor.getValue().getTopK()).isEqualTo(9);
+        assertThat(response.getProfileSnapshot())
+                .containsEntry("experimentLabel", "candidate-topk-9")
+                .containsEntry("topKOverride", 9)
+                .containsEntry("useRerank", true);
+        assertThat(response.getResults()).singleElement().satisfies(result -> {
+            assertThat(result.getTopK()).isEqualTo(9);
+            assertThat(result.isPassed()).isTrue();
+        });
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void multiProfileRunBuildsCategoryProfileComparisonAndReleaseGateMetrics() {
+        UUID kbId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        RagEvalCase evalCase = caseEntity(kbId, UUID.randomUUID());
+        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(retrievalService.retrieve(eq(kbId), any())).thenAnswer(invocation -> {
+            RetrieveRequest request = invocation.getArgument(1);
+            if (request.getRetrievalProfile() == RetrievalProfile.PARENT_CHILD) {
+                return RetrieveResponse.builder()
+                        .retrievalMode("hybrid")
+                        .diagnostics(Map.of("retrievalMode", "hybrid"))
+                        .hits(List.of())
+                        .build();
+            }
+            return RetrieveResponse.builder()
+                    .retrievalMode("vector")
+                    .diagnostics(Map.of("retrievalMode", "vector"))
+                    .hits(List.of(RetrievalHit.builder()
+                            .chunkId(UUID.randomUUID())
+                            .docId(UUID.randomUUID())
+                            .fileName("guide.md")
+                            .content("install command")
+                            .score(0.9)
+                            .metadata(Map.of())
+                            .build()))
+                    .build();
+        });
+        when(resultRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(runRepository.save(any(RagEvalRun.class))).thenAnswer(invocation -> {
+            RagEvalRun run = invocation.getArgument(0);
+            run.setId(runId);
+            return run;
+        });
+        when(profileIndexStateService.currentRevision(kbId)).thenReturn(17L);
+
+        var response = service().run(kbId, false, List.of(RetrievalProfile.PARENT_CHILD));
+
+        Map<String, Object> categorySummaries = (Map<String, Object>) response.getMetrics().get("categorySummaries");
+        Map<String, Object> realQuery = (Map<String, Object>) categorySummaries.get("REAL_QUERY");
+        assertThat(realQuery).containsEntry("total", 2).containsEntry("passed", 1);
+
+        Map<String, Object> profileSummaries = (Map<String, Object>) response.getMetrics().get("profileSummaries");
+        assertThat(profileSummaries).containsKeys("classic", "parent-child");
+
+        Map<String, Object> comparisons = (Map<String, Object>) response.getMetrics().get("profileComparisons");
+        Map<String, Object> parentChild = (Map<String, Object>) comparisons.get("parent-child");
+        assertThat(parentChild)
+                .containsEntry("baseline", "classic")
+                .containsEntry("candidate", "parent-child")
+                .containsEntry("passRateDelta", -1.0)
+                .containsEntry("hitRateDelta", -1.0);
+
+        Map<String, Object> releaseGate = (Map<String, Object>) response.getMetrics().get("releaseGate");
+        assertThat(releaseGate).containsEntry("status", "BLOCKED");
+        assertThat((Map<String, Long>) releaseGate.get("failureCategoryCounts"))
+                .containsEntry("INSUFFICIENT_HITS", 1L);
+    }
+
+    @Test
     void noAnswerCaseFailsWhenLegacyRetrievalReturnsEvidence() {
         UUID kbId = UUID.randomUUID();
         UUID runId = UUID.randomUUID();
@@ -434,7 +549,266 @@ class RagEvalServiceTest {
         assertThat(response.getResults()).singleElement().satisfies(result -> {
             assertThat(result.isPassed()).isFalse();
             assertThat(result.getFailureReasons()).contains("expected no hits, got 1");
+            assertThat(result.getFailureCategories()).containsExactly("UNEXPECTED_EVIDENCE");
         });
+        assertThat(response.getMetrics()).containsKey("failureCategoryCounts");
+        assertThat((Map<String, Long>) response.getMetrics().get("failureCategoryCounts"))
+                .containsEntry("UNEXPECTED_EVIDENCE", 1L);
+    }
+
+    @Test
+    void runClassifiesInsufficientHitsAndMissingExpectedEvidence() {
+        UUID kbId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        RagEvalCase evalCase = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
+                .caseKey("missing-evidence").query("How to install?").minHits(2).topK(5)
+                .expectedFileName("guide.md").mustContainAny(List.of("install")).build();
+        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder()
+                .hits(List.of(RetrievalHit.builder().chunkId(UUID.randomUUID()).docId(UUID.randomUUID())
+                        .fileName("other.md").content("unrelated evidence").score(0.1).build()))
+                .build());
+        when(resultRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(runRepository.save(any())).thenAnswer(invocation -> {
+            RagEvalRun run = invocation.getArgument(0);
+            run.setId(runId);
+            return run;
+        });
+
+        var response = service().run(kbId, false, null, null);
+
+        assertThat(response.getResults()).singleElement().satisfies(result ->
+                assertThat(result.getFailureCategories()).containsExactly(
+                        "INSUFFICIENT_HITS", "MISSING_EXPECTED_FILE", "MISSING_EXPECTED_TOKEN"));
+        assertThat((Map<String, Long>) response.getMetrics().get("failureCategoryCounts"))
+                .containsExactly(
+                        entry("INSUFFICIENT_HITS", 1L),
+                        entry("MISSING_EXPECTED_FILE", 1L),
+                        entry("MISSING_EXPECTED_TOKEN", 1L));
+    }
+
+    @Test
+    void multiDocumentCaseRequiresHitsFromEveryExpectedSource() {
+        UUID kbId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        RagEvalCase evalCase = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
+                .caseKey("multi-source").query("How do release and recovery work together?")
+                .category(RagEvalCaseCategory.MULTI_DOCUMENT).minHits(2).topK(5)
+                .expectedFileName("release.md").expectedFileNames(List.of("recovery.md"))
+                .mustContainAny(List.of("rollback")).build();
+        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder()
+                .hits(List.of(
+                        RetrievalHit.builder().chunkId(UUID.randomUUID()).docId(UUID.randomUUID())
+                                .fileName("release.md").content("release rollback gate").score(0.9).build(),
+                        RetrievalHit.builder().chunkId(UUID.randomUUID()).docId(UUID.randomUUID())
+                                .fileName("release.md").content("release verification").score(0.8).build()
+                ))
+                .build());
+        when(resultRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(runRepository.save(any())).thenAnswer(invocation -> {
+            RagEvalRun run = invocation.getArgument(0);
+            run.setId(runId);
+            return run;
+        });
+
+        var response = service().run(kbId, false, null, null);
+
+        assertThat(response.getResults()).singleElement().satisfies(result -> {
+            assertThat(result.isPassed()).isFalse();
+            assertThat(result.getCategory()).isEqualTo(RagEvalCaseCategory.MULTI_DOCUMENT);
+            assertThat(result.getExpectedFileNames()).containsExactly("recovery.md");
+            assertThat(result.getMatchedFileNames()).containsExactly("release.md");
+            assertThat(result.getFailureReasons()).contains("missing expected files recovery.md");
+            assertThat(result.getFailureCategories()).contains("MISSING_EXPECTED_FILE");
+        });
+    }
+
+    @Test
+    void multiDocumentCasePassesWhenEveryExpectedSourceIsPresent() {
+        UUID kbId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        RagEvalCase evalCase = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
+                .caseKey("multi-source-pass").query("How do release and recovery work together?")
+                .category(RagEvalCaseCategory.MULTI_DOCUMENT).minHits(2).topK(5)
+                .expectedFileName("release.md").expectedFileNames(List.of("recovery.md"))
+                .mustContainAny(List.of("rollback")).build();
+        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder()
+                .hits(List.of(
+                        RetrievalHit.builder().chunkId(UUID.randomUUID()).docId(UUID.randomUUID())
+                                .fileName("release.md").content("release gate").score(0.9).build(),
+                        RetrievalHit.builder().chunkId(UUID.randomUUID()).docId(UUID.randomUUID())
+                                .fileName("recovery.md").content("rollback procedure").score(0.8).build()
+                ))
+                .build());
+        when(resultRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(runRepository.save(any())).thenAnswer(invocation -> {
+            RagEvalRun run = invocation.getArgument(0);
+            run.setId(runId);
+            return run;
+        });
+
+        var response = service().run(kbId, false, null, null);
+
+        assertThat(response.getResults()).singleElement().satisfies(result -> {
+            assertThat(result.isPassed()).isTrue();
+            assertThat(result.isCitationPassed()).isTrue();
+            assertThat(result.getMatchedFileNames()).containsExactly("release.md", "recovery.md");
+            assertThat(result.getFailureReasons()).isEmpty();
+        });
+    }
+
+    @Test
+    void additionalExpectedSourcesCountForSourceMetricsAndRankEvidence() {
+        UUID kbId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        RagEvalCase evalCase = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
+                .caseKey("additional-source-only").query("How does recovery work?")
+                .category(RagEvalCaseCategory.REAL_QUERY).minHits(1).topK(5)
+                .expectedFileName(null).expectedFileNames(List.of("recovery.md"))
+                .mustContainAny(List.of()).build();
+        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder()
+                .hits(List.of(
+                        RetrievalHit.builder().chunkId(UUID.randomUUID()).docId(UUID.randomUUID())
+                                .fileName("release.md").content("release checklist").score(0.9)
+                                .metadata(Map.of("retrievalStages", Map.of("vectorRank", 10))).build(),
+                        RetrievalHit.builder().chunkId(UUID.randomUUID()).docId(UUID.randomUUID())
+                                .fileName("recovery.md").content("recovery checklist").score(0.8)
+                                .metadata(Map.of("retrievalStages", Map.of("vectorRank", 20))).build()
+                ))
+                .build());
+        when(resultRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(runRepository.save(any())).thenAnswer(invocation -> {
+            RagEvalRun run = invocation.getArgument(0);
+            run.setId(runId);
+            return run;
+        });
+
+        var response = service().run(kbId, false, null, null);
+
+        assertThat(response.getMetrics()).containsEntry("eligibleExpectedFileHitRate", 100.0);
+        assertThat(response.getResults()).singleElement().satisfies(result -> {
+            assertThat(result.isPassed()).isTrue();
+            assertThat(result.isCitationPassed()).isTrue();
+            assertThat(result.getMatchedFileName()).isEqualTo("recovery.md");
+            assertThat(result.getMatchedRank()).isEqualTo(2);
+            assertThat(result.getVectorRank()).isEqualTo(20);
+        });
+    }
+
+    @Test
+    void runClassifiesRetrievalExceptions() {
+        UUID kbId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(caseEntity(kbId, UUID.randomUUID())));
+        when(retrievalService.retrieve(eq(kbId), any())).thenThrow(new IllegalStateException("retrieval unavailable"));
+        when(resultRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(runRepository.save(any())).thenAnswer(invocation -> {
+            RagEvalRun run = invocation.getArgument(0);
+            run.setId(runId);
+            return run;
+        });
+
+        var response = service().run(kbId, false, null, null);
+
+        assertThat(response.getResults()).singleElement().satisfies(result -> {
+            assertThat(result.getFailureReasons()).containsExactly("retrieval unavailable");
+            assertThat(result.getFailureCategories()).containsExactly("RETRIEVAL_EXCEPTION");
+        });
+        assertThat((Map<String, Long>) response.getMetrics().get("failureCategoryCounts"))
+                .containsExactly(entry("RETRIEVAL_EXCEPTION", 1L));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void metricsExposeV19ToV24QualitySystemRollups() {
+        UUID kbId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        RagEvalCase realQuery = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
+                .caseKey("real-install").query("How do I install?")
+                .category(RagEvalCaseCategory.REAL_QUERY).minHits(1).topK(5)
+                .expectedFileName("guide.md").mustContainAny(List.of("install")).build();
+        RagEvalCase hardNegative = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
+                .caseKey("no-answer").query("What is the moon password?")
+                .category(RagEvalCaseCategory.HARD_NEGATIVE).minHits(0).topK(5)
+                .mustContainAny(List.of()).build();
+        RagEvalCase multiDocument = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
+                .caseKey("multi-source").query("Compare release and recovery")
+                .category(RagEvalCaseCategory.MULTI_DOCUMENT).minHits(2).topK(5)
+                .expectedFileName("release.md").expectedFileNames(List.of("recovery.md"))
+                .mustContainAny(List.of("release")).build();
+        RagEvalCase ambiguous = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
+                .caseKey("ambiguous-version").query("Which version is current?")
+                .category(RagEvalCaseCategory.AMBIGUOUS).minHits(1).topK(5)
+                .expectedFileName("release.md").mustContainAny(List.of("2.5.4")).build();
+        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(realQuery, hardNegative, multiDocument, ambiguous));
+        when(profileIndexStateService.currentRevision(kbId)).thenReturn(7L);
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(retrievalProfileGateService.calculate(any(), eq(7L), eq(7L), eq(true))).thenReturn(Map.of(
+                RetrievalProfile.CLASSIC, gate(RetrievalProfile.CLASSIC),
+                RetrievalProfile.PARENT_CHILD, gate(RetrievalProfile.PARENT_CHILD)
+        ));
+        when(retrievalService.retrieve(eq(kbId), any())).thenAnswer(invocation -> {
+            RetrieveRequest request = invocation.getArgument(1);
+            if (request.getQuery().contains("install")) {
+                return RetrieveResponse.builder().retrievalMode("hybrid")
+                        .diagnostics(Map.of("retrievalMode", "hybrid", "embeddingModel", "embedding-2",
+                                "embeddingDimension", 1024))
+                        .hits(List.of(RetrievalHit.builder().fileName("guide.md").content("install setup").score(0.9)
+                                .metadata(Map.of("retrievalStages", Map.of("vectorRank", 1))).build()))
+                        .build();
+            }
+            if (request.getQuery().contains("moon")) {
+                return RetrieveResponse.builder().retrievalMode("hybrid")
+                        .diagnostics(Map.of("retrievalMode", "hybrid", "fallbackReason", "local_text"))
+                        .hits(List.of(RetrievalHit.builder().fileName("noise.md").content("unexpected").score(0.1).build()))
+                        .build();
+            }
+            if (request.getQuery().contains("Compare")) {
+                return RetrieveResponse.builder().retrievalMode("hybrid")
+                        .hits(List.of(RetrievalHit.builder().fileName("release.md").content("release steps").score(0.8).build()))
+                        .build();
+            }
+            return RetrieveResponse.builder().retrievalMode("hybrid")
+                    .hits(List.of(RetrievalHit.builder().fileName("release.md").content("current release").score(0.7).build()))
+                    .build();
+        });
+        when(resultRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(runRepository.save(any())).thenAnswer(invocation -> {
+            RagEvalRun run = invocation.getArgument(0);
+            run.setId(runId);
+            return run;
+        });
+
+        RagEvalRunRequest request = new RagEvalRunRequest();
+        request.setProfiles(List.of(RetrievalProfile.CLASSIC, RetrievalProfile.PARENT_CHILD));
+        request.setTopKOverride(8);
+        request.setExperimentLabel("release-candidate-v2");
+
+        var response = service().run(kbId, request);
+
+        Map<String, Object> releaseReadiness = (Map<String, Object>) response.getMetrics().get("releaseReadiness");
+        assertThat(releaseReadiness).containsEntry("version", "V1.9");
+        assertThat(releaseReadiness).containsEntry("status", "BLOCKED");
+        assertThat((List<String>) releaseReadiness.get("requiredEvidence")).contains("categorySummaries", "releaseGate");
+        Map<String, Object> feedbackLoop = (Map<String, Object>) response.getMetrics().get("realQueryFeedback");
+        assertThat(feedbackLoop).containsEntry("version", "V2.0");
+        assertThat((Integer) feedbackLoop.get("candidateCount")).isGreaterThan(0);
+        Map<String, Object> experimentMatrix = (Map<String, Object>) response.getMetrics().get("experimentMatrix");
+        assertThat(experimentMatrix).containsEntry("version", "V2.1");
+        assertThat((List<Integer>) experimentMatrix.get("topKValues")).containsExactly(8);
+        assertThat((List<String>) experimentMatrix.get("profiles")).contains("classic", "parent-child");
+        Map<String, Object> answerQuality = (Map<String, Object>) response.getMetrics().get("answerQuality");
+        assertThat(answerQuality).containsEntry("version", "V2.2");
+        assertThat((Double) answerQuality.get("groundedPassRate")).isLessThan(1.0);
+        Map<String, Object> onlineObservability = (Map<String, Object>) response.getMetrics().get("onlineObservability");
+        assertThat(onlineObservability).containsEntry("version", "V2.3");
+        assertThat((Integer) onlineObservability.get("fallbackCount")).isGreaterThan(0);
+        Map<String, Object> dataIndexGovernance = (Map<String, Object>) response.getMetrics().get("dataIndexGovernance");
+        assertThat(dataIndexGovernance).containsEntry("version", "V2.4");
+        assertThat((Integer) dataIndexGovernance.get("multiDocumentCaseCount")).isEqualTo(2);
     }
 
     @Test

@@ -1,7 +1,10 @@
-package com.dupi.rag.domain.entity;
+﻿package com.dupi.rag.domain.entity;
 
+import com.dupi.rag.domain.enums.RagEvalCaseCategory;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
@@ -46,8 +49,18 @@ public class RagEvalCase {
     @Builder.Default
     private Integer topK = 5;
 
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    @Builder.Default
+    private RagEvalCaseCategory category = RagEvalCaseCategory.REAL_QUERY;
+
     @Column(name = "expected_file_name")
     private String expectedFileName;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "expected_file_names", columnDefinition = "jsonb", nullable = false)
+    @Builder.Default
+    private List<String> expectedFileNames = List.of();
 
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "must_contain_any", columnDefinition = "jsonb", nullable = false)

@@ -1,4 +1,4 @@
-package com.dupi.rag.controller;
+﻿package com.dupi.rag.controller;
 
 import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;
@@ -313,7 +313,7 @@ class ControllerLayerTest {
         when(ragEvalService.createCase(eq(kbId), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.updateCase(eq(kbId), eq(ragEvalCase.getId()), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.listRuns(kbId)).thenReturn(List.of(ragEvalRun));
-        when(ragEvalService.run(eq(kbId), eq(true), isNull(), eq(RetrievalMode.HYBRID))).thenReturn(ragEvalRun);
+        when(ragEvalService.run(eq(kbId), any(RagEvalRunRequest.class))).thenReturn(ragEvalRun);
         when(ragEvalService.getPolicy(kbId)).thenReturn(qualityPolicy);
         when(ragEvalService.updatePolicy(kbId, qualityPolicyRequest)).thenReturn(qualityPolicy);
         when(ragEvalService.promoteBaseline(kbId, ragEvalRun.getId())).thenReturn(qualityPolicy);

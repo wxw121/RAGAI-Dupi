@@ -1,4 +1,4 @@
-# dupi-RAG
+﻿# dupi-RAG
 
 <!-- language-switch -->
 [中文](../../README.zh-CN.md) | **English**
@@ -76,6 +76,7 @@ Account/RBAC and ops administrative permission update records can be found at [d
 > V1.2 expands browser coverage with document-index details, structured chat errors, persistent RAG evaluation cases and history, hybrid retrieval and Rerank controls, audit webhooks, and metadata or chunk-snapshot recovery.
 > V1.2.1 isolates real-browser gate data in the `e2e` tenant and removes temporary knowledge bases and accounts after successful runs.
 > V1.5 (RAG Quality Upgrade) adds Parent-Child/QA-assisted indexing, a filterable profile v2 Milvus superset Combined weighted RRF, revision-bound eval quality gates, and Web readiness/gate comparisons.
+> V1.6 adds structured failure categories and a 100-case benchmark covering real queries, hard negatives, multi-document retrieval, and ambiguous questions.
 
 Enterprise-level RAG knowledge base engine - similar to the Dify/ Douzi underlying knowledge base module.
 
@@ -87,7 +88,7 @@ Upgrade and activation of V1.5
 The knowledge base is marked as profile v2 ready only when all documents are `COMPLETED` and `index_schema_version=2`. The first ready will persist the cutover state and clean up Legacy. During subsequent uploads or rebuilds, the completed documents in v2 will still be used and will not be rolled back to the cleaned Legacy. Switching the default profile only changes the search entry and does not rebuild the unified index again.
 For non-classic profiles, the RAG evaluation of the current `index_revision` must be compared with `CLASSIC`, and it must include at least 3 cases, references can be evaluated, and neither hit rate nor reference pass rate can be rolled back. When not passed, the update interface returns HTTP `409`, and the error code is `retrieval_profile_gate_blocked`.
 
-Version changes can be found in [V1.5.0 Release Notes](../v1.5-release-notes.md). Upgrade, gray-scale, verification and rollback steps can be found in [V1.5.0 Release and Operation Manual](../v1.5-release-runbook.md).
+Version changes can be found in [V1.6.0 Release Notes](../v1.5-release-notes.md). Upgrade, gray-scale, verification and rollback steps can be found in [V1.6.0 Release and Operation Manual](../v1.5-release-runbook.md).
 
 ## Technology Stack
 
@@ -364,6 +365,7 @@ __DU_PI_PIPE__ V1|knowledge base CRUD, asynchronous ingestion, pure vector retri
 __DU_PI_PIPE__ V1.1|Real browser E2E access control, intake diagnosis, RAG evaluation closed loop, upload governance prompt, aggregated operation and maintenance alert __DU_PI_PIPE__
 __DU_PI_PIPE__ V1.2|Index details, structured Chat errors, persistence RAG assessment, mixed search /Rerank control, Webhook, export recovery __DU_PI_PIPE__
 __DU_PI_PIPE__ V1.5|Parent-Child/QA-assisted indexing, profile v2 filterable superset Combined weighted fusion, revision-bound quality gates, Web readiness/gate comparison  __DU_PI_PIPE__
+__DU_PI_PIPE__ V1.6|Structured failure taxonomy, 100-case realistic benchmark, hard negatives, multi-document source assertions, ambiguous-query evaluation __DU_PI_PIPE__
 __DU_PI_PIPE__ V2|BM25 sparse production tuning, semantic blocking, generating interrupts, full object/vector disaster recovery __DU_PI_PIPE__
 __DU_PI_PIPE__ V3|Multimodal OCR, Pipeline DSL __DU_PI_PIPE__
 __DU_PI_PIPE__ V4|K8s, multi-tenant, compliance audit __DU_PI_PIPE__
@@ -374,3 +376,25 @@ For detailed planning, please refer to [docs/todo.md](../todo.md) and [docs/deci
 V1.3 uses a 30-item, six-category search list and current /legacy conflict corpus as the release benchmark. Worker supports Rerank startup preheating and persistent Hugging Face caching. The RAG evaluation page of the knowledge base provides Sparse Migration status tracks and protected Cutover operations. The backup/recovery drills and dependencies, licenses, Cves, and image volume scans of Milvus 2.4.1 to 2.5.4 all provide repeatable scripts.
 
 The complete release steps, environment variables, failure strategies, and evidence locations can be found in [V1.3 Release Run Manual](../v1.3-release-runbook.md). Actual production of the same specification drills, 30-case environmental benchmarks and mirror scans remain mandatory before the official release.
+
+## V1.6b RAG evaluation benchmark
+
+The current benchmark is stored under `benchmarks/v1.6b/` and contains 100 cases: 40 real queries, 20 hard negatives, 20 multi-document queries, and 20 ambiguous questions. Multi-document cases require distinct source files, hard negatives require zero hits, and ambiguous cases identify an authoritative source plus disambiguating tokens.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rag-eval-cases.ps1 -ValidateOnly
+```
+
+`scripts/rag-retrieval-benchmark.ps1` uses the same V1.6b manifest and corpus by default. V1.7/V1.8 can pass `-ExperimentLabel` and `-TopKOverride` to label retrieval experiments; each run artifact records `experimentLabel`, `topKOverride`, and `releaseGate`, and `-SkipCaseReconcile` supports low-resource reruns when cases are already synced.
+
+## V1.7/V1.8 RAG quality dashboard
+
+V1.7/V1.8 adds category trend/dashboard views, diagnostic drill-down filters, release gate rollups, `topKOverride`/`experimentLabel` retrieval experiment controls, and Profile A/B comparisons to RAG evaluation. Design doc: `docs/superpowers/specs/2026-07-20-v1.7-v1.8-rag-quality-dashboard-design.md`; implementation doc: `docs/superpowers/plans/2026-07-20-v1.7-v1.8-rag-quality-dashboard-implementation.md`.
+
+## V1.9-V2.4 RAG quality loop
+
+V1.9-V2.4 continues the RAG quality system in the same local version slice: release readiness, real-query feedback candidates, experiment matrix, answer-quality proxy metrics, online observability summaries, and data/index governance summaries are written into each evaluation run `metrics` object and rendered as six Quality dashboard cards in the web panel. Design doc: `docs/superpowers/specs/2026-07-21-v1.9-v2.4-rag-quality-loop-design.md`; implementation doc: `docs/superpowers/plans/2026-07-21-v1.9-v2.4-rag-quality-loop-implementation.md`.
+
+## RAG quality roadmap
+
+After V2.4, the recommended path remains focused on the RAG quality system: persistent real-feedback capture, answer-quality judging, retrieval experiment registry, data/index governance automation, online quality SLOs, and canary release gates. See [`docs/en/rag-quality-roadmap.md`](rag-quality-roadmap.md) for the detailed roadmap.

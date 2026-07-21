@@ -1,12 +1,12 @@
-# dupi-RAG
+﻿# dupi-RAG
 
 <!-- language-switch -->
 [English](README.md)
 
 
-> V1.5.0是当前版本。它增加了亲子和qa辅助索引、可过滤的Profile V2 Milvus超集、组合加权RRF、修订绑定质量门和Web准备/门比较。API和Web版本：`1.5.0`。
+> V1.6.0是当前版本。它增加了亲子和qa辅助索引、可过滤的Profile V2 Milvus超集、组合加权RRF、修订绑定质量门和Web准备/门比较。API和Web版本：`1.6.0`。
 
-参见 [V1.5.0 版本说明](docs/zh-CN/v1.5-release-notes.md) 和 [V1.5.0 发布运行手册](docs/zh-CN/v1.5-release-runbook.md)，然后再升级现有部署。将 `CLASSIC` 保留为默认值，直到当前索引版本通过候选版本与经典版本的质量检验。
+参见 [V1.6.0 版本说明](docs/zh-CN/v1.5-release-notes.md) 和 [V1.6.0 发布运行手册](docs/zh-CN/v1.5-release-runbook.md)，然后再升级现有部署。将 `CLASSIC` 保留为默认值，直到当前索引版本通过候选版本与经典版本的质量检验。
 
 > V1.4.2为OPS_ADMIN操作符添加了一个只读的GET /api/v1/ops/governance-summary端点，并为V1.4.1的上传、获取、发件箱、通知和矢量清理状态添加了一个烟雾脚本和Pester检查。
 
@@ -142,7 +142,7 @@ Worker 使用 CPU-only PyTorch 和 `BAAI/bge-reranker-base`，默认在启动生
 - 知识库仅在所有文档均为 `COMPLETED` 且 `index_schema_version=2` 时标记为 profile v2 ready。首次 ready 会持久化 cutover 状态并清理 Legacy；后续上传或重建期间仍使用 v2 中已完成的文档，不会回退到已清理的 Legacy。切换默认 profile 只改变检索入口，不会再次重建统一索引。
 - 非 classic profile 必须使用当前 `index_revision` 的 RAG 评估与 `CLASSIC` 对比，且至少包含 3 个 case、引用可评估、命中率和引用通过率均不回退。未通过时更新接口返回 HTTP `409`，错误码为 `retrieval_profile_gate_blocked`。
 
-版本变更见 [V1.5.0 版本说明](docs/zh-CN/v1.5-release-notes.md)，升级、灰度、验证与回滚步骤见 [V1.5.0 发布运行手册](docs/zh-CN/v1.5-release-runbook.md)。
+版本变更见 [V1.6.0 版本说明](docs/zh-CN/v1.5-release-notes.md)，升级、灰度、验证与回滚步骤见 [V1.6.0 发布运行手册](docs/zh-CN/v1.5-release-runbook.md)。
 
 ## 技术栈
 
@@ -419,6 +419,7 @@ cd services/api
 | V1.1 | 真实浏览器 E2E 门禁、摄入诊断、RAG 评估闭环、上传治理提示、聚合运维告警 |
 | V1.2 | 索引详情、结构化 Chat 错误、持久化 RAG 评估、混合检索/Rerank 控制、Webhook、导出恢复 |
 | V1.5 | Parent-Child / QA-assisted indexing, profile v2 filterable superset, Combined weighted fusion, revision-bound quality gates, Web readiness/gate comparison |
+| V1.6 | 结构化失败分类、100 条真实查询基准、困难负样本、多文档来源断言、歧义问题评估 |
 | V2 | BM25 sparse 生产调优、语义分块、生成中断、完整对象/向量灾备恢复 |
 | V3 | 多模态 OCR、Pipeline DSL |
 | V4 | K8s、多租户、合规审计 |
@@ -429,3 +430,25 @@ cd services/api
 V1.3 使用 30 条、六分类检索清单及当前/legacy 冲突语料作为发布基准，Worker 支持 Rerank 启动预热和持久化 Hugging Face 缓存，知识库 RAG 评估页提供 Sparse Migration 状态轨道和受保护的 Cutover 操作。Milvus 2.4.1 到 2.5.4 的备份/恢复演练及依赖、许可证、CVE、镜像体积扫描均提供可重复脚本。
 
 完整发布步骤、环境变量、失败策略和证据位置见 [V1.3 发布运行手册](docs/v1.3-release-runbook.md)。实际生产同规格演练、30 Case 环境基准和镜像扫描仍是正式发布前的必做项。
+
+## V1.6b RAG 评估基准
+
+V1.6b 基准位于 `benchmarks/v1.6b/`，包含 100 条用例：40 条真实查询、20 条困难负样本、20 条多文档查询和 20 条歧义问题。多文档用例会校验多个不同来源文件，困难负样本要求严格零命中，歧义问题指定权威来源和消歧关键词。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rag-eval-cases.ps1 -ValidateOnly
+```
+
+`scripts/rag-retrieval-benchmark.ps1` 默认使用同一份 V1.6b manifest 和 corpus，并在产物中记录场景分类、结构化失败分类、期望来源和实际命中来源。V1.7/V1.8 可通过 `-ExperimentLabel` 与 `-TopKOverride` 标记检索实验，产物会在每个 run 记录 `experimentLabel`、`topKOverride` 和 `releaseGate`；已同步用例的低资源复跑可使用 `-SkipCaseReconcile`。
+
+## V1.7/V1.8 RAG 质量看板
+
+V1.7/V1.8 在 RAG 评估中补齐分类趋势/看板、诊断下钻筛选、发布质量门禁 rollup、`topKOverride`/`experimentLabel` 检索实验参数和 Profile A/B 对比。设计文档：`docs/superpowers/specs/2026-07-20-v1.7-v1.8-rag-quality-dashboard-design.md`；实现记录：`docs/superpowers/plans/2026-07-20-v1.7-v1.8-rag-quality-dashboard-implementation.md`。
+
+## V1.9-V2.4 RAG 质量闭环
+
+V1.9-V2.4 在同一轮本地版本中继续扩展 RAG 质量体系：release readiness、真实查询反馈候选、实验矩阵、答案质量代理指标、线上观测摘要和数据/索引治理摘要都写入评估 run 的 `metrics`，并在 Web Quality dashboard 中以六张质量体系卡片展示。设计文档：`docs/superpowers/specs/2026-07-21-v1.9-v2.4-rag-quality-loop-design.md`；实施文档：`docs/superpowers/plans/2026-07-21-v1.9-v2.4-rag-quality-loop-implementation.md`。
+
+## RAG 质量体系后续规划
+
+V2.5 以后建议继续围绕 RAG 质量体系推进：真实反馈持久化、答案质量裁判、检索实验注册表、数据/索引治理自动化、线上质量 SLO 和 canary 发布门禁。详细路线图见 [`docs/zh-CN/rag-quality-roadmap.md`](docs/zh-CN/rag-quality-roadmap.md)。
