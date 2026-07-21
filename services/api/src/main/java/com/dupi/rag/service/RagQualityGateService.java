@@ -1,5 +1,6 @@
 package com.dupi.rag.service;
 
+import com.dupi.rag.domain.enums.RagEvalCaseCategory;
 import com.dupi.rag.domain.enums.RagEvalComparisonStatus;
 import com.dupi.rag.domain.enums.RagQualityGateStatus;
 import org.springframework.stereotype.Service;
@@ -110,11 +111,28 @@ public class RagQualityGateService {
                 .map(this::normalizeText)
                 .sorted(Comparator.naturalOrder())
                 .toList();
+        List<String> additionalSources = definition.expectedFileNames() == null
+                ? List.of()
+                : definition.expectedFileNames().stream()
+                .map(this::normalizeText)
+                .filter(value -> !value.isBlank())
+                .toList();
+        boolean hasAdditionalSources = !additionalSources.isEmpty();
+        boolean hasNonDefaultCategory = definition.category() != null
+                && definition.category() != RagEvalCaseCategory.REAL_QUERY;
         StringBuilder canonical = new StringBuilder();
         append(canonical, normalizeText(definition.query()));
         append(canonical, Integer.toString(definition.minHits()));
         append(canonical, Integer.toString(definition.topK()));
-        append(canonical, normalizeText(definition.expectedFileName()));
+        if (!hasAdditionalSources && !hasNonDefaultCategory) {
+            append(canonical, normalizeText(definition.expectedFileName()));
+        } else {
+            expectedSourceUnion(definition.expectedFileName(), additionalSources)
+                    .forEach(fileName -> append(canonical, "expectedFile=" + fileName));
+        }
+        if (hasNonDefaultCategory) {
+            append(canonical, "category=" + definition.category().name());
+        }
         tokens.forEach(token -> append(canonical, token));
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
@@ -139,6 +157,16 @@ public class RagQualityGateService {
         return value == null ? "" : value.trim().replaceAll("\\s+", " ");
     }
 
+    private List<String> expectedSourceUnion(String primarySource, List<String> additionalSources) {
+        return java.util.stream.Stream.concat(
+                        java.util.stream.Stream.of(primarySource), additionalSources.stream())
+                .map(this::normalizeText)
+                .filter(value -> !value.isBlank())
+                .distinct()
+                .sorted(Comparator.naturalOrder())
+                .toList();
+    }
+
     private void append(StringBuilder target, String value) {
         target.append(value.length()).append(':').append(value).append(';');
     }
@@ -157,7 +185,14 @@ public class RagQualityGateService {
     }
 
     public record CaseDefinition(String query, int minHits, int topK, String expectedFileName,
-                                 List<String> mustContainAny) { }
+                                 List<String> mustContainAny, RagEvalCaseCategory category,
+                                 List<String> expectedFileNames) {
+        public CaseDefinition(String query, int minHits, int topK, String expectedFileName,
+                              List<String> mustContainAny) {
+            this(query, minHits, topK, expectedFileName, mustContainAny,
+                    RagEvalCaseCategory.REAL_QUERY, List.of());
+        }
+    }
 
     public record CaseEvidence(String caseKey, String fingerprint, boolean passed) { }
 

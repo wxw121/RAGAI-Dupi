@@ -22,6 +22,7 @@ import com.dupi.rag.domain.entity.VectorCleanupTask;
 import com.dupi.rag.domain.enums.AuditLogStatus;
 import com.dupi.rag.domain.enums.ChatMessageRole;
 import com.dupi.rag.domain.enums.DocumentStatus;
+import com.dupi.rag.domain.enums.RagEvalCaseCategory;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
 import com.dupi.rag.domain.enums.RagEvalComparisonStatus;
 import com.dupi.rag.domain.enums.RagQualityGateStatus;
@@ -261,7 +262,9 @@ class EntityLifecycleTest {
                 .query("query")
                 .minHits(2)
                 .topK(8)
+                .category(RagEvalCaseCategory.MULTI_DOCUMENT)
                 .expectedFileName("guide.md")
+                .expectedFileNames(List.of("operations.md"))
                 .mustContainAny(List.of("token"))
                 .build();
         invoke(evalCase, "onCreate");
@@ -273,7 +276,9 @@ class EntityLifecycleTest {
         assertThat(evalCase.getQuery()).isEqualTo("query");
         assertThat(evalCase.getMinHits()).isEqualTo(2);
         assertThat(evalCase.getTopK()).isEqualTo(8);
+        assertThat(evalCase.getCategory()).isEqualTo(RagEvalCaseCategory.MULTI_DOCUMENT);
         assertThat(evalCase.getExpectedFileName()).isEqualTo("guide.md");
+        assertThat(evalCase.getExpectedFileNames()).containsExactly("operations.md");
         assertThat(evalCase.getMustContainAny()).containsExactly("token");
         assertThat(evalCase.getCreatedAt()).isEqualTo(caseCreatedAt);
         assertThat(evalCase.getUpdatedAt()).isAfterOrEqualTo(caseCreatedAt);
@@ -302,8 +307,11 @@ class EntityLifecycleTest {
                 .passed(true)
                 .failureReasons(List.of("none"))
                 .hitCount(3)
+                .category(RagEvalCaseCategory.MULTI_DOCUMENT)
                 .expectedFileName("guide.md")
+                .expectedFileNames(List.of("operations.md"))
                 .matchedFileName("guide.md")
+                .matchedFileNames(List.of("guide.md", "operations.md"))
                 .matchedToken("token")
                 .retrievalMode("hybrid_rerank")
                 .fallbackReason("none")
@@ -320,8 +328,11 @@ class EntityLifecycleTest {
         assertThat(result.isPassed()).isTrue();
         assertThat(result.getFailureReasons()).containsExactly("none");
         assertThat(result.getHitCount()).isEqualTo(3);
+        assertThat(result.getCategory()).isEqualTo(RagEvalCaseCategory.MULTI_DOCUMENT);
         assertThat(result.getExpectedFileName()).isEqualTo("guide.md");
+        assertThat(result.getExpectedFileNames()).containsExactly("operations.md");
         assertThat(result.getMatchedFileName()).isEqualTo("guide.md");
+        assertThat(result.getMatchedFileNames()).containsExactly("guide.md", "operations.md");
         assertThat(result.getMatchedToken()).isEqualTo("token");
         assertThat(result.getRetrievalMode()).isEqualTo("hybrid_rerank");
         assertThat(result.getFallbackReason()).isEqualTo("none");

@@ -1,18 +1,48 @@
-# 进展记录
+﻿# 进展记录
 
 <!-- language-switch -->
 [English](../en/progress.md)
 
+## V1.9-V2.4 RAG 质量闭环（2026-07-21）
+
+- 在评估 run 的 metrics 中新增六组版本化质量闭环指标：releaseReadiness、realQueryFeedback、experimentMatrix、answerQuality、onlineObservability、dataIndexGovernance。
+- Web Quality dashboard 新增六张质量体系卡片，分别覆盖发布 readiness、真实查询反馈候选、检索实验矩阵、答案质量、线上观测和数据/索引治理。
+- 设计文档：docs/superpowers/specs/2026-07-21-v1.9-v2.4-rag-quality-loop-design.md；实施文档：docs/superpowers/plans/2026-07-21-v1.9-v2.4-rag-quality-loop-implementation.md。
+- 为控制本地资源消耗，真实浏览器 E2E、Docker Compose 发布演练、真实 load/latency 实验和生产聊天日志持久反馈队列延后到 post-V2.4。
+
+## V2.5+ RAG 质量路线图（2026-07-21）
+
+- 新增 V2.5-V3.0 专项路线图：反馈持久化、答案质量裁判、实验注册表、数据/索引治理自动化、线上质量 SLO 和 canary 发布门禁。
+- 中文路线图：`docs/zh-CN/rag-quality-roadmap.md`；英文路线图：`docs/en/rag-quality-roadmap.md`。
+- 继续将真实浏览器、Compose 和 load/latency 等重资源验证作为后续发布窗口的显式任务，不在本轮默认执行。
+
+## V1.7/V1.8 RAG 质量看板与检索实验（2026-07-20）
+
+- 新增分类汇总/趋势、诊断分类/状态/失败类型筛选下钻和发布质量门禁 rollup，便于从最近一次评估定位回归。
+- 运行请求支持 `topKOverride` 与 `experimentLabel`，用于统一覆盖用例 TopK 并标记检索实验。
+- 新增 profile summaries 与 Profile A/B comparisons，展示候选 profile 相对 baseline/classic 的通过率、命中率、引用率和延迟差异。
+- 设计文档：`docs/superpowers/specs/2026-07-20-v1.7-v1.8-rag-quality-dashboard-design.md`；实现记录：`docs/superpowers/plans/2026-07-20-v1.7-v1.8-rag-quality-dashboard-implementation.md`。
+- 为控制本地资源消耗，完整浏览器 E2E/Compose 发布演练和真实 load/latency 实验延后执行。
+## V1.6b RAG 评估集扩展（2026-07-20）
+
+- 新增 `REAL_QUERY`、`HARD_NEGATIVE`、`MULTI_DOCUMENT`、`AMBIGUOUS` 四类持久化评估场景。
+- 新增向后兼容的多来源断言：保留主来源 `expectedFileName`，通过 `expectedFileNames` 要求附加来源；运行结果保存全部期望来源和实际命中来源。
+- 新增 Flyway V22、分类/附加来源指纹、困难负样本/多文档/歧义问题请求校验。
+- 新增 `benchmarks/v1.6b/`：7 份真实与冲突语料、100 条用例，分布为真实查询 40、困难负样本 20、多文档 20、歧义问题 20。
+- 同步评估集与 benchmark 脚本默认使用 V1.6b；遇到 manifest 外的自定义用例时明确拒绝，不静默删除用户数据。
+- Web 评估面板支持选择场景分类、编辑附加来源，并展示期望/实际命中的完整来源集合。
+- 全量验证通过：API 488/488、Web 82/82、Pester 5/5、manifest 校验、PowerShell 语法检查、TypeScript 编译和 Vite 生产构建。
 
 
 
 
-## V1.5.0发布结束（2026-07-20）
 
-API和Web发布元数据与“1.5.0”保持一致。
-- 增加了V1.5.0版本说明和' docs/v1.5-release-runbook。md '用于Flyway V18-V20、Profile V2的推出、修订绑定评估、激活、监控和回滚。
+## V1.6.0发布结束（2026-07-20）
+
+API和Web发布元数据与“1.6.0”保持一致。
+- 增加了V1.6.0版本说明和' docs/v1.5-release-runbook。md '用于Flyway V18-V20、Profile V2的推出、修订绑定评估、激活、监控和回滚。
 - 最终的本地产品闸门通过了发布diff: API 482/482与95% JaCoCo闸门，Worker 96/96, Web 82/82，和1794模块生产构建。
-- 撰写编辑配置和V1.5.0版本扫描通过。扫描记录图像摘要‘ sha256:74043096b1740cad517a78f0792d79ea25a6bed99d17c1d8c96a7af98b05121c ’，大小为640,310,825字节，没有Python发现，以及22个精确的上游未修复的操作系统异常，到期日期为2026-08-15。
+- 撰写编辑配置和V1.6.0版本扫描通过。扫描记录图像摘要‘ sha256:74043096b1740cad517a78f0792d79ea25a6bed99d17c1d8c96a7af98b05121c ’，大小为640,310,825字节，没有Python发现，以及22个精确的上游未修复的操作系统异常，到期日期为2026-08-15。
 发布分支推送CI #30和PR CI #31通过API、Worker、Web、存储库固定的Pester 4.10.1契约和Docker Compose。在最终文档提交和合并‘ main ’重复绿色之前，带注释的标记一直被阻塞。
 
 V1.4.2治理操作稳定性（2026-07-18）
@@ -60,18 +90,18 @@ V1.4.0可验证恢复（2026-07-16）
 
 ## 当前状态
 
-V1.5.0 RAG质量升级P2完成：现有的VECTOR / HYBRID / RERANK模式和CLASSIC默认值保持兼容，现在添加了可过滤的配置文件v2索引超集，组合加权融合，修订绑定的RAG质量门和Web准备/门比较。
+V1.6.0 RAG质量升级P2完成：现有的VECTOR / HYBRID / RERANK模式和CLASSIC默认值保持兼容，现在添加了可过滤的配置文件v2索引超集，组合加权融合，修订绑定的RAG质量门和Web准备/门比较。
 
 ## 最近进展
 
-2026-07-19 （V1.5.0 RAG质量升级P2）
+2026-07-19 （V1.6.0 RAG质量升级P2）
 - [Profile v2隔离索引]Worker摄取现在构建一个可重用的原始/父/子/QA超集，并写入一个可过滤的`MILVUS_PROFILE_COLLECTION`；遗留的原始向量被双重写入，直到知识库安全切换，之后持久的切换状态防止回退到已删除的遗留索引。
 - [准备和修订]API要求每个文档在`index_schema_version=2`时`COMPLETED`，跟踪知识库`index_revision`，并分离遗留/配置文件清理目标，因此eval决策仍然与当前索引状态相关联。Reindex将文档滚动到位，而不是在事务性作业创建之前删除整个动态概要索引。
 - [联合加权融合]API向量和Worker混合检索独立查询子路由和QA路由，然后应用`COMBINED_CHILD_WEIGHT=1.0`， `COMBINED_QA_WEIGHT=0.8`和`RRF_K=60`的加权RRF；重新排名在融合后运行。
 - [质量门]RAG eval自动比较非经典候选与经典，存储命中/引用布尔值，并返回PASSED/BLOCKED/INSUFFICIENT_DATA/STALE/INDEX_NOT_READY/ not_evaluate决策。非经典默认激活需要当前通过的门或返回`409 retrieval_profile_gate_blocked`。
 - [Web面板]知识库设置显示配置文件准备，模式/修订，和大门徽章；被阻止的候选对象在本地被禁用，RAG评估面板显示候选对象与经典对象的比率、差值和原因。
 
-### 2026-07-19 (V1.5.0 RAG Quality Upgrade P1)
+### 2026-07-19 (V1.6.0 RAG Quality Upgrade P1)
 - [QA 候选生成] — Worker 通过带 internal key 的内部 API 分批请求候选问答（每批最多 16 个 source），API 复用现有 `LlmClient` 和 LLM 凭据；严格解析 JSON、过滤未知 source/空值、按 source 去重并限制最多 3 条。
 - [QA 索引与降级] — `QA_ASSISTED` 以普通原文块为 QA source，`COMBINED` 以父块为 source；QA 块与可检索原文块/子块共同进入 Embedding 和 Milvus，同时保存 `source_chunk_id`、问题、答案和 source 类型。QA 调用或响应失败时不影响原文摄入完成。
 - [QA 命中回填] — `QA_ASSISTED / COMBINED` 命中 QA 块后回填同知识库、同文档 source 内容，并保留命中 QA、source、问题、答案和 profile provenance；`COMBINED` 对 child source 继续回填 parent 上下文，多个入口回填同一最终块时保留最高分命中。
@@ -79,7 +109,7 @@ V1.5.0 RAG质量升级P2完成：现有的VECTOR / HYBRID / RERANK模式和CLASS
 - [兼容与默认值] — 旧 `CLASSIC / PARENT_CHILD` 行为保持不变，默认仍为 `CLASSIC`，不会在质量门禁通过前自动切换。
 - [验证] — API 聚焦测试通过 97 个，Worker 聚焦测试通过 39 个，Web 聚焦测试通过 7 个，Web 生产构建通过。
 
-### 2026-07-18（V1.5.0 RAG Quality Upgrade P0）
+### 2026-07-18（V1.6.0 RAG Quality Upgrade P0）
 - [Retrieval profile 主干] — 新增 `CLASSIC / PARENT_CHILD / QA_ASSISTED / COMBINED`，知识库持久化默认 profile，请求可临时覆盖；保留原有 `VECTOR / HYBRID / RERANK` 作为检索执行模式。
 - [Parent-child 索引] — 摄入消息携带知识库 profile；`PARENT_CHILD / COMBINED` 摄入生成父块和子块，只对子块做 Embedding/Milvus 索引，同时把父块保存到 PostgreSQL。检索命中子块后按 `parent_chunk_id` 回填父块，并保留命中子块溯源元数据；Hybrid BM25 排除父块作为直接入口。
 - [多 profile 评估] — RAG eval 一次可运行多个 profile，每个 case/profile 分别保存结果，运行记录保存 profile 集合，评估页展示当前活动物理索引上的 profile 行为对比。

@@ -1,5 +1,6 @@
 package com.dupi.rag.domain.entity;
 
+import com.dupi.rag.domain.enums.RagEvalCaseCategory;
 import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.domain.enums.RagEvalComparisonStatus;
 import jakarta.persistence.Column;
@@ -65,15 +66,35 @@ public class RagEvalRunResult {
     @Builder.Default
     private List<String> failureReasons = List.of();
 
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "failure_categories", columnDefinition = "jsonb", nullable = false)
+    @Builder.Default
+    private List<String> failureCategories = List.of();
+
     @Column(name = "hit_count", nullable = false)
     @Builder.Default
     private Integer hitCount = 0;
 
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    @Builder.Default
+    private RagEvalCaseCategory category = RagEvalCaseCategory.REAL_QUERY;
+
     @Column(name = "expected_file_name")
     private String expectedFileName;
 
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "expected_file_names", columnDefinition = "jsonb", nullable = false)
+    @Builder.Default
+    private List<String> expectedFileNames = List.of();
+
     @Column(name = "matched_file_name")
     private String matchedFileName;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "matched_file_names", columnDefinition = "jsonb", nullable = false)
+    @Builder.Default
+    private List<String> matchedFileNames = List.of();
 
     @Column(name = "matched_token")
     private String matchedToken;

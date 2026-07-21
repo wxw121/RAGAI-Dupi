@@ -194,14 +194,7 @@ public class KnowledgeBaseController {
             @PathVariable UUID kbId,
             @RequestBody(required = false) RagEvalRunRequest request
     ) {
-        boolean useRerank = request != null && Boolean.TRUE.equals(request.getUseRerank());
-        if (request == null || request.getProfileId() == null && request.getRetrievalMode() == null) {
-            return ragEvalService.run(kbId, useRerank, request == null ? null : request.getProfiles());
-        }
-        return ragEvalService.run(kbId,
-                useRerank,
-                request.getProfileId(),
-                request.getRetrievalMode());
+        return ragEvalService.run(kbId, request);
     }
 
     @GetMapping("/{kbId}/rag-eval/policy")

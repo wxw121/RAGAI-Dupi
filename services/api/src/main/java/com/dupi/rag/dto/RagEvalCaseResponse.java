@@ -1,5 +1,6 @@
 package com.dupi.rag.dto;
 
+import com.dupi.rag.domain.enums.RagEvalCaseCategory;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -20,7 +21,9 @@ public class RagEvalCaseResponse {
     private String query;
     private Integer minHits;
     private Integer topK;
+    private RagEvalCaseCategory category;
     private String expectedFileName;
+    private List<String> expectedFileNames;
     private List<String> mustContainAny;
     private Instant createdAt;
     private Instant updatedAt;

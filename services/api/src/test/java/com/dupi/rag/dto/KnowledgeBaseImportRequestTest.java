@@ -1,5 +1,6 @@
 package com.dupi.rag.dto;
 
+import com.dupi.rag.domain.enums.RagEvalCaseCategory;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
 import org.junit.jupiter.api.Test;
@@ -64,5 +65,34 @@ class KnowledgeBaseImportRequestTest {
         evalCase.setMustContainAny(List.of(" ", "t".repeat(513)));
         assertThat(validator.validate(evalCase)).extracting(violation -> violation.getPropertyPath().toString())
                 .contains("mustContainAny[0].<list element>", "mustContainAny[1].<list element>");
+    }
+
+    @Test
+    void evalCaseRequestValidatesCategorySpecificAssertions() {
+        RagEvalCaseRequest evalCase = new RagEvalCaseRequest();
+        evalCase.setCaseKey("scenario");
+        evalCase.setQuery("query");
+
+        evalCase.setCategory(RagEvalCaseCategory.REAL_QUERY);
+        evalCase.setMinHits(0);
+        assertThat(validator.validate(evalCase)).extracting(violation -> violation.getPropertyPath().toString())
+                .contains("validCategoryAssertions");
+
+        evalCase.setCategory(RagEvalCaseCategory.HARD_NEGATIVE);
+        evalCase.setMinHits(1);
+        assertThat(validator.validate(evalCase)).extracting(violation -> violation.getPropertyPath().toString())
+                .contains("validCategoryAssertions");
+
+        evalCase.setCategory(RagEvalCaseCategory.MULTI_DOCUMENT);
+        evalCase.setMinHits(2);
+        evalCase.setExpectedFileName("guide.md");
+        assertThat(validator.validate(evalCase)).extracting(violation -> violation.getPropertyPath().toString())
+                .contains("validCategoryAssertions");
+
+        evalCase.setCategory(RagEvalCaseCategory.AMBIGUOUS);
+        evalCase.setMinHits(1);
+        evalCase.setExpectedFileNames(List.of("current.md"));
+        assertThat(validator.validate(evalCase)).extracting(violation -> violation.getPropertyPath().toString())
+                .contains("validCategoryAssertions");
     }
 }
