@@ -2,6 +2,7 @@ package com.dupi.rag.service;
 
 import com.dupi.rag.client.MilvusVectorService;
 import org.junit.jupiter.api.Test;
+import org.springframework.stereotype.Component;
 
 import java.util.List;
 
@@ -9,6 +10,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WeightedRrfFusionTest {
+
+    @Test
+    void isRegisteredForApplicationContextInjection() {
+        assertThat(WeightedRrfFusion.class.getAnnotation(Component.class)).isNotNull();
+    }
 
     @Test
     void fusesWeightedRoutesByReciprocalRankAndAcceptsEmptyRoutes() {

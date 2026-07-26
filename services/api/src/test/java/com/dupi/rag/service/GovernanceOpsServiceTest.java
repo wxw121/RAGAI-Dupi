@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -35,6 +36,24 @@ class GovernanceOpsServiceTest {
     @Mock AuditLogService auditLogService;
     @Mock IngestJobService ingestJobService;
     @Mock VectorCleanupTaskService vectorCleanupTaskService;
+
+    @Test
+    void springSelectsTheProductionConstructor() {
+        try (var context = new AnnotationConfigApplicationContext()) {
+            context.registerBean(UploadQuotaReservationRepository.class, () -> uploadQuotaReservationRepository);
+            context.registerBean(IngestJobRepository.class, () -> ingestJobRepository);
+            context.registerBean(IngestOutboxEventRepository.class, () -> ingestOutboxEventRepository);
+            context.registerBean(IngestFailureNotificationRepository.class, () -> notificationRepository);
+            context.registerBean(VectorCleanupTaskRepository.class, () -> vectorCleanupTaskRepository);
+            context.registerBean(AuditLogService.class, () -> auditLogService);
+            context.registerBean(IngestJobService.class, () -> ingestJobService);
+            context.registerBean(VectorCleanupTaskService.class, () -> vectorCleanupTaskService);
+            context.register(GovernanceOpsService.class);
+            context.refresh();
+
+            assertThat(context.getBean(GovernanceOpsService.class)).isNotNull();
+        }
+    }
 
     @Test
     void summarizeAggregatesGovernanceCountsAndAlerts() {

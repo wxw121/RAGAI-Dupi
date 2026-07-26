@@ -723,7 +723,7 @@ class RagEvalServiceTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void metricsExposeV19ToV24QualitySystemRollups() {
+    void metricsExposeV20QualityClosureRollupsAndReleaseReport() {
         UUID kbId = UUID.randomUUID();
         UUID runId = UUID.randomUUID();
         RagEvalCase realQuery = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
@@ -790,25 +790,189 @@ class RagEvalServiceTest {
         var response = service().run(kbId, request);
 
         Map<String, Object> releaseReadiness = (Map<String, Object>) response.getMetrics().get("releaseReadiness");
-        assertThat(releaseReadiness).containsEntry("version", "V1.9");
+        assertThat(releaseReadiness).containsEntry("version", "V2.0");
         assertThat(releaseReadiness).containsEntry("status", "BLOCKED");
         assertThat((List<String>) releaseReadiness.get("requiredEvidence")).contains("categorySummaries", "releaseGate");
         Map<String, Object> feedbackLoop = (Map<String, Object>) response.getMetrics().get("realQueryFeedback");
         assertThat(feedbackLoop).containsEntry("version", "V2.0");
         assertThat((Integer) feedbackLoop.get("candidateCount")).isGreaterThan(0);
+        assertThat((List<Map<String, Object>>) feedbackLoop.get("candidates"))
+                .allSatisfy(candidate -> assertThat(candidate)
+                        .containsEntry("reviewStatus", "OPEN")
+                        .containsEntry("sourceRunId", runId.toString())
+                        .containsKeys("id", "retrievalProfile"));
+        List<String> candidateIds = ((List<Map<String, Object>>) feedbackLoop.get("candidates")).stream()
+                .map(candidate -> String.valueOf(candidate.get("id")))
+                .toList();
+        assertThat(candidateIds).doesNotHaveDuplicates();
         Map<String, Object> experimentMatrix = (Map<String, Object>) response.getMetrics().get("experimentMatrix");
-        assertThat(experimentMatrix).containsEntry("version", "V2.1");
+        assertThat(experimentMatrix).containsEntry("version", "V2.0");
         assertThat((List<Integer>) experimentMatrix.get("topKValues")).containsExactly(8);
         assertThat((List<String>) experimentMatrix.get("profiles")).contains("classic", "parent-child");
         Map<String, Object> answerQuality = (Map<String, Object>) response.getMetrics().get("answerQuality");
-        assertThat(answerQuality).containsEntry("version", "V2.2");
+        assertThat(answerQuality).containsEntry("version", "V2.0");
+        assertThat(answerQuality).containsEntry("judgeStatus", "REVIEW_REQUIRED");
         assertThat((Double) answerQuality.get("groundedPassRate")).isLessThan(1.0);
+        assertThat((List<Map<String, Object>>) answerQuality.get("riskCases"))
+                .anySatisfy(item -> assertThat(item).containsEntry("caseKey", "no-answer"));
         Map<String, Object> onlineObservability = (Map<String, Object>) response.getMetrics().get("onlineObservability");
-        assertThat(onlineObservability).containsEntry("version", "V2.3");
+        assertThat(onlineObservability).containsEntry("version", "V2.0");
+        assertThat(onlineObservability).containsEntry("sloStatus", "DEGRADED");
         assertThat((Integer) onlineObservability.get("fallbackCount")).isGreaterThan(0);
         Map<String, Object> dataIndexGovernance = (Map<String, Object>) response.getMetrics().get("dataIndexGovernance");
-        assertThat(dataIndexGovernance).containsEntry("version", "V2.4");
+        assertThat(dataIndexGovernance).containsEntry("version", "V2.0");
+        assertThat(dataIndexGovernance).containsEntry("governanceStatus", "ACTION_REQUIRED");
         assertThat((Integer) dataIndexGovernance.get("multiDocumentCaseCount")).isEqualTo(2);
+        Map<String, Object> onlineSlo = (Map<String, Object>) response.getMetrics().get("onlineSlo");
+        assertThat(onlineSlo).containsEntry("version", "V2.0");
+        assertThat(onlineSlo).containsEntry("status", "BREACHED");
+        assertThat((List<String>) onlineSlo.get("breachedObjectives")).contains("fallbackRate", "passRate");
+        Map<String, Object> canaryGate = (Map<String, Object>) response.getMetrics().get("canaryGate");
+        assertThat(canaryGate).containsEntry("version", "V2.0");
+        assertThat(canaryGate).containsEntry("decision", "ROLLBACK");
+        assertThat((List<String>) canaryGate.get("reasons")).contains("releaseGateBlocked", "onlineSloBreached");
+        assertThat((Map<String, String>) canaryGate.get("profileGateStatuses"))
+                .containsEntry("parent-child", "PASSED");
+        Map<String, Object> closure = (Map<String, Object>) response.getMetrics().get("v2QualityClosure");
+        assertThat(closure).containsEntry("version", "V2.0");
+        assertThat(closure).containsEntry("status", "BLOCKED");
+        assertThat((List<String>) closure.get("completedCapabilities")).contains(
+                "persistentFeedbackCandidates",
+                "deterministicAnswerJudge",
+                "retrievalExperimentMatrix",
+                "dataIndexGovernanceSummary",
+                "onlineQualitySlo",
+                "canaryPromoteRollbackGate"
+        );
+        assertThat((List<String>) closure.get("recommendedActions")).contains(
+                "promote_failed_or_degraded_real_queries_to_eval_cases",
+                "review_missing_sources_and_rebuild_index",
+                "hold_canary_and_triage_quality_regressions"
+        );
+        Map<String, Object> releaseReport = (Map<String, Object>) response.getMetrics().get("releaseReport");
+        assertThat(releaseReport)
+                .containsEntry("version", "V2.0")
+                .containsEntry("releaseName", "RAG Quality Closure")
+                .containsEntry("releaseGateStatus", "BLOCKED")
+                .containsEntry("canaryDecision", "ROLLBACK")
+                .containsEntry("closureStatus", "BLOCKED")
+                .containsEntry("recommendedAction", "rollback_or_fix_blockers");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void v20ClosurePromotesPassingCandidateAndAcceptsCorrectNoAnswerCases() {
+        UUID kbId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        RagEvalCase grounded = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
+                .caseKey("grounded-answer").query("How do I install?")
+                .category(RagEvalCaseCategory.REAL_QUERY).minHits(1).topK(5)
+                .expectedFileName("guide.md").mustContainAny(List.of("install")).build();
+        RagEvalCase noAnswer = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
+                .caseKey("correct-no-answer").query("What is the moon password?")
+                .category(RagEvalCaseCategory.HARD_NEGATIVE).minHits(0).topK(5)
+                .mustContainAny(List.of()).build();
+        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(grounded, noAnswer));
+        when(profileIndexStateService.currentRevision(kbId)).thenReturn(9L);
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(retrievalProfileGateService.calculate(any(), eq(9L), eq(9L), eq(true))).thenReturn(Map.of(
+                RetrievalProfile.CLASSIC, gate(RetrievalProfile.CLASSIC),
+                RetrievalProfile.PARENT_CHILD, gate(RetrievalProfile.PARENT_CHILD)
+        ));
+        when(retrievalService.retrieve(eq(kbId), any())).thenAnswer(invocation -> {
+            RetrieveRequest request = invocation.getArgument(1);
+            if (request.getQuery().contains("moon")) {
+                return RetrieveResponse.builder().retrievalMode("hybrid").hits(List.of()).build();
+            }
+            return RetrieveResponse.builder().retrievalMode("hybrid")
+                    .diagnostics(Map.of("fallbackReason", "none"))
+                    .hits(List.of(RetrievalHit.builder().fileName("guide.md")
+                            .content("install setup").score(0.9).build()))
+                    .build();
+        });
+        when(resultRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(runRepository.save(any())).thenAnswer(invocation -> {
+            RagEvalRun run = invocation.getArgument(0);
+            run.setId(runId);
+            return run;
+        });
+
+        RagEvalRunRequest request = new RagEvalRunRequest();
+        request.setProfiles(List.of(RetrievalProfile.CLASSIC, RetrievalProfile.PARENT_CHILD));
+
+        var response = service().run(kbId, request);
+
+        Map<String, Object> feedback = (Map<String, Object>) response.getMetrics().get("realQueryFeedback");
+        assertThat(feedback).containsEntry("candidateCount", 0);
+        Map<String, Object> answerQuality = (Map<String, Object>) response.getMetrics().get("answerQuality");
+        assertThat(answerQuality)
+                .containsEntry("judgeStatus", "PASS")
+                .containsEntry("hallucinationRiskCount", 0)
+                .containsEntry("unsupportedAnswerRiskCount", 0);
+        assertThat((List<Map<String, Object>>) answerQuality.get("riskCases")).isEmpty();
+        Map<String, Object> onlineSlo = (Map<String, Object>) response.getMetrics().get("onlineSlo");
+        assertThat(onlineSlo).containsEntry("status", "MET");
+        Map<String, Object> canaryGate = (Map<String, Object>) response.getMetrics().get("canaryGate");
+        assertThat(canaryGate)
+                .containsEntry("decision", "PROMOTE")
+                .containsEntry("shadowEvalRequired", false);
+        assertThat((List<String>) canaryGate.get("candidateProfiles")).containsExactly("parent-child");
+        assertThat((Map<String, String>) canaryGate.get("profileGateStatuses"))
+                .containsEntry("parent-child", "PASSED");
+        assertThat((List<String>) canaryGate.get("reasons")).isEmpty();
+        Map<String, Object> closure = (Map<String, Object>) response.getMetrics().get("v2QualityClosure");
+        assertThat(closure).containsEntry("status", "READY");
+        assertThat((List<String>) closure.get("recommendedActions"))
+                .contains("promote_candidate_defaults", "record_release_report");
+        Map<String, Object> releaseReport = (Map<String, Object>) response.getMetrics().get("releaseReport");
+        assertThat(releaseReport)
+                .containsEntry("releaseGateStatus", "PASS")
+                .containsEntry("canaryDecision", "PROMOTE")
+                .containsEntry("closureStatus", "READY")
+                .containsEntry("recommendedAction", "promote_candidate_defaults");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void v20CanaryRollsBackWhenProfileGateBlocksEvenIfEvalMetricsPass() {
+        UUID kbId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        RagEvalCase grounded = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
+                .caseKey("grounded-answer").query("How do I install?")
+                .category(RagEvalCaseCategory.REAL_QUERY).minHits(1).topK(5)
+                .expectedFileName("guide.md").mustContainAny(List.of("install")).build();
+        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(grounded));
+        when(profileIndexStateService.currentRevision(kbId)).thenReturn(9L);
+        when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
+        when(retrievalProfileGateService.calculate(any(), eq(9L), eq(9L), eq(true))).thenReturn(Map.of(
+                RetrievalProfile.CLASSIC, gate(RetrievalProfile.CLASSIC),
+                RetrievalProfile.PARENT_CHILD, blockedGate(RetrievalProfile.PARENT_CHILD)
+        ));
+        when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder().retrievalMode("hybrid")
+                .hits(List.of(RetrievalHit.builder().fileName("guide.md").content("install setup").score(0.9).build()))
+                .build());
+        when(resultRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(runRepository.save(any())).thenAnswer(invocation -> {
+            RagEvalRun run = invocation.getArgument(0);
+            run.setId(runId);
+            return run;
+        });
+
+        RagEvalRunRequest request = new RagEvalRunRequest();
+        request.setProfiles(List.of(RetrievalProfile.CLASSIC, RetrievalProfile.PARENT_CHILD));
+
+        var response = service().run(kbId, request);
+
+        Map<String, Object> onlineSlo = (Map<String, Object>) response.getMetrics().get("onlineSlo");
+        assertThat(onlineSlo).containsEntry("status", "MET");
+        Map<String, Object> canaryGate = (Map<String, Object>) response.getMetrics().get("canaryGate");
+        assertThat(canaryGate).containsEntry("decision", "ROLLBACK");
+        assertThat((Map<String, String>) canaryGate.get("profileGateStatuses"))
+                .containsEntry("parent-child", "BLOCKED");
+        assertThat((List<String>) canaryGate.get("reasons"))
+                .containsExactly("profileGateBlocked:parent-child");
+        Map<String, Object> closure = (Map<String, Object>) response.getMetrics().get("v2QualityClosure");
+        assertThat(closure).containsEntry("status", "BLOCKED");
     }
 
     @Test
@@ -1063,6 +1227,30 @@ class RagEvalServiceTest {
                 .baseline(RetrievalProfile.CLASSIC)
                 .status(RagEvalGateStatus.PASSED)
                 .reason("passed")
+                .metrics(metrics)
+                .classicMetrics(metrics.toBuilder().profile(RetrievalProfile.CLASSIC).build())
+                .hitRateDelta(0.0)
+                .citationPassRateDelta(0.0)
+                .build();
+    }
+
+    private static RagEvalGateDecisionResponse blockedGate(RetrievalProfile candidate) {
+        RagEvalProfileMetricsResponse metrics = RagEvalProfileMetricsResponse.builder()
+                .profile(candidate)
+                .totalCases(1)
+                .passedCount(1)
+                .hitPassedCount(1)
+                .citationEligibleCount(1)
+                .citationPassedCount(1)
+                .passRate(1.0)
+                .hitRate(1.0)
+                .citationPassRate(1.0)
+                .build();
+        return RagEvalGateDecisionResponse.builder()
+                .candidate(candidate)
+                .baseline(RetrievalProfile.CLASSIC)
+                .status(RagEvalGateStatus.BLOCKED)
+                .reason("candidate gate blocked")
                 .metrics(metrics)
                 .classicMetrics(metrics.toBuilder().profile(RetrievalProfile.CLASSIC).build())
                 .hitRateDelta(0.0)

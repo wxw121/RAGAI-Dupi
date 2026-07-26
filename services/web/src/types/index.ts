@@ -371,6 +371,10 @@ export interface RagEvalMetrics {
   answerQuality?: RagEvalAnswerQuality
   onlineObservability?: RagEvalOnlineObservability
   dataIndexGovernance?: RagEvalDataIndexGovernance
+  onlineSlo?: RagEvalOnlineSlo
+  canaryGate?: RagEvalCanaryGate
+  releaseReport?: RagEvalReleaseReport
+  v2QualityClosure?: RagEvalV2QualityClosure
   [key: string]: unknown
 }
 
@@ -415,6 +419,8 @@ export interface RagEvalReleaseReadiness {
   readinessScore?: number
   blockerCount?: number
   requiredEvidence?: string[]
+  artifactKeys?: string[]
+  recommendedAction?: string
 }
 
 export interface RagEvalRealQueryFeedback {
@@ -422,6 +428,7 @@ export interface RagEvalRealQueryFeedback {
   source?: string
   candidateCount?: number
   candidates?: Array<Record<string, unknown>>
+  categoryBreakdown?: Record<string, RagEvalSummaryMetrics>
 }
 
 export interface RagEvalExperimentMatrix {
@@ -429,7 +436,9 @@ export interface RagEvalExperimentMatrix {
   topKValues?: number[]
   profiles?: string[]
   retrievalModes?: string[]
+  caseCount?: number
   evaluationCount?: number
+  rerankEvidenceCount?: number
 }
 
 export interface RagEvalAnswerQuality {
@@ -438,14 +447,21 @@ export interface RagEvalAnswerQuality {
   citationPassedCount?: number
   groundedPassRate?: number
   hallucinationRiskCount?: number
+  unsupportedAnswerRiskCount?: number
+  judgeStatus?: string
+  riskCases?: Array<Record<string, unknown>>
 }
 
 export interface RagEvalOnlineObservability {
   version?: string
   fallbackCount?: number
   fallbackRate?: number
+  noAnswerCaseCount?: number
   noAnswerCorrectnessRate?: number
+  latencyP50Ms?: number
   latencyP95Ms?: number
+  degradedProfileCount?: number
+  sloStatus?: string
 }
 
 export interface RagEvalDataIndexGovernance {
@@ -454,6 +470,46 @@ export interface RagEvalDataIndexGovernance {
   matchedExpectedSourceCount?: number
   expectedSourceCoverageRate?: number
   missingSourceCount?: number
+  multiDocumentCaseCount?: number
+  ambiguousCaseCount?: number
+  embeddingDimensions?: number[]
+  governanceStatus?: string
+}
+
+export interface RagEvalOnlineSlo {
+  version?: string
+  status?: string
+  objectives?: Record<string, unknown>
+  breachedObjectives?: string[]
+  observed?: Record<string, unknown>
+}
+
+export interface RagEvalCanaryGate {
+  version?: string
+  baselineProfile?: string
+  candidateProfiles?: string[]
+  profileGateStatuses?: Record<string, string>
+  decision?: string
+  reasons?: string[]
+  shadowEvalRequired?: boolean
+  rollbackPlan?: string
+}
+
+export interface RagEvalReleaseReport {
+  version?: string
+  releaseName?: string
+  releaseGateStatus?: string
+  canaryDecision?: string
+  closureStatus?: string
+  recommendedAction?: string
+  evidenceKeys?: string[]
+}
+
+export interface RagEvalV2QualityClosure {
+  version?: string
+  status?: string
+  completedCapabilities?: string[]
+  recommendedActions?: string[]
 }
 
 export interface RagEvalRunProfileSnapshot {

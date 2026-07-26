@@ -4,9 +4,9 @@
 [中文](README.zh-CN.md) | **English**
 
 
-> V1.5.0 is the current release. It adds Parent-Child and QA-assisted indexing, a filterable Profile V2 Milvus superset, Combined weighted RRF, revision-bound quality gates, and Web readiness/gate comparisons. API and Web version: `1.5.0`.
+> V2.0 is the current packaged release in API/Web metadata (`2.0.0`). V1.6b-V2.4 remain completed local RAG quality milestones; the former V2.5-V3.0 follow-up scope has been pulled into the V2.0 RAG Quality Closure package.
 
-See the [V1.5.0 release notes](docs/v1.5-release-notes.md) and [release runbook](docs/v1.5-release-runbook.md) before upgrading an existing deployment. Keep `CLASSIC` as the default until the current index revision passes the candidate-vs-classic quality gate.
+See the [V1.5.0 release notes](docs/v1.5-release-notes.md) and [release runbook](docs/v1.5-release-runbook.md) as historical upgrade references. V2.0 keeps `CLASSIC` as the safe baseline until the current index revision passes the candidate-vs-classic quality gate. See the [V2.0 RAG quality roadmap](docs/en/rag-quality-roadmap.md), [design](docs/en/v2.0-rag-quality-closure-design.md), and [implementation plan](docs/en/v2.0-rag-quality-closure-implementation.md).
 
 > V1.4.2 added a read-only GET /api/v1/ops/governance-summary endpoint for OPS_ADMIN operators plus a smoke script and Pester check for the V1.4.1 upload, ingest, outbox, notification, and vector cleanup state.
 
@@ -100,211 +100,230 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scan-release.ps1 `
 
 The scan exports the image's exact `pip freeze --all` result to `worker-requirements.lock.txt`, then audits that lock without resolving a second dependency graph. It accepts either a `pip-audit` executable on `PATH` or an installed `pip_audit` module through `python -m pip_audit`, retries transient audit failures up to three times, and falls back to the pinned `dupi-rag-pip-audit:2.10.1` container when host networking cannot reach OSV. Every path deletes stale output first and records the execution mode in `summary.md`. Use `-TrivySkipDbUpdate` only when the local Trivy database was refreshed separately. The structured exception release must match the normalized image tag, cover every active upstream-unfixed finding exactly, and expires on `2026-08-15`; fixable, expired, unused, or unmatched entries fail the gate. The release scan generates the dependency lock, pip-audit JSON, CycloneDX/Syft SBOM, Trivy version/result JSON, and `summary.md` under `artifacts/v1.4-release-scan`. The summary records the immutable image digest and Trivy vulnerability-database timestamp.
 
-> V1.3 澧炲姞鍙樆鏂殑 RAG 璐ㄩ噺绛栫暐/鍩虹嚎銆佺増鏈寲 Retrieval Profile锛屼互鍙?Milvus 鍘熺敓 Sparse BM25 鐨勫洖濉€佸弻鍐欍€丼hadow銆丆utover 鍜?Rollback銆傜敓浜ч儴缃茶姹?Milvus 2.5.4锛涘崌绾у墠蹇呴』澶囦唤 Milvus/etcd/MinIO/PostgreSQL锛屽苟鍦ㄩ殧绂荤幆澧冨畬鎴愬洖濉笌鍥炴粴婕旂粌銆?
 
-## V1.3 Sparse 杩佺Щ杩愮淮
+V1.3 adds blockable RAG quality policies/baselines, versioned Retrieval profiles, as well as Milvus native Sparse BM25 backfilling, dual write, shadow validation, cutover, and rollback. Production deployment requires Milvus 2.5.4; before upgrading, back up Milvus/etcd/MinIO/PostgreSQL and complete backfill plus rollback drills in isolation.
 
-姣忎釜 Profile 浣跨敤鐙珛闆嗗悎 `{MILVUS_COLLECTION}_sparse_{kbId}_v{version}`銆傝縼绉荤姸鎬佷緷娆′负 `PREPARING -> BACKFILLING -> DUAL_WRITING -> SHADOW_VALIDATING -> CUTOVER -> COMPLETED`锛屽け璐ヨ繘鍏?`FAILED`锛宍BACKFILLING` 鍙箓绛夐噸璇曘€俵egacy BM25 fallback 鐢辫縼绉昏褰曟寔涔呭寲鎺у埗锛屼粎鍏佽鍦ㄥ弻鍐欏拰 Shadow 闃舵鍚敤锛涘畬鎴愬悗鐢辨縺娲?Profile 姘镐箙椹卞姩 Sparse 鍐欏叆銆?
+## V1.3 Sparse Migration Operation and Maintenance
 
-Cutover 瑕佹眰瑕嗙洊鐜?100%銆乪mbedding 缁村害涓€鑷淬€佸€欓€?Profile 鏈夊畬鍏ㄥ尮閰嶇殑 PASS 璇勬祴銆佸€欓€?P95 涓嶈秴杩囧熀绾?1.25 鍊嶃€乫allback rate 涓嶅鍔犮€俁ollback 鍙兘閲嶆柊婵€娲绘洿鏃т笖宸叉湁 PASS 璇佹嵁鐨?Profile銆傚垹闄ゆ枃妗ｄ細鍚屾娓呯悊 dense 闆嗗悎鍜岃鐭ヨ瘑搴撴墍鏈夌増鏈寲 Sparse 闆嗗悎銆?
+Each Profile uses an independent collection `{MILVUS_COLLECTION}_sparse_{kbId}_v{version}`. The migration status is in sequence as `PREPARING -> BACKFILLING -> DUAL_WRITING -> SHADOW_VALIDATING -> CUTOVER -> COMPLETED`. If it fails, it enters `FAILED`. `BACKFILLING` can be idempotent and retried. legacy BM25 fallback is controlled by migration record persistence and is only allowed to be enabled during the dual write and Shadow phases; After completion, the Sparse write is permanently driven by activating the Profile.
 
-鐪熷疄璇枡鍩哄噯鍛戒护锛?
+Cutover requires a coverage rate of 100%, consistent embedding dimensions, candidate profiles with exactly matching PASS evaluations, candidate P95 not exceeding 1.25 times the baseline, and no increase in fallback rate. Rollback can only reactivate older profiles that already have PASS evidence. Deleting a document will simultaneously clean up the dense collection and all versioned Sparse collections of this knowledge base.
+
+Real corpus benchmark command
 
 ```powershell
+
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rag-retrieval-benchmark.ps1 `
   -KbId <kbId> -HybridProfileId <profileId> -RerankProfileId <rerankProfileId> `
   -ApiKey $env:DUPI_API_KEY -OutputPath artifacts/v13-real-benchmark.json
+
 ```
 
-鑴氭湰浼氭牳瀵瑰疄闄呮ā寮忋€丳rofile 寮€鍏炽€侀€愮敤渚嬮樁娈垫帓鍚嶅拰鐩稿 VECTOR 鐨?rank delta锛涘疄闄呮湭鎵ц reranker 鏃剁洿鎺ュけ璐ャ€?
+The script will check the actual mode, Profile switch, use-by-case phase ranking, and the rank delta of the relative VECTOR; It failed directly when reranker was not actually executed.
 
-Worker 浣跨敤 CPU-only PyTorch 鍜?`BAAI/bge-reranker-base`锛岄粯璁ゅ湪鍚姩鐢熷懡鍛ㄦ湡鍔犺浇妯″瀷骞舵墽琛岄鐑帹鐞嗭紱Compose 閫氳繃 `hf_model_cache` 鎸佷箙鍖栨ā鍨嬬紦瀛樸€傞鐑け璐ヤ細鍦?`/health` 涓爣璁?Rerank 涓嶅彲鐢紝浣嗕笉闃绘柇 VECTOR/HYBRID锛涘喎鍚姩寤惰繜涓嶅緱涓庣儹鎬?P95 娣风敤銆?
+Worker uses CPU-only PyTorch and `BAAI/bge-reranker-base`, and by default loads the model and performs preheating inference during the startup lifecycle. Compose persists the model cache through `hf_model_cache`. A preheating failure will mark Rerank unavailable in `/health`, but will not block VECTOR/HYBRID. Cold start delay must not be mixed with hot P95.
 
-> 璐﹀彿 / RBAC 涓?ops 绠＄悊鏉冮檺鏇存柊璁板綍瑙?[docs/rbac-ops-admin-2026-07-06.md](docs/rbac-ops-admin-2026-07-06.md)锛涙憚鍏?outbox銆佸垹闄?tombstone銆佸疄渚嬬骇鎺堟潈涓庡璁¤繍缁村寮鸿 [docs/outbox-tombstone-rbac-ops-2026-07-07.md](docs/outbox-tombstone-rbac-ops-2026-07-07.md)銆?
+Account/RBAC and ops administrative permission update records can be found at [docs/rbac-ops-admin-2026-07-06.md](docs/rbac-ops-admin-2026-07-06.md); See [docs/ outbox-tombstone-rbac-OPs-2026-07-07.md](docs/outbox-tombstone-rbac-ops-2026-07-07.md) for ingroving outbox, removing tombstone, instance authorization and audit operations enhancement.
 > V1.1 (API `0.1.1-SNAPSHOT` / Web `0.1.1`) adds the real-browser E2E gate, ingest diagnostics, RAG evaluation, upload-governance guidance, and aggregated operations alerts.
 > V1.2 expands browser coverage with document-index details, structured chat errors, persistent RAG evaluation cases and history, hybrid retrieval and Rerank controls, audit webhooks, and metadata or chunk-snapshot recovery.
 > V1.2.1 isolates real-browser gate data in the `e2e` tenant and removes temporary knowledge bases and accounts after successful runs.
-> V1.5 (RAG Quality Upgrade) adds Parent-Child / QA-assisted indexing, a filterable profile v2 Milvus superset, Combined weighted RRF, revision-bound eval quality gates, and Web readiness/gate comparisons.
+> V1.5 (RAG Quality Upgrade) adds Parent-Child/QA-assisted indexing, a filterable profile v2 Milvus superset Combined weighted RRF, revision-bound eval quality gates, and Web readiness/gate comparisons.
+> V1.6b-V2.4 are local RAG quality milestones covering benchmark, dashboard, and quality-loop summaries; they are not packaged releases.
 
-浼佷笟绾?RAG 鐭ヨ瘑搴撳紩鎿?鈥?绫讳技 Dify/鎵ｅ瓙搴曞眰鐭ヨ瘑搴撴ā鍧椼€?
+Enterprise-level RAG knowledge base engine - similar to the Dify/ Douzi underlying knowledge base module.
 
-鏀寔绉佹湁鏂囨。锛圥DF銆丏OCX銆乀XT銆丮arkdown銆丒xcel锛変笂浼犮€佸紓姝ヨВ鏋愪笌鍚戦噺鍖栵紝缁撳悎澶фā鍨嬭繘琛屾绱㈠寮洪棶绛旓紙SSE 娴佸紡锛夈€?
+Supports the upload of private documents (PDF, DOCX, TXT, Markdown, Excel), asynchronous parsing and vectorization, and combines large models for retrieval to enhance question answering (SSE streaming).
 
-### V1.5 鍗囩骇涓庡惎鐢?
+### V1.5 upgrade and activation
 
-- V1.5 浣跨敤鐙珛鐨?`MILVUS_PROFILE_COLLECTION` 淇濆瓨 classic銆乸arent-child銆乹a-assisted 鍜?combined 鍏辩敤鐨勫彲杩囨护 superset銆傚凡鏈夌煡璇嗗簱鍗囩骇鍚庨渶瑕佹墽琛屼竴娆♀€滈噸寤虹储寮曗€濓紱閲嶅缓鎸夋枃妗ｆ粴鍔ㄦ浛鎹㈠悜閲忓拰 chunk锛屼笉浼氬厛娓呯┖鏁翠釜鍦ㄧ嚎绱㈠紩銆?
-- 鐭ヨ瘑搴撲粎鍦ㄦ墍鏈夋枃妗ｅ潎涓?`COMPLETED` 涓?`index_schema_version=2` 鏃舵爣璁颁负 profile v2 ready銆傞娆?ready 浼氭寔涔呭寲 cutover 鐘舵€佸苟娓呯悊 Legacy锛涘悗缁笂浼犳垨閲嶅缓鏈熼棿浠嶄娇鐢?v2 涓凡瀹屾垚鐨勬枃妗ｏ紝涓嶄細鍥為€€鍒板凡娓呯悊鐨?Legacy銆傚垏鎹㈤粯璁?profile 鍙敼鍙樻绱㈠叆鍙ｏ紝涓嶄細鍐嶆閲嶅缓缁熶竴绱㈠紩銆?
-- 闈?classic profile 蹇呴』浣跨敤褰撳墠 `index_revision` 鐨?RAG 璇勪及涓?`CLASSIC` 瀵规瘮锛屼笖鑷冲皯鍖呭惈 3 涓?case銆佸紩鐢ㄥ彲璇勪及銆佸懡涓巼鍜屽紩鐢ㄩ€氳繃鐜囧潎涓嶅洖閫€銆傛湭閫氳繃鏃舵洿鏂版帴鍙ｈ繑鍥?HTTP `409`锛岄敊璇爜涓?`retrieval_profile_gate_blocked`銆?
+- V1.5 uses an independent `MILVUS_PROFILE_COLLECTION` to save the filterable superset shared by classic, parent-child, qa-assisted, and combined. After the existing knowledge base is upgraded, a "rebuild index" operation needs to be performed once. The reconstruction replaces vectors and chunks by document scrolling, without clearing the entire online index first.
+- The knowledge base is marked as profile v2 ready only when all documents are `COMPLETED` and `index_schema_version=2`. The first ready will persist the cutover state and clean up Legacy. During subsequent uploads or rebuilds, the completed documents in v2 will still be used and will not be rolled back to the cleaned Legacy. Switching the default profile only changes the search entry and does not rebuild the unified index again.
+- For non-classic profiles, the RAG evaluation of the current `index_revision` must be compared with `CLASSIC`, and it must include at least 3 cases, references can be evaluated, and neither hit rate nor reference pass rate can be rolled back. When not passed, the update interface returns HTTP `409`, and the error code is `retrieval_profile_gate_blocked`.
 
-鐗堟湰鍙樻洿瑙?[V1.5.0 Release Notes](docs/v1.5-release-notes.md)锛屽崌绾с€佺伆搴︺€侀獙璇佷笌鍥炴粴姝ラ瑙?[V1.5.0 鍙戝竷杩愯鎵嬪唽](docs/v1.5-release-runbook.md)銆?
+Version changes can be found in [V1.5.0 Release Notes](docs/v1.5-release-notes.md). Upgrade, gray-scale, verification and rollback steps can be found in [V1.5.0 Release and Operation Manual](docs/v1.5-release-runbook.md).
 
-## 鎶€鏈爤
+## Technology Stack
 
-- **Web 鎺у埗鍙?*锛歊eact 18 + Vite + TypeScript + Tailwind
-- **API**锛欽ava 17 + Spring Boot 3
-- **鏋勫缓宸ュ叿**锛歁aven Wrapper 鍥哄畾 Apache Maven 3.9.9锛坄services/api/mvnw.cmd` / `services/api/mvnw`锛?
-- **Worker**锛歅ython 3.11
-- **鍚戦噺搴?*锛歁ilvus | **鍏冩暟鎹?*锛歅ostgreSQL | **闃熷垪**锛歊edis | **瀵硅薄瀛樺偍**锛歁inIO
+- **Web Console**: React 18 + Vite + TypeScript + Tailwind
+- **API**: Java 17 + Spring Boot 3
+- **Build Tool**: Maven Wrapper pins Apache Maven 3.9.9 (`services/api/mvnw.cmd` / `services/api/mvnw`)
+- **Worker** : Python 3.11
+- **Vector database**: Milvus | **Metadata**: PostgreSQL | **Queue**: Redis | **Object storage**: MinIO
 
-## 蹇€熷惎鍔?
+## Quick start
 
-### 1. 閰嶇疆鐜鍙橀噺
+1. Configure environment variables
 
 ```bash
+
 cp deploy/.env.example deploy/.env
+
 ```
 
-缂栬緫 `deploy/.env`锛?*蹇呴』**閰嶇疆涓ゅ LLM 鍑瘉锛圖eepSeek 瀹樻柟鏃?Embedding 鎺ュ彛锛夛細
+To edit `deploy/.env`, two sets of LLM credentials must be configured (DeepSeek official has no Embedding interface) :
 
-| 鍙橀噺 | 鐢ㄩ€?| 绀轰緥 |
-|------|------|------|
-| `CHAT_API_KEY` | RAG 瀵硅瘽锛圖eepSeek锛?| 鍦?[platform.deepseek.com](https://platform.deepseek.com) 鐢宠 |
-| `CHAT_BASE_URL` | 瀵硅瘽 API 鍦板潃 | `https://api.deepseek.com` |
-| `CHAT_MODEL` | 瀵硅瘽妯″瀷 | `deepseek-chat` |
-| `EMBEDDING_API_KEY` | 鏂囨。鍚戦噺鍖?+ 妫€绱?| 鍦?[鏅鸿氨寮€鏀惧钩鍙癩(https://open.bigmodel.cn) 鐢宠 |
-| `EMBEDDING_BASE_URL` | Embedding API 鍦板潃 | `https://open.bigmodel.cn/api/paas/v4` |
-| `EMBEDDING_MODEL` | 鍚戦噺妯″瀷 | `embedding-2`锛堟櫤璋憋級 |
-| `EMBEDDING_DIMENSION` | 鍚戦噺缁村害 | 椤讳笌妯″瀷涓€鑷达紝鏅鸿氨 `embedding-2` 涓?`1024` |
-| `EMBEDDING_BATCH_SIZE` | Worker 鍗曟 Embedding 璇锋眰鏂囨湰鏁?| 榛樿 `32`锛屽彲鎸変緵搴斿晢闄愬埗涓嬭皟 |
-| `DUPI_API_KEY` | 鍙€夊叕寮€ API 鍏变韩瀵嗛挜 | 鏈湴鍙俊寮€鍙戝彲鐣欑┖锛涘叡浜?閮ㄧ讲鐜寤鸿璁剧疆 |
-| `DUPI_INTERNAL_KEY` | 鍙€夊唴閮?API 鍏变韩瀵嗛挜 | API 涓?Worker 蹇呴』淇濇寔涓€鑷?|
-| `UPLOAD_RATE_LIMIT_REQUESTS` | 涓婁紶闄愭祦绐楀彛鍐呰姹傛暟 | 榛樿 `20` |
-| `UPLOAD_RATE_LIMIT_WINDOW_SECONDS` | 涓婁紶闄愭祦绐楀彛绉掓暟 | 榛樿 `60` |
-| `INGEST_QUEUE_MAX_PENDING_JOBS` | 鎽勫叆 Redis 闃熷垪楂樻按浣?| 榛樿 `200`锛岃揪鍒伴槇鍊兼椂涓婁紶鍏ュ彛蹇€熸嫆缁?|
-| `INGEST_RECOVERY_CRON` | 鎽勫叆浠诲姟琛ュ伩鎵弿 cron | 榛樿姣?2 鍒嗛挓 |
-| `INGEST_RECOVERY_MAX_ATTEMPTS` | 鎽勫叆琛ュ伩鏈€澶ц嚜鍔ㄩ噸璇曟鏁?| 榛樿 `3`锛岃揪鍒板悗杩涘叆姝讳俊鐘舵€?|
-| `INGEST_OUTBOX_DISPATCH_CRON` | transactional outbox 鎶曢€?cron | 榛樿姣?10 绉?|
-| `ORPHAN_VECTOR_CLEANUP_CRON` | 娈嬬暀鍚戦噺琛ュ伩娓呯悊瀹氭椂浠诲姟 | 榛樿姣忓ぉ `03:30` |
-| `AUDIT_RETENTION_DAYS` | 瀹¤鏃ュ織淇濈暀澶╂暟 | 榛樿 `180`锛屽皬浜庣瓑浜?0 琛ㄧず涓嶆竻鐞?|
-| `AUDIT_RETENTION_CRON` | 瀹¤鏃ュ織淇濈暀娓呯悊 cron | 榛樿姣忓ぉ `02:15` |
-| `AUDIT_ALERT_WINDOW_MINUTES` | 瀹¤澶辫触鍛婅缁熻绐楀彛 | 榛樿 `30` 鍒嗛挓 |
-| `AUDIT_ALERT_FAILED_THRESHOLD` | 瀹¤澶辫触鍛婅闃堝€?| 榛樿 `10` 娆?|
-| `AUDIT_ALERT_WEBHOOK_URL` | 鍙€夊璁″憡璀?Webhook 鍦板潃 | 鐣欑┖鏃堕€氱煡鎺ュ彛杩斿洖 `configured=false` |
-| `AUDIT_ALERT_WEBHOOK_TIMEOUT_SECONDS` | 瀹¤鍛婅 Webhook 瓒呮椂 | 榛樿 `10` 绉?|
+| Variable | Purpose | Notes |
+|---|---|---|
+| `CHAT_API_KEY` | RAG chat model API key | Apply at [platform.deepseek.com](https://platform.deepseek.com) |
+| `CHAT_BASE_URL` | Chat API base URL | `https://api.deepseek.com` |
+| `CHAT_MODEL` | Chat model | `deepseek-chat` |
+| `EMBEDDING_API_KEY` | Document vectorization and retrieval key | Apply at [Zhipu Open Platform](https://open.bigmodel.cn) |
+| `EMBEDDING_BASE_URL` | Embedding API base URL | `https://open.bigmodel.cn/api/paas/v4` |
+| `EMBEDDING_MODEL` | Embedding model | `embedding-2` |
+| `EMBEDDING_DIMENSION` | Embedding vector dimension | Must match the model; Zhipu `embedding-2` uses `1024` |
+| `EMBEDDING_BATCH_SIZE` | Worker embedding batch size | Default `32`; lower it if provider limits require |
+| `DUPI_API_KEY` | Optional public API shared key | May be blank for trusted local development; set it in shared/deployed environments |
+| `DUPI_INTERNAL_KEY` | Optional internal API shared key | Must match between API and Worker |
+| `UPLOAD_RATE_LIMIT_REQUESTS` | Upload requests per rate-limit window | Default `20` |
+| `UPLOAD_RATE_LIMIT_WINDOW_SECONDS` | Upload rate-limit window seconds | Default `60` |
+| `INGEST_QUEUE_MAX_PENDING_JOBS` | Redis ingest queue high-water mark | Default `200`; uploads are rejected quickly when reached |
+| `INGEST_RECOVERY_CRON` | Ingest compensation scan cron | Default every 2 minutes |
+| `INGEST_RECOVERY_MAX_ATTEMPTS` | Max automatic ingest compensation retries | Default `3`; then moves to dead-letter status |
+| `INGEST_OUTBOX_DISPATCH_CRON` | Transactional outbox dispatch cron | Default every 10 seconds |
+| `ORPHAN_VECTOR_CLEANUP_CRON` | Orphan vector cleanup cron | Default daily at `03:30` |
+| `AUDIT_RETENTION_DAYS` | Audit log retention days | Default `180`; `<=0` disables cleanup |
+| `AUDIT_RETENTION_CRON` | Audit retention cleanup cron | Default daily at `02:15` |
+| `AUDIT_ALERT_WINDOW_MINUTES` | Audit failure alert window | Default `30` minutes |
+| `AUDIT_ALERT_FAILED_THRESHOLD` | Audit failure alert threshold | Default `10` failures |
+| `AUDIT_ALERT_WEBHOOK_URL` | Optional audit alert webhook URL | Blank returns `configured=false` |
+| `AUDIT_ALERT_WEBHOOK_TIMEOUT_SECONDS` | Audit alert webhook timeout | Default `10` seconds |
 
-閰嶇疆鍚庨噸鍚簲鐢ㄥ鍣細
+Restart the application container after configuration
 
 ```bash
+
 cd deploy
 docker compose up -d --force-recreate api worker
+
 ```
 
-### 2. 鍚姩鍩虹璁炬柦涓庡簲鐢?
+2. Start infrastructure and applications
 
 ```bash
+
 cd deploy
 docker compose up -d --build
+
 ```
 
-### 3. 璁块棶 Web 鎺у埗鍙?
+3. Access the Web console
 
-娴忚鍣ㄦ墦寮€ **http://localhost:8080**
+Open **http://localhost:8080** in the browser
 
-1. **鏂板缓鐭ヨ瘑搴?* 鈫?閫夋嫨鍚戦噺妫€绱㈡垨娣峰悎妫€绱紝鐐瑰嚮鍗＄墖杩涘叆璇︽儏
-2. **鏂囨。绠＄悊** 鈫?涓婁紶鏂囦欢锛岀瓑寰呯姸鎬?`COMPLETED`锛涚偣鍑绘煡鐪嬫寜閽鏌ュ璞°€佹憚鍏ヤ换鍔°€佸垎鍧楁€绘暟銆佹渶澶?20 涓垎鍧楁牱渚嬩笌绱㈠紩灏辩华鐘舵€?
-3. **鏅鸿兘闂瓟** 鈫?鍩轰簬宸叉憚鍏ユ枃妗ｆ彁闂紙闇€閰嶇疆 `CHAT_API_KEY` 涓?`EMBEDDING_API_KEY`锛?
-4. **RAG 璇勪及** 鈫?绠＄悊鎸佷箙鍖栫敤渚嬶紙绌哄簱鑷姩鍒涘缓鍐呯疆鐢ㄤ緥锛屾瘡搴撴渶澶?100 鏉★級锛岄€夋嫨鏄惁鍚敤 Rerank锛岃繍琛屽苟鏌ョ湅鏈€杩?10 娆＄粨鏋滀笌閫愮敤渚嬭瘖鏂?
+1. **Create a New Knowledge Base** → Select vector search or hybrid search, and click the card to enter the details
+2. **Document Management** → Upload a file, wait for status `COMPLETED`, then click the View button to inspect objects, ingest tasks, total chunk count, up to 20 chunk samples, and index readiness status
+3. **Intelligent Q&A** → Ask questions based on ingested documents (`CHAT_API_KEY` and `EMBEDDING_API_KEY` need to be configured)
+4. **RAG Evaluation** → Manage persistent use cases (automatically create built-in use cases for empty libraries, with a maximum of 100 cases per library), select whether to enable Rerank, run evaluations, and inspect the latest 10 runs plus per-case diagnostics
 
-### 4. 楠岃瘉
+4. Verification
 
 ```bash
-# 鍋ュ悍妫€鏌ワ紙缁?Nginx 浠ｇ悊锛?
+
+# 健康检查（经 Nginx 代理）
 curl http://localhost:8080/actuator/health
+
 ```
 
-榛樿 Compose 鍙毚闇?Web 鍏ュ彛 `http://localhost:8080`锛孉PI銆乄orker銆丳ostgreSQL銆丷edis銆丮ilvus銆丮inIO 浠呭湪 Docker 鍐呴儴缃戠粶鍙銆傞渶瑕佺洿杩炶皟璇曟椂锛屽彲涓存椂浣跨敤鏈湴 override 鏂囦欢鏄犲皠绔彛锛岄伩鍏嶆妸璋冭瘯绔彛闀挎湡鏆撮湶鍦ㄩ粯璁ら儴缃蹭腑銆?
+By default, Compose only exposes the Web entry `http://localhost:8080`, and the API, Worker, PostgreSQL, Redis, Milvus, and MinIO are only visible within the Docker internal network. When direct connection debugging is required, the local override file can be temporarily used to map the port to avoid exposing the debugging port to the default deployment for a long time.
 
-闇€瑕佹鏌?Compose 灞曞紑閰嶇疆鏃讹紝璇蜂娇鐢ㄨ劚鏁忚剼鏈紝閬垮厤鎶?`.env` 涓殑绗笁鏂?Key 鎵撳嵃鍒扮粓绔垨鑱婂ぉ璁板綍锛?
+When checking the Compose expansion configuration, please use the desensitization script to avoid printing third-party keys in `.env` to the terminal or chat records:
 
 ```powershell
+
 powershell -ExecutionPolicy Bypass -NoProfile -File scripts/compose-config-redacted.ps1
+
 ```
 
-濡傛灉鏇剧粡鎶?`docker compose config` 鐨勫師濮嬭緭鍑鸿创鍒扮粓绔叡浜笂涓嬫枃鎴栨埅鍥句腑锛岃绔嬪嵆杞崲瀵瑰簲鐨?`CHAT_API_KEY`銆乣EMBEDDING_API_KEY` 浠ュ強鍏变韩瀵嗛挜銆?
+If you have ever pasted the original output of `docker compose config` into the terminal shared context or screenshot, please immediately rotate the corresponding `CHAT_API_KEY`, `EMBEDDING_API_KEY` and the shared key.
 
-### 4.1 Docker 鍚姩鎺掗殰
+### Docker startup troubleshooting
 
-- **闀滃儚鎷夊彇鎱㈡垨澶辫触**锛氫紭鍏堥厤缃?Docker Desktop registry mirrors锛屾垨鎻愬墠 `docker pull` Compose 涓殑鍩虹闀滃儚锛涗笉瑕佹妸涓存椂浠ｇ悊鍦板潃鍐欏叆浠撳簱鍐呴厤缃€?
-- **Worker pip 瀹夎鎱㈡垨澶辫触**锛氬彲鍦ㄦ湰鏈?CI 渚ч厤缃?pip 闀滃儚婧愶紱渚濊禆鐗堟湰浠?`services/worker/requirements*.txt` 涓哄噯锛岄伩鍏嶄复鏃舵斁瀹?`pymilvus`銆乣marshmallow` 绛夌害鏉熴€?
-- **鍓嶇鏋勫缓 Node 鐗堟湰闂**锛歐eb 鑴氭湰宸查€氳繃 `services/web/scripts/node16-webcrypto.cjs` 鍏煎鏈満 Node 16锛涚敓浜ф瀯寤轰粛寤鸿浣跨敤椤圭洰 Dockerfile 涓浐瀹氱殑鏋勫缓鐜鎴?Node 18+銆?
-- **CORS 鎴栫鍙ｈ闂紓甯?*锛氶粯璁ゅ彧璁块棶 `http://localhost:8080`锛岀敱 Web Nginx 鍙嶄唬 `/api`锛涘闇€鐩磋繛 API銆丳ostgreSQL銆丷edis銆丮ilvus 鎴?MinIO锛岃浣跨敤涓存椂 Compose override 鏄惧紡鏆撮湶绔彛銆?
-- **Milvus 缁村害涓嶄竴鑷?*锛歚EMBEDDING_DIMENSION` 蹇呴』涓庡綋鍓?`MILVUS_COLLECTION` 鐨?`embedding` 鍚戦噺缁村害涓€鑷淬€傚垏鎹?embedding 妯″瀷/缁村害鍚庯紝鏃х煡璇嗗簱鍙敤 `POST /api/v1/knowledge-bases/{kbId}/reindex` 閲嶅缓锛涘鏋?collection 鏈韩缁村害涓嶅尮閰嶏紝API 浼氬湪鍚姩鏃?fail-fast锛岄渶瑕佸垹闄?閲嶅缓 collection锛屾垨鎶?`MILVUS_COLLECTION` 鎸囧悜鏂扮殑缁村害涓撶敤闆嗗悎銆?
-- **Milvus 闆嗗悎鍔犺浇杈冩參**锛欰PI 鍚姩鍙紓姝ュ彂璧?collection load锛屼笉鍐嶅悓姝ョ瓑寰?QueryNode 瀵艰嚧 Web 闀挎椂闂?502锛涢泦鍚堟湭灏辩华鏈熼棿妫€绱細娌跨敤宸叉湁鏈湴鏂囨湰 fallback锛屽苟鍦ㄨ瘖鏂腑鎶ュ憡鍘熷洜銆?
+- **Slow or failed image pull**: Prioritize Docker Desktop registry mirrors or pre-pull base images used by Compose; do not write temporary proxy addresses into repository configuration.
+- **Slow or failed Worker pip install**: Configure the pip mirror locally or in CI; keep dependency versions pinned to `services/worker/requirements*.txt` instead of temporarily relaxing constraints such as `pymilvus` or `marshmallow`.
+- **Front-end build Node version issue**: The Web script is compatible with native Node 16 via `services/web/scripts/node16-webcrypto.cjs`; for production builds, it is still recommended to use the fixed build environment in the project Dockerfile or Node 18+.
+- **CORS or port access exception**: By default, only `http://localhost:8080` is accessed, and `/api` is reverse-proxied by Web Nginx; if you need to directly connect to API, PostgreSQL, Redis, Milvus, or MinIO, use a temporary Compose override to explicitly expose the port.
+- **Milvus dimension inconsistency**: `EMBEDDING_DIMENSION` must be consistent with the `embedding` vector dimension of the current `MILVUS_COLLECTION`. After switching the embedding model/dimension, the old knowledge base can be reconstructed using `POST /api/v1/knowledge-bases/{kbId}/reindex`. If the dimensions of the collection itself do not match, the API will fail-fast at startup. You need to delete/rebuild the collection or point `MILVUS_COLLECTION` to a new dimensional-specific collection.
+- **Slow Milvus collection loading**: API startup only initiates collection loading asynchronously and no longer waits synchronously for the QueryNode, avoiding long Web 502 windows. While the collection is not ready, retrieval follows the existing local text fallback and reports the cause in diagnostics.
 
-### 4.2 绔埌绔富娴佺▼鑷姩鍖栵紙鎺ㄨ崘锛?
+### End-to-end main process automation
 
-鑴氭湰鎸?Web 鎺у埗鍙版寜閽『搴忚皟鐢ㄦ帴鍙ｏ紙鍋ュ悍 鈫?寤哄簱 鈫?涓婁紶 鈫?鎽勫叆 鈫?妫€绱?鈫?闂瓟 SSE锛夛細
+The script calls the interface in the order of the Web console buttons (Health → Library Building → Upload → Intake → Search → Question Answering SSE) :
 
 ```powershell
+
 powershell -NoProfile -File scripts/e2e-main-flow.ps1
+
 ```
 
-闇€鏈夋晥 `EMBEDDING_*` 涓?`CHAT_*` 閰嶇疆锛涙楠よ鏄庝笌鏈€杩戣繍琛岀粨鏋滆 [docs/e2e-testing.md](docs/e2e-testing.md)銆?
+Valid `EMBEDDING_*` and `CHAT_*` configurations are required. Step-by-step instructions and recent running results can be found at [docs/e2e-testing.md](docs/e2e-testing.md).
 
-鏂板缁存姢涓庡洖褰掗獙璇佽剼鏈細
+New maintenance and regression verification script added:
 
 ```powershell
-# 鐪熷疄娴忚鍣?E2E 闂ㄧ锛氫娇鐢ㄧ湡瀹炵櫥褰曘€丆ookie 涓?CSRF锛屼笉渚濊禆鏈湴寮€鏀炬ā寮?
+
+# 真实浏览器 E2E 门禁：使用真实登录、Cookie 与 CSRF，不依赖本地开放模式
 $env:E2E_BASE_URL="http://localhost:8080"
 $env:E2E_ADMIN_USERNAME="<admin>"
 $env:E2E_ADMIN_PASSWORD="<password>"
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-browser-gate.ps1
 
-# 绱㈠紩缁存姢娴佺▼锛氭壒閲忎笂浼犮€乺eindex銆佹憚鍏ヤ换鍔￠噸璇曞叆鍙ｃ€佸悜閲忔竻鐞嗕换鍔″叆鍙?
+# 索引维护流程：批量上传、reindex、摄入任务重试入口、向量清理任务入口
 powershell -NoProfile -File scripts/e2e-web-maintenance-flow.ps1
 
-# RAG 妫€绱㈠洖褰掕瘎娴嬶細鎸?examples/rag-eval-cases.json 鏍￠獙鍛戒腑涓庡紩鐢ㄦ枃浠?
+# RAG 检索回归评测：按 examples/rag-eval-cases.json 校验命中与引用文件
 powershell -NoProfile -File scripts/rag-regression-eval.ps1
+
 ```
 
-`e2e-browser-gate.ps1` 闇€瑕?`E2E_ADMIN_USERNAME` 涓?`E2E_ADMIN_PASSWORD`锛岀己灏戝嚟鎹椂浼氭槑纭け璐ャ€傞棬绂佷粎浠ラ厤缃鐞嗗憳鍒涘缓 `e2e` 绉熸埛涓殑涓存椂绠＄悊鍛橈紝鍚庣画鐭ヨ瘑搴撱€丷AG 鐢ㄤ緥鍜岄獙璇佽处鍙峰潎鍦ㄨ绉熸埛瀹屾垚锛涙垚鍔熷悗鑷姩鍒犻櫎涓存椂鐭ヨ瘑搴撳強 `e2e_*` 璐﹀彿锛屽け璐ユ椂鍦?Playwright 缁撴灉涓繚鐣欒祫婧愭爣璇嗗拰椤甸潰 URL 浣滀负璇佹嵁銆俙rag-regression-eval.ps1` 浼氬啓鍏?`scripts/rag-regression-eval-last-run.json`锛屽叾涓?`caseResults` 鍖呭惈姣忔潯鐢ㄤ緥鐨?query銆乸ass/fail銆佸懡涓暟銆佹湡鏈?鍛戒腑鏂囦欢銆佸懡涓?token銆佹绱㈡ā寮忋€乫allback 鍘熷洜鍜?embedding 淇℃伅銆?
+`e2e-browser-gate.ps1` requires `E2E_ADMIN_USERNAME` and `E2E_ADMIN_PASSWORD`. If the credentials are missing, it will explicitly fail. Access control is only created as a temporary administrator in the `e2e` tenant by the configuration administrator. Subsequent knowledge bases, RAG use cases, and verification accounts are all completed in this tenant. Upon success, the temporary knowledge base and the `e2e_*` account will be automatically deleted. If it fails, the resource identifier and page URL will be retained in the Playwright result as evidence. `rag-regression-eval.ps1` will be written to `scripts/rag-regression-eval-last-run.json`. Among them, `caseResults` contains the query, pass/fail, hit count, expected/hit file, hit token, retrieval mode, fallback reason and embedding information for each use case.
 
-### 5. API 绀轰緥
+### API examples
 
 ```bash
-# 鍒涘缓鐭ヨ瘑搴?
+
+# 创建知识库
 curl -X POST http://localhost:8080/api/v1/knowledge-bases \
   -H "Content-Type: application/json" \
-  -d '{"name":"demo","description":"娴嬭瘯搴?,"chunkSize":512,"chunkOverlap":64,"topK":5,"retrievalMode":"HYBRID"}'
+  -d '{"name":"demo","description":"测试库","chunkSize":512,"chunkOverlap":64,"topK":5,"retrievalMode":"HYBRID"}'
 
-# 涓婁紶鏂囨。
+# 上传文档
 curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/documents \
   -F "file=@sample.pdf"
 
-# 妫€绱㈣皟璇?
+# 检索调试
 curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/retrieve \
   -H "Content-Type: application/json" \
-  -d '{"query":"浣犵殑闂","topK":5}'
+  -d '{"query":"你的问题","topK":5}'
 
-# /retrieve 杩斿洖 citations 鍜?diagnostics锛屽彲鐢ㄤ簬鎺掓煡鍛戒腑鏁般€乫allback 鍘熷洜涓?embedding 閰嶇疆
+# /retrieve 返回 citations 和 diagnostics，可用于排查命中数、fallback 原因与 embedding 配置
 
-# 閲嶅缓鏃х煡璇嗗簱绱㈠紩锛堝垏鎹?embedding 妯″瀷/缁村害鍚庝娇鐢級
+# 重建旧知识库索引（切换 embedding 模型/维度后使用）
 curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/reindex
 
-# 閲嶈瘯澶辫触鎴栨淇℃憚鍏ヤ换鍔?
+# 重试失败或死信摄入任务
 curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs/{jobId}/retry
 
-# 鏌ョ湅鎽勫叆浠诲姟璇婃柇锛涘搷搴斿寘鍚?documentFileName銆乨ocumentStatus銆乨iagnosis
+# 查看摄入任务诊断；响应包含 documentFileName、documentStatus、diagnosis
 curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs
 
-# 鏌ョ湅鍗曟枃妗ｄ笂浼?鎽勫叆/绱㈠紩璇︽儏锛涘寘鍚璞＄姸鎬併€佹渶杩戜换鍔°€佸垎鍧楁暟涓庡垎鍧楁牱渚?
+# 查看单文档上传/摄入/索引详情；包含对象状态、最近任务、分块数与分块样例
 curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/documents/{docId}/index-detail
 
-# 绠＄悊鎸佷箙鍖?RAG 璇勪及鐢ㄤ緥銆佽繍琛岃瘎浼板苟鏌ョ湅鏈€杩戝巻鍙?
+# 管理持久化 RAG 评估用例、运行评估并查看最近历史
 curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/rag-eval/cases
 curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/rag-eval/cases \
   -H "Content-Type: application/json" \
-  -d '{"caseKey":"format-check","query":"鏀寔鍝簺鏍煎紡锛?,"minHits":1,"topK":5,"expectedFileName":"guide.md","mustContainAny":["PDF"]}'
+  -d '{"caseKey":"format-check","query":"支持哪些格式？","minHits":1,"topK":5,"expectedFileName":"guide.md","mustContainAny":["PDF"]}'
 curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/rag-eval/runs \
   -H "Content-Type: application/json" \
   -d '{"useRerank":true}'
 curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/rag-eval/runs
 
-# 鏌ョ湅骞堕噸璇曟畫鐣欏悜閲忚ˉ鍋挎竻鐞嗕换鍔?
+# 查看并重试残留向量补偿清理任务
 curl http://localhost:8080/api/v1/ops/vector-cleanup-tasks
 curl -X POST http://localhost:8080/api/v1/ops/vector-cleanup-tasks/{taskId}/retry
 
-# 鏌ョ湅/瀵煎嚭瀹¤鏃ュ織銆佹煡鐪嬪璁″憡璀︺€佽处鍙?瑙掕壊鍏冩暟鎹?
+# 查看/导出审计日志、查看审计告警、账号/角色元数据
 curl "http://localhost:8080/api/v1/ops/audit-logs?limit=50"
 curl "http://localhost:8080/api/v1/ops/audit-logs/export" -o audit-logs.csv
 curl http://localhost:8080/api/v1/ops/audit-alerts
@@ -313,23 +332,23 @@ curl http://localhost:8080/api/v1/ops/metadata
 curl http://localhost:8080/api/v1/ops/accounts
 curl http://localhost:8080/api/v1/ops/roles
 
-# 浠呮祴璇曟竻鐞嗭細闇€ OPS_ADMIN锛屼笖浠呭厑璁稿垹闄?e2e 绉熸埛涓殑 e2e_* 璐﹀彿銆?
-# 璐﹀彿绠＄悊椤甸潰涓嶆彁渚涢€氱敤鍒犻櫎鍏ュ彛銆?
+# 仅测试清理：需 OPS_ADMIN，且仅允许删除 e2e 租户中的 e2e_* 账号。
+# 账号管理页面不提供通用删除入口。
 curl -X DELETE http://localhost:8080/api/v1/ops/accounts/e2e_account_42
 
-# /ops/metadata 杩斿洖 guardrails锛氫笂浼犻檺娴併€佹憚鍏ラ槦鍒椼€佸璁￠槇鍊煎拰 multipart 鏈€澶ф枃浠跺ぇ灏?
-# /ops/audit-alerts 鑱氬悎瀹¤澶辫触宄板€笺€佹憚鍏ュけ璐?姝讳俊浠诲姟鍜屽悜閲忔竻鐞嗗け璐ヤ换鍔?
-# /ops/audit-alerts/notify 浠呭湪 AUDIT_ALERT_WEBHOOK_URL 闈炵┖鏃舵姇閫掞紝鍝嶅簲杩斿洖 configured/delivered/statusCode
-# 璋冪敤涓讳綋椤诲悓鏃舵嫢鏈?OPS_ADMIN銆丱PS_AUDIT_READ銆丱PS_ALERT_NOTIFY锛涜秴鏃剁敱 AUDIT_ALERT_WEBHOOK_TIMEOUT_SECONDS 鎺у埗
+# /ops/metadata 返回 guardrails：上传限流、摄入队列、审计阈值和 multipart 最大文件大小
+# /ops/audit-alerts 聚合审计失败峰值、摄入失败/死信任务和向量清理失败任务
+# /ops/audit-alerts/notify 仅在 AUDIT_ALERT_WEBHOOK_URL 非空时投递，响应返回 configured/delivered/statusCode
+# 调用主体须同时拥有 OPS_ADMIN、OPS_AUDIT_READ、OPS_ALERT_NOTIFY；超时由 AUDIT_ALERT_WEBHOOK_TIMEOUT_SECONDS 控制
 
-# schemaVersion=1锛涘崟娆℃渶澶氬鍑?1,000 涓枃妗ｅ揩鐓у拰 10,000 涓垎鍧楀揩鐓?
-# 瀵煎叆鏃跺垱寤烘柊鐭ヨ瘑搴擄紝浠呴€氳繃涓氬姟鏈嶅姟鎭㈠鐭ヨ瘑搴撻厤缃拰璇勪及鐢ㄤ緥
+# schemaVersion=1；单次最多导出 1,000 个文档快照和 10,000 个分块快照
+# 导入时创建新知识库，仅通过业务服务恢复知识库配置和评估用例
 curl http://localhost:8080/api/v1/knowledge-bases/{kbId}/export -o kb-export.json
 curl -X POST http://localhost:8080/api/v1/knowledge-bases/import \
   -H "Content-Type: application/json" \
   --data-binary @kb-export.json
 
-# 鏂板缓/鏇存柊璐﹀彿銆侀噸缃瘑鐮併€佺鐢?鍚敤璐﹀彿銆佽疆鎹?tokenVersion
+# 新建/更新账号、重置密码、禁用/启用账号、轮换 tokenVersion
 curl -X POST http://localhost:8080/api/v1/ops/accounts \
   -H "Content-Type: application/json" \
   -d '{"username":"analyst","password":"change-me","tenantId":"default","roleCode":"ANALYST","knowledgeBaseIds":[]}'
@@ -343,63 +362,90 @@ curl -X POST http://localhost:8080/api/v1/ops/accounts/analyst/disable
 curl -X POST http://localhost:8080/api/v1/ops/accounts/analyst/enable
 curl -X POST http://localhost:8080/api/v1/ops/accounts/analyst/rotate-token
 
-# 鏂板缓/鏇存柊/绂佺敤瑙掕壊锛涜处鍙烽€氳繃 roleCode 鑾峰緱瑙掕壊缁戝畾鐨勬潈闄愮偣
+# 新建/更新/禁用角色；账号通过 roleCode 获得角色绑定的权限点
 curl -X POST http://localhost:8080/api/v1/ops/roles \
   -H "Content-Type: application/json" \
-  -d '{"code":"SUPPORT","name":"鏀寔浜哄憳","permissions":["KB_READ","CHAT_WRITE"]}'
+  -d '{"code":"SUPPORT","name":"支持人员","permissions":["KB_READ","CHAT_WRITE"]}'
 curl -X PATCH http://localhost:8080/api/v1/ops/roles/SUPPORT \
   -H "Content-Type: application/json" \
-  -d '{"name":"鏀寔浜哄憳","permissions":["KB_READ","CHAT_WRITE","DOCUMENT_UPLOAD"]}'
+  -d '{"name":"支持人员","permissions":["KB_READ","CHAT_WRITE","DOCUMENT_UPLOAD"]}'
 curl -X POST http://localhost:8080/api/v1/ops/roles/SUPPORT/disable
 
-# RAG 娴佸紡闂瓟
+# RAG 流式问答
 curl -N -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/chat \
   -H "Content-Type: application/json" \
-  -d '{"query":"浣犵殑闂","stream":true}'
+  -d '{"query":"你的问题","stream":true}'
+
 ```
 
-闂瓟 SSE 鐨?`retrieval` 浜嬩欢杩斿洖 `{ citations, diagnostics }`锛汬TTP 涓?SSE 閿欒閮借繑鍥炵粨鏋勫寲 JSON锛坄error`銆乣message`銆乣stage`銆乣suggestion`銆乣requestId`锛夛紝鍓嶇浼氭寜妫€绱€丩LM銆侀壌鏉冪瓑闃舵缁欏嚭鍙墽琛屾彁绀恒€傜煡璇嗗簱瀵煎叆浠呮帴鍙?`schemaVersion=1`锛屽綋鍓嶄笉閲嶆柊涓婁紶 MinIO 鍘熷浜岃繘鍒躲€佷笉鎭㈠鏂囨。涓昏褰曪紝涔熶笉鐩存帴閲嶅缓鍚戦噺锛涘鍑轰腑鐨勬枃妗?鍒嗗潡灞炰簬瀹¤涓庤縼绉诲揩鐓э紝瀹屾暣鐏惧浠嶉渶瀵硅薄瀛樺偍澶囦唤閰嶅悎銆?
+The `retrieval` event of SSE returns `{ citations, diagnostics }`; Both HTTP and SSE errors return structured JSON (`error` `message` `stage`, `suggestion`, `requestId`), The front end will provide executable prompts in stages such as search, LLM, and authentication. The knowledge base import only accepts `schemaVersion=1`. Currently, there is no re-upload of the MinIO original binary, no restoration of the document master record, nor direct reconstruction of the vector. The documents/blocks in the export belong to the audit and migration snapshots. Complete disaster recovery still requires the support of object storage backups.
 
-### 6. 鏈湴鍓嶇寮€鍙戯紙鍙€夛級
+### Local front-end development
 
 ```bash
+
 cd services/web
 npm install
 npm run dev
+
 ```
 
-Vite 寮€鍙戞湇鍔″櫒杩愯鍦?http://localhost:5173锛孉PI 榛樿浠ｇ悊鍒?http://localhost:8081銆?
+The Vite development server runs on the http://localhost:5173，API default proxy to http://localhost:8081。
 
-榛樿閮ㄧ讲涓嶅啀鏄犲皠瀹夸富鏈?`8081`銆傛湰鍦板墠绔紑鍙戝闇€浣跨敤 Vite 浠ｇ悊锛岃閫氳繃 Docker Compose override 鎴栧崟鐙惎鍔?API 鏆撮湶璋冭瘯绔彛銆?
+The default deployment no longer maps the host machine `8081`. If you need to use a Vite proxy for local front-end development, please expose the debug port through Docker Compose override or by launching a separate API.
 
-### 7. 鏈湴 API 鏋勫缓锛堝彲閫夛級
+### Local API build
 
-API 鎺ㄨ崘浣跨敤椤圭洰鑷甫 Maven Wrapper锛岀‘淇濇湰鍦般€丆I 涓庡鍣ㄦ瀯寤哄熀绾夸竴鑷达細
+The API is recommended to use the Maven Wrapper that comes with the project to ensure that the local, CI, and container build baselines are consistent:
 
 ```powershell
+
 cd services/api
 .\mvnw.cmd verify
+
 ```
 
-## 鐩綍缁撴瀯
+## Directory structure
 
-瑙?[docs/architecture.md](docs/architecture.md)銆?
+See [docs/architecture.md](docs/architecture.md).
 
-## 鐗堟湰瑙勫垝
+## Version planning
 
-| 鐗堟湰 | 鑳藉姏 |
-|------|------|
-| V1 | 鐭ヨ瘑搴?CRUD銆佸紓姝ユ憚鍏ャ€佺函鍚戦噺妫€绱€丼SE RAG銆乄eb 鎺у埗鍙?|
-| V1.1 | 鐪熷疄娴忚鍣?E2E 闂ㄧ銆佹憚鍏ヨ瘖鏂€丷AG 璇勪及闂幆銆佷笂浼犳不鐞嗘彁绀恒€佽仛鍚堣繍缁村憡璀?|
-| V1.2 | 绱㈠紩璇︽儏銆佺粨鏋勫寲 Chat 閿欒銆佹寔涔呭寲 RAG 璇勪及銆佹贩鍚堟绱?Rerank 鎺у埗銆乄ebhook銆佸鍑烘仮澶?|
+| Version | Capability |
+| --- | --- |
+| V1 | Knowledge base CRUD, asynchronous ingestion, pure vector retrieval, SSE RAG, Web console |
+| V1.1 | Real browser E2E gate, ingest diagnostics, RAG evaluation closed loop, upload governance prompt, aggregated operations alert |
+| V1.2 | Index details, structured Chat errors, persistent RAG evaluation, hybrid search / Rerank control, Webhook, export recovery |
 | V1.5 | Parent-Child / QA-assisted indexing, profile v2 filterable superset, Combined weighted fusion, revision-bound quality gates, Web readiness/gate comparison |
-| V2 | BM25 sparse 鐢熶骇璋冧紭銆佽涔夊垎鍧椼€佺敓鎴愪腑鏂€佸畬鏁村璞?鍚戦噺鐏惧鎭㈠ |
-| V3 | 澶氭ā鎬?OCR銆丳ipeline DSL |
-| V4 | K8s銆佸绉熸埛銆佸悎瑙勫璁?|
+| V1.6b-V2.4 local milestones | RAG quality foundation: realistic benchmark, quality dashboard, and quality-loop summaries; BM25 sparse production tuning, semantic chunking, generation interrupt, and full object/vector disaster recovery remain hardening tracks |
+| V2.0 | Packaged RAG Quality Closure release: persistent feedback candidates in evaluation metrics, deterministic answer judge, experiment matrix, data/index governance, online quality SLO, canary promote/rollback gate, and release report |
+| Post-V2.0 | Production feedback tables/events, multimodal OCR, Pipeline DSL, K8s/Helm, multi-tenant compliance audit, high-concurrency load tests, and long-running cost optimization |
 
-璇︾粏瑙勫垝瑙?[docs/todo.md](docs/todo.md) 涓?[docs/decisions.md](docs/decisions.md)銆?
-# V1.3 鍙戝竷纭寲
+For detailed planning, see [docs/todo.md](docs/todo.md) and [docs/decisions.md](docs/decisions.md).
+# V1.3 Release hardening
 
-V1.3 浣跨敤 30 鏉°€佸叚鍒嗙被妫€绱㈡竻鍗曞強褰撳墠/legacy 鍐茬獊璇枡浣滀负鍙戝竷鍩哄噯锛學orker 鏀寔 Rerank 鍚姩棰勭儹鍜屾寔涔呭寲 Hugging Face 缂撳瓨锛岀煡璇嗗簱 RAG 璇勪及椤垫彁渚?Sparse Migration 鐘舵€佽建閬撳拰鍙椾繚鎶ょ殑 Cutover 鎿嶄綔銆侻ilvus 2.4.1 鍒?2.5.4 鐨勫浠?鎭㈠婕旂粌鍙婁緷璧栥€佽鍙瘉銆丆VE銆侀暅鍍忎綋绉壂鎻忓潎鎻愪緵鍙噸澶嶈剼鏈€?
+V1.3 uses a 30-item, six-category retrieval checklist plus current/legacy conflict corpus as the release benchmark. Worker supports Rerank startup preheating and persistent Hugging Face caching. The RAG evaluation page of the knowledge base provides Sparse Migration status tracks and protected Cutover operations. The backup/recovery drills and dependencies, licenses, Cves, and image volume scans of Milvus 2.4.1 to 2.5.4 all provide repeatable scripts.
 
-瀹屾暣鍙戝竷姝ラ銆佺幆澧冨彉閲忋€佸け璐ョ瓥鐣ュ拰璇佹嵁浣嶇疆瑙?[V1.3 鍙戝竷杩愯鎵嬪唽](docs/v1.3-release-runbook.md)銆傚疄闄呯敓浜у悓瑙勬牸婕旂粌銆?0 Case 鐜鍩哄噯鍜岄暅鍍忔壂鎻忎粛鏄寮忓彂甯冨墠鐨勫繀鍋氶」銆?
+See [V1.3 release runbook](docs/v1.3-release-runbook.md) for release steps, environment variables, failure strategy, and evidence locations. Production-equivalent drills, environment benchmarks, and image scans remain required before an official production release.
+
+## V1.6b RAG evaluation benchmark
+
+The current benchmark is stored under `benchmarks/v1.6b/` and contains 100 cases: 40 real queries, 20 hard negatives, 20 multi-document queries, and 20 ambiguous questions. Multi-document cases require distinct source files, hard negatives require zero hits, and ambiguous cases identify an authoritative source plus disambiguating tokens.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rag-eval-cases.ps1 -ValidateOnly
+```
+
+`scripts/rag-retrieval-benchmark.ps1` uses the same V1.6b manifest and corpus by default. V1.7/V1.8 can pass `-ExperimentLabel` and `-TopKOverride` to label retrieval experiments; each run artifact records `experimentLabel`, `topKOverride`, and `releaseGate`, and `-SkipCaseReconcile` supports low-resource reruns when cases are already synced.
+
+## V1.7/V1.8 RAG quality dashboard
+
+V1.7/V1.8 adds category trend/dashboard views, diagnostic drill-down filters, release gate rollups, `topKOverride`/`experimentLabel` retrieval experiment controls, and Profile A/B comparisons to RAG evaluation. The completed milestone is recorded in the tracked [English progress log](docs/en/progress.md).
+
+## V1.9-V2.4 RAG quality loop
+
+V1.9-V2.4 continues the RAG quality system in the same local version slice: release readiness, real-query feedback candidates, experiment matrix, answer-quality proxy metrics, online observability summaries, and data/index governance summaries are written into each evaluation run `metrics` object and rendered as six Quality dashboard cards in the web panel. The completed milestone is recorded in the tracked [English progress log](docs/en/progress.md).
+
+## V2.0 RAG quality closure
+
+The former V2.5-V3.0 RAG quality items are now selected into the V2.0 Closure MVP: persistent feedback candidates, deterministic answer judging, retrieval experiment matrix, data/index governance, online quality SLOs, canary promote/rollback gates, and release reports. The implementation stays in RagEvalRun.metrics and the existing Web dashboard, without adding heavyweight database migrations. See [`docs/en/rag-quality-roadmap.md`](docs/en/rag-quality-roadmap.md), [`docs/en/v2.0-rag-quality-closure-design.md`](docs/en/v2.0-rag-quality-closure-design.md), and [`docs/en/v2.0-rag-quality-closure-implementation.md`](docs/en/v2.0-rag-quality-closure-implementation.md).

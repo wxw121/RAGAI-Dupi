@@ -37,6 +37,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -166,8 +167,8 @@ public class RagEvalService {
             run.setTotalCount(results.size());
             run.setStatus(RagEvalRunStatus.COMPLETED);
             run.setFailureMessage(null);
-            run.setMetrics(metrics(cases, results));
             run.setGateSummary(toGateSummaryMap(decisions));
+            run.setMetrics(metrics(cases, results, decisions));
             run = runRepository.save(run);
             return toRunResponse(run, results);
         } catch (Exception ex) {
@@ -685,6 +686,14 @@ public class RagEvalService {
     }
 
     private Map<String, Object> metrics(List<RagEvalCase> cases, List<RagEvalRunResult> results) {
+        return metrics(cases, results, Map.of());
+    }
+
+    private Map<String, Object> metrics(
+            List<RagEvalCase> cases,
+            List<RagEvalRunResult> results,
+            Map<com.dupi.rag.domain.enums.RetrievalProfile, RagEvalGateDecisionResponse> profileGateDecisions
+    ) {
         int total = results.size();
         long passed = results.stream().filter(RagEvalRunResult::isPassed).count();
         Map<UUID, RagEvalCase> caseById = cases.stream()
@@ -724,6 +733,10 @@ public class RagEvalService {
         metrics.put("answerQuality", answerQuality(results));
         metrics.put("onlineObservability", onlineObservability(results));
         metrics.put("dataIndexGovernance", dataIndexGovernance(results));
+        metrics.put("onlineSlo", onlineSlo(results, metrics));
+        metrics.put("canaryGate", canaryGate(metrics, profileGateDecisions == null ? Map.of() : profileGateDecisions));
+        metrics.put("v2QualityClosure", v2QualityClosure(metrics));
+        metrics.put("releaseReport", releaseReport(metrics));
         return metrics;
     }
 
@@ -814,7 +827,7 @@ public class RagEvalService {
         int blockerCount = collectionSize(gate.get("categoryBlockers")) + collectionSize(gate.get("profileGateBlockers"))
                 + failureCategoryCounts(results).size();
         Map<String, Object> readiness = new LinkedHashMap<>();
-        readiness.put("version", "V1.9");
+        readiness.put("version", "V2.0");
         readiness.put("status", stringValue(gate.get("status")) == null ? "NO_CASES" : stringValue(gate.get("status")));
         readiness.put("readinessScore", Math.max(0.0, rateFraction(
                 results.stream().filter(RagEvalRunResult::isPassed).count(), results.size()) * 100.0 - blockerCount));
@@ -828,16 +841,31 @@ public class RagEvalService {
 
     private Map<String, Object> realQueryFeedback(List<RagEvalRunResult> results) {
         List<Map<String, Object>> candidates = results.stream()
-                .filter(result -> !result.isPassed() || !result.isCitationPassed()
-                        || hasText(result.getFallbackReason()))
+                .filter(this::isFeedbackCandidate)
                 .limit(25)
                 .map(result -> {
                     Map<String, Object> candidate = new LinkedHashMap<>();
+                    String profile = result.getRetrievalProfile() == null
+                            ? com.dupi.rag.domain.enums.RetrievalProfile.CLASSIC.wireValue()
+                            : result.getRetrievalProfile().wireValue();
+                    candidate.put("id", result.getId() == null
+                            ? "feedback:" + result.getRunId() + ":" + profile + ":" + result.getCaseKey()
+                            : "feedback:" + result.getId());
                     candidate.put("caseKey", result.getCaseKey());
                     candidate.put("query", result.getQuery());
                     candidate.put("category", result.getCategory() == null ? null : result.getCategory().name());
                     candidate.put("failureCategories", result.getFailureCategories());
-                    candidate.put("suggestedAction", result.isPassed() ? "review_online_signal" : "promote_to_challenge_case");
+                    candidate.put("sourceRunId", result.getRunId() == null ? null : result.getRunId().toString());
+                    candidate.put("sourceResultId", result.getId() == null ? null : result.getId().toString());
+                    candidate.put("retrievalProfile", profile);
+                    candidate.put("reviewStatus", "OPEN");
+                    candidate.put("promotedCaseId", null);
+                    candidate.put("suggestedAction", result.isPassed()
+                            ? "review_online_signal"
+                            : "promote_to_challenge_case");
+                    candidate.put("judgeStatus", result.isPassed() && result.isCitationPassed()
+                            ? "WATCH"
+                            : "REVIEW_REQUIRED");
                     return candidate;
                 })
                 .toList();
@@ -852,7 +880,7 @@ public class RagEvalService {
 
     private Map<String, Object> experimentMatrix(List<RagEvalRunResult> results) {
         Map<String, Object> matrix = new LinkedHashMap<>();
-        matrix.put("version", "V2.1");
+        matrix.put("version", "V2.0");
         matrix.put("topKValues", results.stream()
                 .map(RagEvalRunResult::getTopK)
                 .filter(value -> value != null && value > 0)
@@ -877,18 +905,36 @@ public class RagEvalService {
         List<RagEvalRunResult> citationEligible = results.stream().filter(RagEvalRunResult::isCitationEligible).toList();
         int citationPassed = (int) citationEligible.stream().filter(RagEvalRunResult::isCitationPassed).count();
         int hallucinationRisk = (int) results.stream()
-                .filter(result -> !result.isCitationPassed() && result.isCitationEligible()
-                        || result.getCategory() == RagEvalCaseCategory.HARD_NEGATIVE && !result.isHitPassed())
+                .filter(this::hasHallucinationRisk)
                 .count();
+        int unsupportedAnswerRisk = (int) results.stream()
+                .filter(result -> hasHallucinationRisk(result)
+                        || result.getCategory() != RagEvalCaseCategory.HARD_NEGATIVE && !result.isHitPassed())
+                .count();
+        List<Map<String, Object>> riskCases = results.stream()
+                .filter(result -> !result.isPassed() || hasHallucinationRisk(result))
+                .limit(25)
+                .map(result -> {
+                    boolean hallucinationRiskCase = hasHallucinationRisk(result);
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("caseKey", result.getCaseKey());
+                    item.put("category", result.getCategory() == null ? null : result.getCategory().name());
+                    item.put("grounded", !hallucinationRiskCase);
+                    item.put("citationComplete", result.isCitationPassed());
+                    item.put("hallucinationRisk", hallucinationRiskCase);
+                    item.put("reasons", result.getFailureReasons());
+                    return item;
+                })
+                .toList();
         Map<String, Object> quality = new LinkedHashMap<>();
-        quality.put("version", "V2.2");
+        quality.put("version", "V2.0");
         quality.put("citationEligibleCount", citationEligible.size());
         quality.put("citationPassedCount", citationPassed);
         quality.put("groundedPassRate", rateFraction(citationPassed, citationEligible.size()));
         quality.put("hallucinationRiskCount", hallucinationRisk);
-        quality.put("unsupportedAnswerRiskCount", hallucinationRisk
-                + (int) results.stream().filter(result -> !result.isHitPassed()
-                && result.getCategory() != RagEvalCaseCategory.HARD_NEGATIVE).count());
+        quality.put("unsupportedAnswerRiskCount", unsupportedAnswerRisk);
+        quality.put("judgeStatus", riskCases.isEmpty() ? "PASS" : "REVIEW_REQUIRED");
+        quality.put("riskCases", riskCases);
         return quality;
     }
 
@@ -897,9 +943,10 @@ public class RagEvalService {
                 && !"none".equalsIgnoreCase(result.getFallbackReason())).count();
         int noAnswerCases = (int) results.stream()
                 .filter(result -> result.getCategory() == RagEvalCaseCategory.HARD_NEGATIVE).count();
-        List<Long> latencies = results.stream().map(RagEvalRunResult::getLatencyMs).sorted().toList();
+        List<Long> latencies = results.stream().map(RagEvalRunResult::getLatencyMs)
+                .filter(java.util.Objects::nonNull).sorted().toList();
         Map<String, Object> observability = new LinkedHashMap<>();
-        observability.put("version", "V2.3");
+        observability.put("version", "V2.0");
         observability.put("fallbackCount", fallbackCount);
         observability.put("fallbackRate", rateFraction(fallbackCount, results.size()));
         observability.put("noAnswerCaseCount", noAnswerCases);
@@ -911,6 +958,12 @@ public class RagEvalService {
         observability.put("degradedProfileCount", (int) profileComparisons(results).values().stream()
                 .filter(value -> value instanceof Map<?, ?> map && doubleValue(map.get("passRateDelta")) < 0.0)
                 .count());
+        Long latencyP95 = longValue(observability.get("latencyP95Ms"));
+        observability.put("sloStatus", fallbackCount > 0
+                || latencyP95 != null && latencyP95 > 1_000L
+                || intValue(observability.get("degradedProfileCount")) > 0
+                ? "DEGRADED"
+                : "OK");
         return observability;
     }
 
@@ -918,7 +971,7 @@ public class RagEvalService {
         int expectedSources = results.stream().mapToInt(this::expectedSourceCount).sum();
         int matchedExpectedSources = results.stream().mapToInt(this::matchedExpectedSourceCount).sum();
         Map<String, Object> governance = new LinkedHashMap<>();
-        governance.put("version", "V2.4");
+        governance.put("version", "V2.0");
         governance.put("expectedSourceCount", expectedSources);
         governance.put("matchedExpectedSourceCount", matchedExpectedSources);
         governance.put("expectedSourceCoverageRate", rateFraction(matchedExpectedSources, expectedSources));
@@ -933,7 +986,170 @@ public class RagEvalService {
                 .distinct()
                 .sorted()
                 .toList());
+        governance.put("governanceStatus", expectedSources > matchedExpectedSources ? "ACTION_REQUIRED" : "OK");
         return governance;
+    }
+
+    private Map<String, Object> onlineSlo(List<RagEvalRunResult> results, Map<String, Object> metrics) {
+        Map<?, ?> releaseGate = metrics.get("releaseGate") instanceof Map<?, ?> map ? map : Map.of();
+        Map<?, ?> observability = metrics.get("onlineObservability") instanceof Map<?, ?> map ? map : Map.of();
+        List<String> breachedObjectives = new ArrayList<>();
+        if (doubleValue(releaseGate.get("passRate")) < 1.0) {
+            breachedObjectives.add("passRate");
+        }
+        if (doubleValue(observability.get("fallbackRate")) > 0.0) {
+            breachedObjectives.add("fallbackRate");
+        }
+        Long latencyP95 = longValue(observability.get("latencyP95Ms"));
+        if (latencyP95 != null && latencyP95 > 1_000L) {
+            breachedObjectives.add("latencyP95Ms");
+        }
+        if (intValue(observability.get("degradedProfileCount")) > 0) {
+            breachedObjectives.add("profileRegression");
+        }
+        Map<String, Object> slo = new LinkedHashMap<>();
+        slo.put("version", "V2.0");
+        slo.put("status", breachedObjectives.isEmpty() ? "MET" : "BREACHED");
+        slo.put("objectives", Map.of(
+                "passRate", 1.0,
+                "fallbackRate", 0.0,
+                "latencyP95Ms", 1_000,
+                "profileRegression", 0
+        ));
+        slo.put("breachedObjectives", breachedObjectives);
+        slo.put("observed", Map.of(
+                "passRate", doubleValue(releaseGate.get("passRate")),
+                "fallbackRate", doubleValue(observability.get("fallbackRate")),
+                "latencyP95Ms", latencyP95 == null ? 0L : latencyP95,
+                "profileRegression", intValue(observability.get("degradedProfileCount")),
+                "evaluationCount", results.size()
+        ));
+        return slo;
+    }
+
+    private Map<String, Object> canaryGate(
+            Map<String, Object> metrics,
+            Map<com.dupi.rag.domain.enums.RetrievalProfile, RagEvalGateDecisionResponse> profileGateDecisions
+    ) {
+        Map<?, ?> releaseGate = metrics.get("releaseGate") instanceof Map<?, ?> map ? map : Map.of();
+        Map<?, ?> onlineSlo = metrics.get("onlineSlo") instanceof Map<?, ?> map ? map : Map.of();
+        Map<?, ?> answerQuality = metrics.get("answerQuality") instanceof Map<?, ?> map ? map : Map.of();
+        LinkedHashSet<String> candidateProfileSet = new LinkedHashSet<>(profileComparisonCandidates(metrics));
+        Map<String, String> profileGateStatuses = new LinkedHashMap<>();
+        profileGateDecisions.forEach((profile, gateDecision) -> {
+            if (profile == null || profile == com.dupi.rag.domain.enums.RetrievalProfile.CLASSIC) {
+                return;
+            }
+            String profileName = profile.wireValue();
+            candidateProfileSet.add(profileName);
+            RagEvalGateStatus gateStatus = gateDecision == null ? RagEvalGateStatus.NOT_EVALUATED : gateDecision.getStatus();
+            profileGateStatuses.put(profileName,
+                    gateStatus == null ? RagEvalGateStatus.NOT_EVALUATED.name() : gateStatus.name());
+        });
+        List<String> candidateProfiles = candidateProfileSet.stream().sorted().toList();
+        List<String> reasons = new ArrayList<>();
+        if (candidateProfiles.isEmpty()) {
+            reasons.add("noCandidateProfile");
+        }
+        profileGateStatuses.forEach((profile, status) -> {
+            if (!RagEvalGateStatus.PASSED.name().equals(status)) {
+                reasons.add("profileGateBlocked:" + profile);
+            }
+        });
+        if (!"PASS".equals(stringValue(releaseGate.get("status")))) {
+            reasons.add("releaseGateBlocked");
+        }
+        if ("BREACHED".equals(stringValue(onlineSlo.get("status")))) {
+            reasons.add("onlineSloBreached");
+        }
+        if ("REVIEW_REQUIRED".equals(stringValue(answerQuality.get("judgeStatus")))) {
+            reasons.add("answerQualityReviewRequired");
+        }
+        String decision = reasons.isEmpty() ? "PROMOTE" : "ROLLBACK";
+        Map<String, Object> gate = new LinkedHashMap<>();
+        gate.put("version", "V2.0");
+        gate.put("baselineProfile", com.dupi.rag.domain.enums.RetrievalProfile.CLASSIC.wireValue());
+        gate.put("candidateProfiles", candidateProfiles);
+        gate.put("profileGateStatuses", profileGateStatuses);
+        gate.put("decision", decision);
+        gate.put("reasons", reasons);
+        gate.put("shadowEvalRequired", !reasons.isEmpty());
+        gate.put("rollbackPlan", reasons.isEmpty() ? "keep_candidate_defaults" : "keep_classic_default_and_rebuild_quality_evidence");
+        return gate;
+    }
+
+    private Map<String, Object> releaseReport(Map<String, Object> metrics) {
+        Map<?, ?> releaseGate = metrics.get("releaseGate") instanceof Map<?, ?> map ? map : Map.of();
+        Map<?, ?> canaryGate = metrics.get("canaryGate") instanceof Map<?, ?> map ? map : Map.of();
+        Map<?, ?> closure = metrics.get("v2QualityClosure") instanceof Map<?, ?> map ? map : Map.of();
+        String canaryDecision = stringValue(canaryGate.get("decision"));
+        Map<String, Object> report = new LinkedHashMap<>();
+        report.put("version", "V2.0");
+        report.put("releaseName", "RAG Quality Closure");
+        report.put("releaseGateStatus", stringValue(releaseGate.get("status")));
+        report.put("canaryDecision", canaryDecision);
+        report.put("closureStatus", stringValue(closure.get("status")));
+        report.put("recommendedAction", "PROMOTE".equals(canaryDecision)
+                ? "promote_candidate_defaults"
+                : "rollback_or_fix_blockers");
+        report.put("evidenceKeys", List.of(
+                "releaseReadiness",
+                "realQueryFeedback",
+                "experimentMatrix",
+                "answerQuality",
+                "onlineSlo",
+                "dataIndexGovernance",
+                "canaryGate"
+        ));
+        return report;
+    }
+
+    private Map<String, Object> v2QualityClosure(Map<String, Object> metrics) {
+        Map<?, ?> releaseGate = metrics.get("releaseGate") instanceof Map<?, ?> map ? map : Map.of();
+        Map<?, ?> canaryGate = metrics.get("canaryGate") instanceof Map<?, ?> map ? map : Map.of();
+        boolean releasable = "PASS".equals(stringValue(releaseGate.get("status")))
+                && "PROMOTE".equals(stringValue(canaryGate.get("decision")));
+        List<String> recommendedActions = new ArrayList<>();
+        if (!releasable) {
+            recommendedActions.add("promote_failed_or_degraded_real_queries_to_eval_cases");
+            recommendedActions.add("review_missing_sources_and_rebuild_index");
+            recommendedActions.add("hold_canary_and_triage_quality_regressions");
+        } else {
+            recommendedActions.add("promote_candidate_defaults");
+            recommendedActions.add("record_release_report");
+        }
+        Map<String, Object> closure = new LinkedHashMap<>();
+        closure.put("version", "V2.0");
+        closure.put("status", releasable ? "READY" : "BLOCKED");
+        closure.put("completedCapabilities", List.of(
+                "persistentFeedbackCandidates",
+                "deterministicAnswerJudge",
+                "retrievalExperimentMatrix",
+                "dataIndexGovernanceSummary",
+                "onlineQualitySlo",
+                "canaryPromoteRollbackGate"
+        ));
+        closure.put("recommendedActions", recommendedActions);
+        return closure;
+    }
+
+    private List<String> profileComparisonCandidates(Map<String, Object> metrics) {
+        Object comparisons = metrics.get("profileComparisons");
+        if (!(comparisons instanceof Map<?, ?> map) || map.isEmpty()) {
+            return List.of();
+        }
+        return map.keySet().stream().map(String::valueOf).sorted().toList();
+    }
+
+    private boolean isFeedbackCandidate(RagEvalRunResult result) {
+        return !result.isPassed()
+                || result.isCitationEligible() && !result.isCitationPassed()
+                || hasText(result.getFallbackReason()) && !"none".equalsIgnoreCase(result.getFallbackReason());
+    }
+
+    private boolean hasHallucinationRisk(RagEvalRunResult result) {
+        return result.isCitationEligible() && !result.isCitationPassed()
+                || result.getCategory() == RagEvalCaseCategory.HARD_NEGATIVE && !result.isHitPassed();
     }
 
     private int expectedSourceCount(RagEvalRunResult result) {
@@ -977,7 +1193,8 @@ public class RagEvalService {
         int hitPassed = (int) results.stream().filter(RagEvalRunResult::isHitPassed).count();
         List<RagEvalRunResult> citationEligible = results.stream().filter(RagEvalRunResult::isCitationEligible).toList();
         int citationPassed = (int) citationEligible.stream().filter(RagEvalRunResult::isCitationPassed).count();
-        List<Long> latencies = results.stream().map(RagEvalRunResult::getLatencyMs).sorted().toList();
+        List<Long> latencies = results.stream().map(RagEvalRunResult::getLatencyMs)
+                .filter(java.util.Objects::nonNull).sorted().toList();
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("total", total);
         summary.put("passed", passed);

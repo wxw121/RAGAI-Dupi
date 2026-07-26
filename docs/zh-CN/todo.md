@@ -16,24 +16,20 @@
 - [x] V2.3：线上质量观测摘要（fallback、no-answer、延迟、退化 profile）— 2026-07-21
 - [x] V2.4：数据/索引治理摘要（期望来源覆盖、多文档、歧义和 embedding 证据）— 2026-07-21
 
-## 后续 RAG 质量路线图
+## V2.0 RAG 质量体系封板可发布包
 
-- [ ] V2.5：真实反馈闭环持久化与候选用例复核队列
-- [ ] V2.6：答案质量裁判层、引用校验器和可审计 rubric
-- [ ] V2.7：检索实验注册表与推荐配置报告
-- [ ] V2.8：数据/索引治理自动化，覆盖语料漂移、冲突、chunk 质量和重建索引建议
-- [ ] V2.9：线上质量 SLO、观测指标和告警
-- [ ] V3.0：canary 发布门禁与自动 promote/rollback 报告
+- [x] V2.0：将挑选后的 RAG 质量体系封板 MVP 打包进 API/Web 元数据 2.0.0 - 2026-07-26
+- [x] V2.0：将反馈候选、确定性答案裁判证据、实验矩阵、数据/索引治理、线上 SLO、Canary 门禁与发布报告写入 RagEvalRun.metrics - 2026-07-26
 
 
 
 
 
-V1.6.0版本关闭包
+V2.0 可发布包与质量里程碑口径
 
-- [x]将API， Web和lockfile发布元数据调整为1.6.0。
-- [x] V18-V20版本文档升级、配置文件V2 rollout、质检关、监控、回退。
-- [x]通过API， Worker, Web, Pester, Compose， diff和release-scan闸门在最终的发布diff。
+- [x] 将 API、Web 和 lockfile 发布元数据更新为当前可发布包 `2.0.0`。
+- [x] V1.6b-V2.4 作为本地 RAG 质量里程碑记录，不单独声明为发布包。
+- [x] 将原 V2.5-V3.0 后续质量内容挑选进入 V2.0 封板 MVP；生产反馈表/事件流等重型能力保留到 Post-V2.0。
 
 V1.4.2治理操作稳定性
 
@@ -88,8 +84,8 @@ V1.4.0可验证恢复
 - [ ] 运维面板增强：任务高级筛选、邮件/IM 等更多通知渠道与审计归档对接
 - [ ] 完整灾备恢复：MinIO 原始二进制、文档主记录与 Milvus 向量的一致性导入/校验
 - [ ] Milvus BM25 sparse 字段生产调优与索引参数压测
-- [ ] 可视化 Knowledge Pipeline DSL（V3）
-- [ ] K8s Helm Chart（V4）
+- [ ] 可视化 Knowledge Pipeline DSL（Post-V2.0）
+- [ ] K8s Helm Chart（Post-V2.0）
 
 ## 已完成
 
