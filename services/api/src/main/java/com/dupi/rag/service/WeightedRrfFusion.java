@@ -1,12 +1,14 @@
 package com.dupi.rag.service;
 
 import com.dupi.rag.client.MilvusVectorService;
+import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+@Component
 public class WeightedRrfFusion {
 
     public List<MilvusVectorService.SearchResult> fuse(List<Route> routes, int rrfK) {

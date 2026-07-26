@@ -7,21 +7,23 @@
 
 - Added six versioned quality-loop maps to evaluation run metrics: releaseReadiness, realQueryFeedback, experimentMatrix, answerQuality, onlineObservability, and dataIndexGovernance.
 - Added six Quality dashboard cards for release readiness, real-query feedback candidates, retrieval experiment matrix, answer quality, online observability, and data/index governance.
-- Design doc: docs/superpowers/specs/2026-07-21-v1.9-v2.4-rag-quality-loop-design.md; implementation doc: docs/superpowers/plans/2026-07-21-v1.9-v2.4-rag-quality-loop-implementation.md.
+- The completed design and implementation status is retained in this tracked progress log.
 - Deferred resource-heavy post-V2.4 checks: real browser E2E, Docker Compose release rehearsal, true load/latency experiments, and persistent production chat-log feedback queues.
 
-## 2026-07-21 V2.5+ RAG quality roadmap
+## 2026-07-26 V2.0 RAG Quality Closure packaged release
 
-- Added a dedicated roadmap for V2.5-V3.0: feedback persistence, answer-quality judging, experiment registry, data/index governance automation, online quality SLOs, and canary release gates.
+- Selected the former V2.5-V3.0 follow-up scope into the V2.0 Closure MVP: feedback candidates, deterministic answer judging, experiment matrix, data/index governance, online quality SLOs, canary gates, and release reports.
+- Unified the version convention: current packaged API/Web metadata is V2.0 (`2.0.0`); V1.6b-V2.4 are completed local quality milestones and not standalone packages.
 - Roadmap doc: `docs/en/rag-quality-roadmap.md`; Chinese roadmap doc: `docs/zh-CN/rag-quality-roadmap.md`.
-- Kept resource-heavy items explicitly deferred unless a later release window calls for real browser, Compose, or load/latency validation.
+- Design doc: `docs/en/v2.0-rag-quality-closure-design.md`; implementation doc: `docs/en/v2.0-rag-quality-closure-implementation.md`.
+- Kept the implementation inside the existing metrics JSON and Web dashboard; heavier production feedback tables/events remain Post-V2.0.
 
 ## 2026-07-20 V1.7/V1.8 RAG quality dashboard and retrieval experiments
 
 - Added category summaries/trends, diagnostic filters by category/status/failure type, and release gate rollups to make recent eval regressions easier to isolate.
 - Evaluation runs now support `topKOverride` and `experimentLabel` for consistent case TopK overrides and labeled retrieval experiments.
 - Added profile summaries and Profile A/B comparisons showing pass-rate, hit-rate, citation-rate, and latency deltas versus baseline/classic.
-- Design doc: `docs/superpowers/specs/2026-07-20-v1.7-v1.8-rag-quality-dashboard-design.md`; implementation doc: `docs/superpowers/plans/2026-07-20-v1.7-v1.8-rag-quality-dashboard-implementation.md`.
+- The completed design and implementation status is retained in this tracked progress log.
 - Full browser E2E/Compose release rehearsal and true load/latency experiments were deferred to control local resource use.
 ## 2026-07-20 V1.6b RAG evaluation corpus
 

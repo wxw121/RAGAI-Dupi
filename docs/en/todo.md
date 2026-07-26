@@ -25,11 +25,13 @@
 - [x] V2.3: online quality observability summary for fallback, no-answer, latency, and degraded profiles - 2026-07-21
 - [x] V2.4: data/index governance summary for expected-source coverage, multi-document, ambiguous, and embedding evidence - 2026-07-21
 
-## Future RAG quality roadmap
+## V2.0 packaged RAG quality closure
 
-- [ ] V2.5: persistent real-feedback loop and candidate-case review queue
-- [ ] V2.6: answer-quality judge layer with citation verifier and auditable rubric
-- [ ] V2.7: retrieval experiment registry and recommendation report
-- [ ] V2.8: data/index governance automation for corpus drift, conflicts, chunk quality, and reindex suggestions
-- [ ] V2.9: online quality SLO, telemetry, and alerting
-- [ ] V3.0: canary release gate and automated promote/rollback report
+- [x] V2.0: package the selected RAG Quality Closure MVP in API/Web metadata 2.0.0 - 2026-07-26
+- [x] V2.0: persist feedback candidates, deterministic answer judge evidence, experiment matrix, data/index governance, online SLOs, canary gates, and release reports inside RagEvalRun.metrics - 2026-07-26
+
+## V2.0 packaged release and quality milestone convention
+
+- [x] API/Web/lockfile metadata is current packaged release 2.0.0.
+- [x] V1.6b-V2.4 are local RAG quality milestones, not standalone packages.
+- [x] Former V2.5-V3.0 quality scope is selected into the V2.0 Closure MVP; heavier production feedback tables/events are Post-V2.0.

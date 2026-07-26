@@ -1,37 +1,37 @@
-﻿# RAG Quality Roadmap
+# RAG Quality Roadmap
 
-Updated: 2026-07-21
+Updated: 2026-07-26
 
-This roadmap follows the V1.6b-V2.4 benchmark, dashboard, and quality-loop work. The next focus is moving from “observe quality problems” to “capture feedback, diagnose root cause, recommend experiments, and release safely.”
+V2.0 is the current packaged RAG Quality Closure release. It selects the highest-value items from the former V2.5-V3.0 quality roadmap and ships them as an MVP on top of the existing `RagEvalRun.metrics` JSON contract, without adding new database tables or production event streams.
 
-## Recommended sequence
+## Current release: V2.0
 
-| Version | Theme | Goal | Main deliverables | Acceptance signal |
-| --- | --- | --- | --- | --- |
-| V2.5 | Persistent real-feedback loop | Persist failed, low-confidence, user-negative, and reviewed feedback as candidate eval cases | Feedback queue, review states, sampling rules, case-promotion script, Web feedback list | A failed eval or online feedback item can generate a candidate case without polluting the official benchmark |
-| V2.6 | Answer-quality judge layer | Audit groundedness, citation completeness, refusal correctness, and hallucination risk with explainable rules | Deterministic citation verifier, rubric schema, optional LLM judge adapter, reviewer fields | Each case has explainable quality scores and failure reasons instead of a single opaque score |
-| V2.7 | Retrieval experiment registry | Manage profile, TopK, mode, rerank, chunk, and index experiments as structured runs | Experiment registry, run lineage, best-candidate recommendation, diff report | The same benchmark can compare multiple experiments and output a recommended config plus blockers |
-| V2.8 | Data/index governance automation | Convert quality failures into corpus, chunk, source, embedding, and index actions | Corpus drift scanner, conflict detector, chunk quality report, reindex recommendation | The system can list KBs/docs that need source fixes, rechunking, reindexing, or manual disambiguation |
-| V2.9 | Online quality SLO and alerts | Add fallback, no-answer, latency, degraded profile, and regression signals to ops gates | Quality telemetry API, SLO summary, alert rules, dashboard trends | Quality SLOs are visible by KB/profile/tenant and threshold breaches include suggested actions |
-| V3.0 | Canary release and rollback | Combine offline eval, online observation, and release readiness into controlled promotion | Canary policy, shadow eval, promote/rollback gate, release report | New profiles or index strategies only become defaults after passing the canary gate |
+| Area | V2.0 deliverable | Evidence |
+| --- | --- | --- |
+| Feedback candidates | Failed or degraded eval results are persisted as immutable feedback candidate snapshots under `realQueryFeedback.candidates` | `id`, `sourceRunId`, `sourceResultId`, `retrievalProfile`, `reviewStatus`, `suggestedAction`, `judgeStatus` |
+| Deterministic answer judge | Citation-eligible misses and failed hard-negative/no-answer cases are reported as answer-quality risks | `answerQuality.judgeStatus`, `riskCases`, `hallucinationRiskCount`, `unsupportedAnswerRiskCount` |
+| Retrieval experiments | Runs expose a structured matrix of TopK, profile, retrieval mode, case count, evaluation count, and rerank evidence | `experimentMatrix` |
+| Data/index governance | Runs summarize expected-source coverage, missing sources, multi-document/ambiguous cases, embedding dimensions, and action status | `dataIndexGovernance` |
+| Online quality SLO | Offline run metrics are converted into SLO-style pass/fallback/latency/profile-regression objectives | `onlineSlo` |
+| Canary gate | Candidate profiles are promoted only when release metrics, SLOs, answer quality, and actual profile gate statuses are clean | `canaryGate`, including `profileGateStatuses` |
+| Release report | Each run emits a compact release recommendation and evidence list | `v2QualityClosure`, `releaseReport` |
 
-## Code-improvement track
+## Version convention
 
-- Split the growing `RagEvalService` metrics assembly into focused calculators to reduce coupling.
-- Document and contract-test the `RagEvalRun.metrics` schema while keeping JSON extensibility.
-- Extract reusable Web Quality dashboard card components before adding more quality dimensions.
-- Add small fixtures and artifact contracts for benchmark scripts, keeping local verification lightweight.
-- Introduce production feedback tables or events gradually, with sampling, desensitization, and candidate status before promotion into the official benchmark.
+- `2.0.0` is the packaged API/Web release metadata.
+- V1.6b-V2.4 remain completed local RAG quality milestones that feed V2.0; they are not standalone packages.
+- The former V2.5-V3.0 labels are retired as planned package names. Their selected MVP scope is now V2.0.
 
-## Resource-control strategy
+## Post-V2.0 backlog
 
-- V2.5-V2.8 should default to unit tests, component tests, Pester, TypeScript build, and small fixtures; do not run Docker Compose, browser E2E, or load tests by default.
-- V2.9-V3.0 may require real-environment evidence, but should start with runbooks and dry-run scripts before manual scheduling of heavier checks.
-- If an issue remains unresolved after five attempts, record it in the implementation doc under Deferred / Known Issues and continue the current safe increment.
+| Theme | Why it is deferred |
+| --- | --- |
+| Dedicated feedback workflow tables | V2.0 stores immutable metrics snapshots; mutable review assignment, bulk promotion, and workflow history require schema design and migration. |
+| Production telemetry ingestion and alert routing | V2.0 computes SLO-style summaries from eval runs; always-on tenant/KB/profile telemetry, alert destinations, and escalation policy remain a production ops project. |
+| Optional LLM judge | V2.0 uses deterministic, explainable rules; LLM rubric judging needs model/provider controls, review sampling, and cost governance. |
+| Full experiment registry | V2.0 exposes an experiment matrix from run evidence; registry lifecycle, ownership, lineage UI, and best-candidate recommendations remain future work. |
+| Broader platform releases | Multimodal OCR, visual pipeline DSL, K8s/Helm, multi-tenant compliance audit, high-concurrency load tests, and long-running cost optimization remain outside V2.0. |
 
-## Post-V3.0 deferred themes
+## Seal interpretation
 
-- Multimodal OCR and image/table retrieval quality.
-- Visual Knowledge Pipeline DSL.
-- K8s Helm, production multi-tenant compliance audit, and full disaster-recovery release rehearsal.
-- True high-concurrency load/latency testing and long-running cost-optimization experiments.
+After V2.0 passes implementation and verification, the RAG quality closure MVP can be sealed for this release. There is no required follow-up version to satisfy the selected V2.0 scope; future versions should be driven by the Post-V2.0 backlog above, not by unfinished V2.0 items.

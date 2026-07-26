@@ -98,7 +98,7 @@ describe('RagEvalPanel', () => {
             passRate: 0.5,
           },
           releaseReadiness: {
-            version: 'V1.9',
+            version: 'V2.0',
             status: 'BLOCKED',
             readinessScore: 48,
             blockerCount: 2,
@@ -110,31 +110,51 @@ describe('RagEvalPanel', () => {
             source: 'rag_eval_failures_and_degraded_signals',
           },
           experimentMatrix: {
-            version: 'V2.1',
+            version: 'V2.0',
             topKValues: [8],
             profiles: ['classic', 'parent-child'],
             retrievalModes: ['hybrid'],
             evaluationCount: 8,
           },
           answerQuality: {
-            version: 'V2.2',
+            version: 'V2.0',
             citationEligibleCount: 4,
             citationPassedCount: 2,
             groundedPassRate: 0.5,
             hallucinationRiskCount: 2,
+            judgeStatus: 'REVIEW_REQUIRED',
           },
           onlineObservability: {
-            version: 'V2.3',
+            version: 'V2.0',
             fallbackCount: 1,
             fallbackRate: 0.125,
             latencyP95Ms: 120,
+            sloStatus: 'DEGRADED',
           },
           dataIndexGovernance: {
-            version: 'V2.4',
+            version: 'V2.0',
             expectedSourceCount: 4,
             matchedExpectedSourceCount: 2,
             expectedSourceCoverageRate: 0.5,
             missingSourceCount: 2,
+            governanceStatus: 'ACTION_REQUIRED',
+          },
+          onlineSlo: {
+            version: 'V2.0',
+            status: 'BREACHED',
+            breachedObjectives: ['fallbackRate', 'passRate'],
+          },
+          canaryGate: {
+            version: 'V2.0',
+            decision: 'ROLLBACK',
+            reasons: ['releaseGateBlocked', 'onlineSloBreached'],
+            profileGateStatuses: { 'parent-child': 'PASSED' },
+          },
+          v2QualityClosure: {
+            version: 'V2.0',
+            status: 'BLOCKED',
+            completedCapabilities: ['persistentFeedbackCandidates', 'deterministicAnswerJudge', 'canaryPromoteRollbackGate'],
+            recommendedActions: ['hold_canary_and_triage_quality_regressions'],
           },
         },
         results: [
@@ -201,9 +221,13 @@ describe('RagEvalPanel', () => {
     expect(container.textContent).toContain('Profile A/B comparison')
     expect(container.textContent).toContain('MISSING_EXPECTED_FILE')
     expect(container.textContent).toContain('Release readiness')
+    expect(container.textContent).toContain('V2.0 Quality closure')
     expect(container.textContent).toContain('Real query feedback')
     expect(container.textContent).toContain('Experiment matrix')
     expect(container.textContent).toContain('Answer quality')
+    expect(container.textContent).toContain('Canary gate')
+    expect(container.textContent).toContain('Online SLO')
+    expect(container.textContent).toContain('parent-child:PASSED')
     expect(container.textContent).toContain('Online observability')
     expect(container.textContent).toContain('Data/index governance')
 
@@ -291,8 +315,9 @@ describe('RagEvalPanel', () => {
       await Promise.resolve()
     })
 
-    const runButton = container?.querySelector<HTMLButtonElement>('[aria-label="Run RAG eval"]')
+    const runButton = button('运行评估')
     expect(runButton).toBeTruthy()
+    expect(runButton?.getAttribute('aria-label')).toBeNull()
     expect(runButton?.disabled).toBe(false)
 
     await act(async () => {

@@ -103,12 +103,21 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
   const releaseGate = latestMetrics?.releaseGate
   const categorySummaryEntries = Object.entries(latestMetrics?.categorySummaries ?? {})
   const profileComparisonEntries = Object.entries(latestMetrics?.profileComparisons ?? {})
+  const canaryProfileGateDetail = Object.entries(latestMetrics?.canaryGate?.profileGateStatuses ?? {})
+    .map(([profile, status]) => `${profile}:${status}`)
+    .join(', ')
   const qualitySystemCards = [
     latestMetrics?.releaseReadiness && {
       title: 'Release readiness',
-      version: latestMetrics.releaseReadiness.version ?? 'V1.9',
+      version: latestMetrics.releaseReadiness.version ?? 'V2.0',
       value: latestMetrics.releaseReadiness.status ?? 'UNKNOWN',
       detail: `Score ${(latestMetrics.releaseReadiness.readinessScore ?? 0).toFixed(1)} · Blockers ${latestMetrics.releaseReadiness.blockerCount ?? 0}`,
+    },
+    latestMetrics?.v2QualityClosure && {
+      title: 'V2.0 Quality closure',
+      version: latestMetrics.v2QualityClosure.version ?? 'V2.0',
+      value: latestMetrics.v2QualityClosure.status ?? 'UNKNOWN',
+      detail: `Capabilities ${(latestMetrics.v2QualityClosure.completedCapabilities ?? []).length} · Actions ${(latestMetrics.v2QualityClosure.recommendedActions ?? []).join(', ') || '-'}`,
     },
     latestMetrics?.realQueryFeedback && {
       title: 'Real query feedback',
@@ -118,27 +127,39 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
     },
     latestMetrics?.experimentMatrix && {
       title: 'Experiment matrix',
-      version: latestMetrics.experimentMatrix.version ?? 'V2.1',
+      version: latestMetrics.experimentMatrix.version ?? 'V2.0',
       value: `${latestMetrics.experimentMatrix.evaluationCount ?? 0} evals`,
       detail: `TopK ${(latestMetrics.experimentMatrix.topKValues ?? []).join(', ') || '-'} · Profiles ${(latestMetrics.experimentMatrix.profiles ?? []).join(', ') || '-'}`,
     },
     latestMetrics?.answerQuality && {
       title: 'Answer quality',
-      version: latestMetrics.answerQuality.version ?? 'V2.2',
+      version: latestMetrics.answerQuality.version ?? 'V2.0',
       value: formatPercent(latestMetrics.answerQuality.groundedPassRate),
-      detail: `Citation ${latestMetrics.answerQuality.citationPassedCount ?? 0}/${latestMetrics.answerQuality.citationEligibleCount ?? 0} · Risk ${latestMetrics.answerQuality.hallucinationRiskCount ?? 0}`,
+      detail: `${latestMetrics.answerQuality.judgeStatus ?? 'JUDGED'} · Citation ${latestMetrics.answerQuality.citationPassedCount ?? 0}/${latestMetrics.answerQuality.citationEligibleCount ?? 0} · Risk ${latestMetrics.answerQuality.hallucinationRiskCount ?? 0}`,
+    },
+    latestMetrics?.onlineSlo && {
+      title: 'Online SLO',
+      version: latestMetrics.onlineSlo.version ?? 'V2.0',
+      value: latestMetrics.onlineSlo.status ?? 'UNKNOWN',
+      detail: `Breached ${(latestMetrics.onlineSlo.breachedObjectives ?? []).join(', ') || '-'}`,
+    },
+    latestMetrics?.canaryGate && {
+      title: 'Canary gate',
+      version: latestMetrics.canaryGate.version ?? 'V2.0',
+      value: latestMetrics.canaryGate.decision ?? 'UNKNOWN',
+      detail: `Reasons ${(latestMetrics.canaryGate.reasons ?? []).join(', ') || '-'} · Gates ${canaryProfileGateDetail || '-'}`,
     },
     latestMetrics?.onlineObservability && {
       title: 'Online observability',
-      version: latestMetrics.onlineObservability.version ?? 'V2.3',
+      version: latestMetrics.onlineObservability.version ?? 'V2.0',
       value: `${latestMetrics.onlineObservability.fallbackCount ?? 0} fallback`,
-      detail: `Fallback ${formatPercent(latestMetrics.onlineObservability.fallbackRate)} · P95 ${latestMetrics.onlineObservability.latencyP95Ms ?? 0} ms`,
+      detail: `${latestMetrics.onlineObservability.sloStatus ?? 'OK'} · Fallback ${formatPercent(latestMetrics.onlineObservability.fallbackRate)} · P95 ${latestMetrics.onlineObservability.latencyP95Ms ?? 0} ms`,
     },
     latestMetrics?.dataIndexGovernance && {
       title: 'Data/index governance',
-      version: latestMetrics.dataIndexGovernance.version ?? 'V2.4',
+      version: latestMetrics.dataIndexGovernance.version ?? 'V2.0',
       value: formatPercent(latestMetrics.dataIndexGovernance.expectedSourceCoverageRate),
-      detail: `Sources ${latestMetrics.dataIndexGovernance.matchedExpectedSourceCount ?? 0}/${latestMetrics.dataIndexGovernance.expectedSourceCount ?? 0} · Missing ${latestMetrics.dataIndexGovernance.missingSourceCount ?? 0}`,
+      detail: `${latestMetrics.dataIndexGovernance.governanceStatus ?? 'OK'} · Sources ${latestMetrics.dataIndexGovernance.matchedExpectedSourceCount ?? 0}/${latestMetrics.dataIndexGovernance.expectedSourceCount ?? 0} · Missing ${latestMetrics.dataIndexGovernance.missingSourceCount ?? 0}`,
     },
   ].filter((card): card is { title: string; version: string; value: string; detail: string } => Boolean(card))
   const failureCategoryOptions = useMemo(
@@ -344,7 +365,7 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
             aria-label="TopK override"
             className="w-32"
           />
-          <Button aria-label="Run RAG eval" onClick={run} disabled={running || loading || cases.length === 0}>
+          <Button onClick={run} disabled={running || loading || cases.length === 0}>
             {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
             运行评估
           </Button>
