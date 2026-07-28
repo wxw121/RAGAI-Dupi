@@ -1,10 +1,10 @@
-﻿# To-do List
+# To-do List
 
 <!-- language-switch -->
 [中文](../zh-CN/todo.md) | **English**
 
 
-# Before the official release of V1.3
+## Before the official release of V1.3
 
 - [x] 30 Items, Six-category RAG Benchmark List and Release of Access Control Automation - 2026-07-15
 - [x] Rerank Startup Preheating, persistent Model caching and health status - 2026-07-15

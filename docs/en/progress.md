@@ -1,4 +1,4 @@
-﻿# Progress Record
+# Progress Record
 
 <!-- language-switch -->
 [中文](../zh-CN/progress.md) | **English**
@@ -36,7 +36,7 @@
 - Full verification: API 488/488, Web 82/82, Pester manifest policy 5/5, manifest validation, PowerShell syntax checks, TypeScript compile, and Vite production build.
 
 
-# 2026-07-15 V1.3 Release hardening
+## 2026-07-15 V1.3 Release hardening
 
 A new 30-item, six-category search list has been added, supporting idempotent synchronization, cold/hot three-mode benchmarks, and fallback/ ranking evidence access control.
 - New features such as Rerank startup preheating, desensitization health status, and `hf_model_cache` persistent volume have been added; The default model maintains `BAAI/bge-reranker-base`.

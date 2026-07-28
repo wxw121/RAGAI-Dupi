@@ -4,6 +4,7 @@
 [中文](../../README.zh-CN.md) | **English**
 
 
+```bash
 # User-visible quota; requires DOCUMENT_UPLOAD
 curl http://localhost:8080/api/v1/upload-quota
 
@@ -82,23 +83,23 @@ Enterprise-level RAG knowledge base engine - similar to the Dify/ Douzi underlyi
 
 Supports the upload of private documents (PDF, DOCX, TXT, Markdown, Excel), asynchronous parsing and vectorization, and combines large models for retrieval to enhance question answering (SSE streaming).
 
-Upgrade and activation of V1.5
+### V1.5 Upgrade and Activation
 
--V1.5 uses an independent `MILVUS_PROFILE_COLLECTION` to save the filterable superset shared by classic, parent-child, qa-assisted, and combined. After the existing knowledge base is upgraded, a "rebuild index" operation needs to be performed once. The reconstruction replaces vectors and chunks by document scrolling, without clearing the entire online index first.
-The knowledge base is marked as profile v2 ready only when all documents are `COMPLETED` and `index_schema_version=2`. The first ready will persist the cutover state and clean up Legacy. During subsequent uploads or rebuilds, the completed documents in v2 will still be used and will not be rolled back to the cleaned Legacy. Switching the default profile only changes the search entry and does not rebuild the unified index again.
-For non-classic profiles, the RAG evaluation of the current `index_revision` must be compared with `CLASSIC`, and it must include at least 3 cases, references can be evaluated, and neither hit rate nor reference pass rate can be rolled back. When not passed, the update interface returns HTTP `409`, and the error code is `retrieval_profile_gate_blocked`.
+- V1.5 uses an independent `MILVUS_PROFILE_COLLECTION` to save the filterable superset shared by classic, parent-child, qa-assisted, and combined. After the existing knowledge base is upgraded, a "rebuild index" operation needs to be performed once. The reconstruction replaces vectors and chunks by document scrolling, without clearing the entire online index first.
+- The knowledge base is marked as profile v2 ready only when all documents are `COMPLETED` and `index_schema_version=2`. The first ready will persist the cutover state and clean up Legacy. During subsequent uploads or rebuilds, the completed documents in v2 will still be used and will not be rolled back to the cleaned Legacy. Switching the default profile only changes the search entry and does not rebuild the unified index again.
+- For non-classic profiles, the RAG evaluation of the current `index_revision` must be compared with `CLASSIC`, and it must include at least 3 cases, references can be evaluated, and neither hit rate nor reference pass rate can be rolled back. When not passed, the update interface returns HTTP `409`, and the error code is `retrieval_profile_gate_blocked`.
 
 Version changes can be found in [V1.5.0 Release Notes](../v1.5-release-notes.md). Upgrade, gray-scale, verification and rollback steps can be found in [V1.5.0 Release and Operation Manual](../v1.5-release-runbook.md).
 
 ## Technology Stack
 
-- **Web Console ** : React 18 + Vite + TypeScript + Tailwind
-- **API** : Java 17 + Spring Boot 3
-- ** Build Tool ** : Maven Wrapper fixes Apache Maven 3.9.9 (`services/api/mvnw.cmd` / `services/api/mvnw`)
-- **Worker** : Python 3.11
-- * * * * : vector library Milvus|* * * * : metadata PostgreSQL|queue * * * * : Redis|object storage * * * * : MinIO
+- **Web Console**: React 18 + Vite + TypeScript + Tailwind
+- **API**: Java 17 + Spring Boot 3
+- **Build Tool**: Maven Wrapper pins Apache Maven 3.9.9 (`services/api/mvnw.cmd` / `services/api/mvnw`)
+- **Worker**: Python 3.11
+- **Vector Database**: Milvus | **Metadata**: PostgreSQL | **Queue**: Redis | **Object Storage**: MinIO
 
-"Quick start.
+## Quick Start
 
 1. Configure environment variables
 
@@ -110,31 +111,31 @@ cp deploy/.env.example deploy/.env
 
 To edit `deploy/.env`, two sets of LLM credentials must be configured (DeepSeek official has no Embedding interface) :
 
-__DU_PI_PIPE__ sample|__DU_PI_PIPE__ variable|purposes
-__DU_PI_PIPE__ ------|------|------ __DU_PI_PIPE__
-__DU_PI_PIPE__ `CHAT_API_KEY`|RAG dialogue (DeepSeek)|in [platform.deepseek.com](https://platform.deepseek.com) apply for __DU_PI_PIPE__
-__DU_PI_PIPE__ `CHAT_BASE_URL`|dialogue API address|`https://api.deepseek.com` __DU_PI_PIPE__
-__DU_PI_PIPE__ `CHAT_MODEL`|dialogue model|`deepseek-chat` __DU_PI_PIPE__
-__DU_PI_PIPE__ `EMBEDDING_API_KEY`|document vectorization + search|apply on [Zhipu Open Platform](https://open.bigmodel.cn) __DU_PI_PIPE__
-__DU_PI_PIPE__ `EMBEDDING_BASE_URL`|Embedding API address|`https://open.bigmodel.cn/api/paas/v4` __DU_PI_PIPE__
-__DU_PI_PIPE__ `EMBEDDING_MODEL`|vector model|`embedding-2`|(spectrum)
-__DU_PI_PIPE__|`EMBEDDING_DIMENSION`|vector dimensions must be consistent with the model, Wisdom spectrum `embedding-2` for `1024` __DU_PI_PIPE__
-__DU_PI_PIPE__ `EMBEDDING_BATCH_SIZE`|Worker single Embedding request text number|default `32` can be adjusted downward according to the supplier's restrictions
-__DU_PI_PIPE__ `DUPI_API_KEY`|optional public API shared key|local trusted development can be left blank; It is recommended to set|for the shared/deployed environment
-__DU_PI_PIPE__ `DUPI_INTERNAL_KEY`|optional internal API shared key|API and Worker must be consistent __DU_PI_PIPE__
-__DU_PI_PIPE__ `UPLOAD_RATE_LIMIT_REQUESTS`|upload the number of requests within the rate limiting window|default `20` __DU_PI_PIPE__
-__DU_PI_PIPE__ `UPLOAD_RATE_LIMIT_WINDOW_SECONDS`|upload current-limiting window seconds|default `60` __DU_PI_PIPE__
-__DU_PI_PIPE__ `INGEST_QUEUE_MAX_PENDING_JOBS`|intake Redis queue high water level|default `200` When the threshold is reached, the upload entry quickly rejects __DU_PI_PIPE__
-__DU_PI_PIPE__ `INGEST_RECOVERY_CRON`|take in task compensation scan cron|by default|every 2 minutes
-__DU_PI_PIPE__ `INGEST_RECOVERY_MAX_ATTEMPTS`|maximum automatic retry times for intake compensation|default `3` Once reached, it enters the dead letter status __DU_PI_PIPE__
-__DU_PI_PIPE__ `INGEST_OUTBOX_DISPATCH_CRON`|transactional outbox delivers cron|by default every 10 seconds __DU_PI_PIPE__
-__DU_PI_PIPE__ `ORPHAN_VECTOR_CLEANUP_CRON`|residual vector compensation cleaning scheduled task|default daily `03:30` __DU_PI_PIPE__
-__DU_PI_PIPE__ `AUDIT_RETENTION_DAYS`|audit log retention days|default `180`, Less than or equal to 0 indicates that|will not be cleaned up
-__DU_PI_PIPE__ `AUDIT_RETENTION_CRON`|audit log retention cleanup cron|default daily `02:15` __DU_PI_PIPE__
-__DU_PI_PIPE__ `AUDIT_ALERT_WINDOW_MINUTES`|audit failure alert statistics window|default `30` minutes __DU_PI_PIPE__
-__DU_PI_PIPE__ `AUDIT_ALERT_FAILED_THRESHOLD`|audit failure alert threshold|default `10` times __DU_PI_PIPE__
-__DU_PI_PIPE__ `AUDIT_ALERT_WEBHOOK_URL`|optional audit alert Webhook address|when left blank, the notification interface returns `configured=false`  __DU_PI_PIPE__
-__DU_PI_PIPE__ `AUDIT_ALERT_WEBHOOK_TIMEOUT_SECONDS`|audit alert Webhook timeout|default `10` seconds __DU_PI_PIPE__
+| Variable | Purpose | Notes |
+|---|---|---|
+| `CHAT_API_KEY` | RAG chat model API key | Apply at [platform.deepseek.com](https://platform.deepseek.com) |
+| `CHAT_BASE_URL` | Chat API base URL | `https://api.deepseek.com` |
+| `CHAT_MODEL` | Chat model | `deepseek-chat` |
+| `EMBEDDING_API_KEY` | Document vectorization and retrieval key | Apply at [Zhipu Open Platform](https://open.bigmodel.cn) |
+| `EMBEDDING_BASE_URL` | Embedding API base URL | `https://open.bigmodel.cn/api/paas/v4` |
+| `EMBEDDING_MODEL` | Embedding model | `embedding-2` |
+| `EMBEDDING_DIMENSION` | Embedding vector dimension | Must match the model; Zhipu `embedding-2` uses `1024` |
+| `EMBEDDING_BATCH_SIZE` | Worker embedding batch size | Default `32`; lower it if provider limits require |
+| `DUPI_API_KEY` | Optional public API shared key | May be blank for trusted local development; set it in shared/deployed environments |
+| `DUPI_INTERNAL_KEY` | Optional internal API shared key | Must match between API and Worker |
+| `UPLOAD_RATE_LIMIT_REQUESTS` | Upload requests per rate-limit window | Default `20` |
+| `UPLOAD_RATE_LIMIT_WINDOW_SECONDS` | Upload rate-limit window seconds | Default `60` |
+| `INGEST_QUEUE_MAX_PENDING_JOBS` | Redis ingest queue high-water mark | Default `200`; uploads are rejected quickly when reached |
+| `INGEST_RECOVERY_CRON` | Ingest compensation scan cron | Default every 2 minutes |
+| `INGEST_RECOVERY_MAX_ATTEMPTS` | Max automatic ingest compensation retries | Default `3`; then moves to dead-letter status |
+| `INGEST_OUTBOX_DISPATCH_CRON` | Transactional outbox dispatch cron | Default every 10 seconds |
+| `ORPHAN_VECTOR_CLEANUP_CRON` | Orphan vector cleanup cron | Default daily at `03:30` |
+| `AUDIT_RETENTION_DAYS` | Audit log retention days | Default `180`; `<=0` disables cleanup |
+| `AUDIT_RETENTION_CRON` | Audit retention cleanup cron | Default daily at `02:15` |
+| `AUDIT_ALERT_WINDOW_MINUTES` | Audit failure alert window | Default `30` minutes |
+| `AUDIT_ALERT_FAILED_THRESHOLD` | Audit failure alert threshold | Default `10` failures |
+| `AUDIT_ALERT_WEBHOOK_URL` | Optional audit alert webhook URL | Blank returns `configured=false` |
+| `AUDIT_ALERT_WEBHOOK_TIMEOUT_SECONDS` | Audit alert webhook timeout | Default `10` seconds |
 
 Restart the application container after configuration
 
@@ -158,10 +159,10 @@ docker compose up -d --build
 
 Open **http://localhost:8080** in the browser
 
-1. ** Create a New Knowledge Base ** → Select vector search or hybrid search, and click the card to enter the details
-2. ** Document Management ** → Upload File, Waiting status `COMPLETED`; Click the View button to check objects, intake tasks, total number of blocks, up to 20 block samples, and index readiness status
-3. ** Intelligent Q&A ** → Ask questions based on ingited documents (`CHAT_API_KEY` and `EMBEDDING_API_KEY` need to be configured)
-4. **RAG Evaluation ** → Manage persistent use cases (automatically create built-in use cases for empty libraries, with a maximum of 100 cases per library), select whether to enable Rerank, run and view the results of the last 10 times and use case-by-case diagnosis
+1. **Create a New Knowledge Base** → Select vector search or hybrid search, and click the card to enter the details
+2. **Document Management** → Upload a file, wait for status `COMPLETED`, then click the View button to inspect objects, ingest tasks, total chunk count, up to 20 chunk samples, and index readiness status
+3. **Intelligent Q&A** → Ask questions based on ingested documents (`CHAT_API_KEY` and `EMBEDDING_API_KEY` need to be configured)
+4. **RAG Evaluation** → Manage persistent use cases (automatically create built-in use cases for empty libraries, with a maximum of 100 cases per library), select whether to enable Rerank, run evaluations, and inspect the latest 10 runs plus per-case diagnostics
 
 4. Verification
 
@@ -184,16 +185,16 @@ powershell -ExecutionPolicy Bypass -NoProfile -File scripts/compose-config-redac
 
 If you have ever pasted the original output of `docker compose config` into the terminal shared context or screenshot, please immediately rotate the corresponding `CHAT_API_KEY`, `EMBEDDING_API_KEY` and the shared key.
 
-4.1 Docker Startup Troubleshooting
+### Docker Startup Troubleshooting
 
-- ** Slow or failed image pull ** : Prioritize the configuration of Docker Desktop registry mirrors, or advance the base image in `docker pull` Compose; Do not write the temporary proxy address into the repository configuration.
-- ** Slow or failed installation of Worker pip ** : The pip image source can be configured on the local machine /CI side; The dependent version is based on `services/worker/requirements*.txt` to avoid temporarily relaxing constraints such as `pymilvus` and `marshmallow`.
-- ** Front-end build Node version issue ** : The Web script is compatible with native Node 16 via `services/web/scripts/node16-webcrypto.cjs`; For production builds, it is still recommended to use the fixed build environment in the project Dockerfile or Node 18+.
-- **CORS or port access exception ** : By default, only `http://localhost:8080` is accessed, and `/api` is inverted by Web Nginx; If you need to directly connect to API, PostgreSQL, Redis, Milvus or MinIO, please use temporary Compose override to explicitly expose the port.
-- **Milvus dimension inconsistency ** : `EMBEDDING_DIMENSION` must be consistent with the `embedding` vector dimension of the current `MILVUS_COLLECTION`. After switching the embedding model/dimension, the old knowledge base can be reconstructed using `POST /api/v1/knowledge-bases/{kbId}/reindex`. If the dimensions of the collection itself do not match, the API will fail-fast at startup. You need to delete/rebuild the collection or point `MILVUS_COLLECTION` to a new dimensional-specific collection.
-- ** Slow Milvus collection loading ** : The API startup only asynchronously initiates the collection load and no longer synchronously waits for the QueryNode, resulting in a long Web 502 error. During the period when the collection is not ready, the search will follow the existing local text fallback and report the cause in the diagnosis.
+- **Slow or failed image pull**: Prioritize Docker Desktop registry mirrors or pre-pull base images used by Compose; do not write temporary proxy addresses into repository configuration.
+- **Slow or failed Worker pip install**: Configure the pip mirror locally or in CI; keep dependency versions pinned to `services/worker/requirements*.txt` instead of temporarily relaxing constraints such as `pymilvus` or `marshmallow`.
+- **Front-end build Node version issue**: The Web script is compatible with native Node 16 via `services/web/scripts/node16-webcrypto.cjs`; for production builds, it is still recommended to use the fixed build environment in the project Dockerfile or Node 18+.
+- **CORS or port access exception**: By default, only `http://localhost:8080` is accessed, and `/api` is reverse-proxied by Web Nginx; if you need to directly connect to API, PostgreSQL, Redis, Milvus, or MinIO, use a temporary Compose override to explicitly expose the port.
+- **Milvus dimension inconsistency**: `EMBEDDING_DIMENSION` must be consistent with the `embedding` vector dimension of the current `MILVUS_COLLECTION`. After switching the embedding model/dimension, the old knowledge base can be reconstructed using `POST /api/v1/knowledge-bases/{kbId}/reindex`. If the dimensions of the collection itself do not match, the API will fail-fast at startup. You need to delete/rebuild the collection or point `MILVUS_COLLECTION` to a new dimension-specific collection.
+- **Slow Milvus collection loading**: API startup only initiates collection loading asynchronously and no longer waits synchronously for the QueryNode, avoiding long Web 502 windows. While the collection is not ready, retrieval follows the existing local text fallback and reports the cause in diagnostics.
 
-4.2 End-to-end Main Process Automation (Recommended)
+### End-to-End Main Process Automation
 
 The script calls the interface in the order of the Web console buttons (Health → Library Building → Upload → Intake → Search → Question Answering SSE) :
 
@@ -370,7 +371,7 @@ Version planning
 | Post-V2.0 | Production feedback tables/events, multimodal OCR, Pipeline DSL, K8s/Helm, multi-tenant compliance audit, high-concurrency load tests, and long-running cost optimization |
 
 For detailed planning, please refer to [docs/todo.md](../todo.md) and [docs/decisions.md](../decisions.md).
-# V1.3 Release hardening
+## V1.3 Release hardening
 
 V1.3 uses a 30-item, six-category search list and current /legacy conflict corpus as the release benchmark. Worker supports Rerank startup preheating and persistent Hugging Face caching. The RAG evaluation page of the knowledge base provides Sparse Migration status tracks and protected Cutover operations. The backup/recovery drills and dependencies, licenses, Cves, and image volume scans of Milvus 2.4.1 to 2.5.4 all provide repeatable scripts.
 

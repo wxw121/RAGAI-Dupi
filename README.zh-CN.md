@@ -8,54 +8,54 @@
 
 参见 [V1.5.0 版本说明](docs/zh-CN/v1.5-release-notes.md) 和 [V1.5.0 发布运行手册](docs/zh-CN/v1.5-release-runbook.md) 作为历史升级参考。V2.0 继续将 `CLASSIC` 作为安全基线，直到当前索引版本通过候选版本与经典版本的质量检验。V2.0 规划见 [RAG 质量体系 V2.0 封板路线图](docs/zh-CN/rag-quality-roadmap.md)、[设计文档](docs/zh-CN/v2.0-rag-quality-closure-design.md) 和 [实施文档](docs/zh-CN/v2.0-rag-quality-closure-implementation.md)。
 
-> V1.4.2为OPS_ADMIN操作符添加了一个只读的GET /api/v1/ops/governance-summary端点，并为V1.4.1的上传、获取、发件箱、通知和矢量清理状态添加了一个烟雾脚本和Pester检查。
+> V1.4.2 为 `OPS_ADMIN` 运维人员新增只读的 `GET /api/v1/ops/governance-summary` 端点，并为 V1.4.1 的上传、摄入、发件箱、通知和向量清理状态新增冒烟脚本与 Pester 检查。
 
-V1.4.2治理操作
+## V1.4.2 治理运维
 
-GET /api/v1/ops/governance-summary返回一个精简的只读快照，包含generatedAt、uploadQuota、ingestJobs、ingestOutbox、failureNotifications、vectorCleanup和alerts。
+`GET /api/v1/ops/governance-summary` 返回精简的只读快照，包含 `generatedAt`、`uploadQuota`、`ingestJobs`、`ingestOutbox`、`failureNotifications`、`vectorCleanup` 和 `alerts`。
 
-烟雾检查：powershell -NoProfile -ExecutionPolicy - Bypass -File scripts/ Smoke -govern -summary。ps1 -BaseUrl http://localhost:8080 -ApiKey $env:DUPI_API_KEY -OutFile evidence/ government -summary-smoke.json
+冒烟检查：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-governance-summary.ps1 -BaseUrl http://localhost:8080 -ApiKey $env:DUPI_API_KEY -OutFile evidence/governance-summary-smoke.json`
 
-集中的纠缠覆盖目前通过4个：powershell -NoProfile -ExecutionPolicy Bypass -命令导入-模块纠缠；调用-纠缠-路径脚本/测试/烟雾治理-总结。ps1 ci
+聚焦的 Pester 覆盖目前 4 项全部通过：`powershell -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester; Invoke-Pester -Path scripts/tests/smoke-governance-summary.Tests.ps1 -CI"`
 
-此工作站的本地Web验证必须使用项目npm脚本，因此services/ Web /scripts/node16-webcrypto。cjs加载Node 16 WebCrypto shim。不要在Node 16上直接调用原始的vite或vitest。
+此工作站上的本地 Web 验证必须使用项目 npm 脚本，以便 `services/web/scripts/node16-webcrypto.cjs` 加载 Node 16 WebCrypto shim。不要在 Node 16 上直接调用原始的 `vite` 或 `vitest`。
 
-> V1.4.1增加了持久的租户/用户上传配额、幂等的每个文件上传、可取消和租用的摄入执行、过时的回调保护和可选的webhook交付的重复数据删除终端故障事件。API版本：`1.4.1-SNAPSHOT`；Web版本：`1.4.1`。
+> V1.4.1 新增持久化的租户/用户上传配额、逐文件幂等上传、可取消且带租约的摄入执行、陈旧回调保护，以及支持可选 Webhook 投递的去重终态失败事件。API 版本：`1.4.1-SNAPSHOT`；Web 版本：`1.4.1`。
 
-V1.4.1上传治理
+## V1.4.1 上传治理
 
-Web以有限的并发性和“幂等密钥”独立上传每个文件。它显示保留的和滚动窗口的配额，保持每个文件的故障隔离，支持传输中止/重试，并在作业存在后调用摄取取消API。轮询被序列化并在卸载时中止，因此旧的响应不能覆盖新状态。
+Web 以受限并发逐个上传文件，并为每个文件设置 `Idempotency-Key`。页面显示保留配额和滚动窗口配额，按文件隔离失败，支持中止或重试传输，并在作业创建后调用摄入取消 API。轮询串行执行，并在组件卸载时中止，避免旧响应覆盖新状态。
 
-PostgreSQL在上传保留和摄取执行方面是权威的。上传预订通过“PENDING -> COMMITTED -> RELEASED”移动；保留的配额计算活动的' PENDING ' + ‘ COMMITTED ‘预留，而’ RELEASED ’预留不再消耗保留的字节/文档。‘ attemptId ’ / ' attemptExpiresAt '租用在飞行中的上传，以便旧上传调和器可以提交持久的文档/作业/发件尝试或在发布之前清理部分对象/作业/文档。对同一释放的等幂键的重试会重新检查保留的配额，但不会对滚动窗口字节进行双重收费。摄取重试旋转‘ executionId ’；Worker回调带有一个单调的“序列”；过时的、重复的或终端状态的回调被认为是被忽略的。Redis使用就绪列表和处理列表，有界的reaper将“requeeligible”处理有效负载移回就绪状态，并且处理项仅在终端处理后才被确认。
+PostgreSQL 是上传预留和摄入执行的权威数据源。上传预留按 `PENDING -> COMMITTED -> RELEASED` 流转；保留配额统计有效的 `PENDING` 与 `COMMITTED` 预留，`RELEASED` 预留不再占用保留字节数或文档数。`attemptId` / `attemptExpiresAt` 为进行中的上传提供租约，使陈旧上传协调器可以提交持久化的文档、作业和发件箱尝试，或在释放预留前清理部分对象、作业和文档。使用同一已释放幂等键重试时会重新检查保留配额，但不会重复计入滚动窗口字节。摄入重试会轮换 `executionId`；Worker 回调携带单调递增的 `sequence`；陈旧、重复或针对终态的回调会被确认并忽略。Redis 使用就绪列表和处理列表，受限的 reaper 将符合重入队条件的处理载荷移回就绪列表，且处理项仅在终态处理后确认。
 
-终端' FAILED ' / ' DEAD_LETTER '通知在每个作业执行/状态中持久化一次。配置webhook后，应得的' PENDING ' / ' FAILED '行将以有界的backoff方式发送；2xx响应变成`DELIVERED`，到达尝试限制的行变成`EXHAUSTED`。Webhook传递默认需要HTTPS，阻止本地/元数据主机，除非明确允许，可以包含‘ X-Dupi-Webhook-Secret ’，并截断经过处理的错误文本。
+终态 `FAILED` / `DEAD_LETTER` 通知按作业执行和状态只持久化一次。配置 Webhook 后，到期的 `PENDING` / `FAILED` 记录按受限退避策略投递；2xx 响应会转为 `DELIVERED`，达到尝试上限的记录会转为 `EXHAUSTED`。Webhook 默认要求 HTTPS，并阻止本地或元数据主机，除非显式放行；请求可以携带 `X-Dupi-Webhook-Secret`，且经过清理的错误文本会被截断。
 
-|变量|默认值|目的|
+| 变量 | 默认值 | 用途 |
 |---|---:|---|
-| ' UPLOAD_QUOTA_ENABLED ' | ' true ' |启用持续上传配额记帐|
-| ' UPLOAD_QUOTA_RETAINED_BYTES_LIMIT ' | ' 1073741824 ' |每个租户/用户保留字节数|
-| ' UPLOAD_QUOTA_RETAINED_DOCUMENTS_LIMIT ' | ' 1000 ' |每个租户/用户保留的文档|
-| ' UPLOAD_QUOTA_WINDOW_BYTES_LIMIT ' | ' 268435456 ' |每个滚动窗口接受的字节数|
-| ' UPLOAD_QUOTA_WINDOW_SECONDS ' | ' 3600 ' |滚动上传窗口|
-| ' UPLOAD_QUOTA_ATTEMPT_LEASE_SECONDS ' | ' 300 ' |在过时的对账之前，在飞行中上传尝试租约|
-| ' UPLOAD_QUOTA_RECONCILIATION_BATCH_SIZE ' | ' 50 ' |每个调解程序通过|声称的最大过期上传预订
-| ' UPLOAD_QUOTA_RECONCILIATION_CRON ' | ' 0 */5 * * * * ' |上传预约调和器节奏失效|
-| ' INGEST_PROCESSING_QUEUE ' | ' dupi:ingest:jobs:processing ' | Worker in-flight Redis list |
-| ' INGEST_LEASE_SECONDS ' | ' 60 ' | PostgreSQL的INGEST_LEASE_SECONDS
-| ' INGEST_HEARTBEAT_INTERVAL_SECONDS ' | ' 15 ' |长时间运行时Worker租用心跳|
-| ' INGEST_PROCESSING_REAP_INTERVAL_SECONDS ' | ' 60 ' |工人处理列表收割节奏|
-| ' INGEST_PROCESSING_REAP_BATCH_SIZE ' | ' 100 ' |每个收割机通过|检查的最老尾处理有效载荷
-| ' REDIS_RETRY_DELAY_SECONDS ' | ' 1 ' | Worker Redis瞬态故障回退|
-| ' WORKER_ID ' |主机/进程派生|稳定声明所有者标识|
-| ' INGEST_FAILURE_NOTIFICATION_WEBHOOK_URL ' |空|可选POST失败/DEAD_LETTER摄取事件的目标|
-| ' INGEST_FAILURE_NOTIFICATION_TIMEOUT_SECONDS ' | ' 10 ' | Webhook发送超时|
-| ' INGEST_FAILURE_NOTIFICATION_MAX_ATTEMPTS ' | ' 5 ‘ |在’ EXHAUSTED ' |之前有界的webhook重试尝试
-| ‘ INGEST_FAILURE_NOTIFICATION_WEBHOOK_SECRET ‘ |空|可选’ X-Dupi-Webhook-Secret ’头值|
-| ' INGEST_FAILURE_NOTIFICATION_MAX_ERROR_MESSAGE_LENGTH ' | ' 512 ' |净化的webhook错误-文本上限|
-| ' INGEST_FAILURE_NOTIFICATION_ALLOW_INSECURE_WEBHOOK ' | ' false ' |允许非https /本地webhook目标进行可信本地测试，仅|
-| ' INGEST_FAILURE_NOTIFICATION_DISPATCH_CRON ' | ' */30 * * * * * ' |失败通知调度节奏|
+| `UPLOAD_QUOTA_ENABLED` | `true` | 启用持久化上传配额记账 |
+| `UPLOAD_QUOTA_RETAINED_BYTES_LIMIT` | `1073741824` | 每个租户/用户的保留字节数 |
+| `UPLOAD_QUOTA_RETAINED_DOCUMENTS_LIMIT` | `1000` | 每个租户/用户的保留文档数 |
+| `UPLOAD_QUOTA_WINDOW_BYTES_LIMIT` | `268435456` | 每个滚动窗口允许接收的字节数 |
+| `UPLOAD_QUOTA_WINDOW_SECONDS` | `3600` | 滚动上传窗口时长 |
+| `UPLOAD_QUOTA_ATTEMPT_LEASE_SECONDS` | `300` | 陈旧协调前的进行中上传尝试租期 |
+| `UPLOAD_QUOTA_RECONCILIATION_BATCH_SIZE` | `50` | 每轮协调器最多认领的陈旧上传预留数 |
+| `UPLOAD_QUOTA_RECONCILIATION_CRON` | `0 */5 * * * *` | 陈旧上传预留协调器执行周期 |
+| `INGEST_PROCESSING_QUEUE` | `dupi:ingest:jobs:processing` | Worker 进行中的 Redis 列表 |
+| `INGEST_LEASE_SECONDS` | `60` | PostgreSQL 摄入认领租期 |
+| `INGEST_HEARTBEAT_INTERVAL_SECONDS` | `15` | 长时间操作期间的 Worker 租约心跳周期 |
+| `INGEST_PROCESSING_REAP_INTERVAL_SECONDS` | `60` | Worker 处理列表 reaper 执行周期 |
+| `INGEST_PROCESSING_REAP_BATCH_SIZE` | `100` | 每轮 reaper 检查的最旧尾部处理载荷数 |
+| `REDIS_RETRY_DELAY_SECONDS` | `1` | Worker Redis 瞬态故障退避时间 |
+| `WORKER_ID` | 主机/进程派生 | 稳定的认领者标识 |
+| `INGEST_FAILURE_NOTIFICATION_WEBHOOK_URL` | 空 | `FAILED` / `DEAD_LETTER` 摄入事件的可选 POST 目标 |
+| `INGEST_FAILURE_NOTIFICATION_TIMEOUT_SECONDS` | `10` | Webhook 投递超时 |
+| `INGEST_FAILURE_NOTIFICATION_MAX_ATTEMPTS` | `5` | 转为 `EXHAUSTED` 前的 Webhook 重试上限 |
+| `INGEST_FAILURE_NOTIFICATION_WEBHOOK_SECRET` | 空 | 可选的 `X-Dupi-Webhook-Secret` 请求头值 |
+| `INGEST_FAILURE_NOTIFICATION_MAX_ERROR_MESSAGE_LENGTH` | `512` | 清理后的 Webhook 错误文本上限 |
+| `INGEST_FAILURE_NOTIFICATION_ALLOW_INSECURE_WEBHOOK` | `false` | 仅为可信本地测试允许非 HTTPS 或本地 Webhook 目标 |
+| `INGEST_FAILURE_NOTIFICATION_DISPATCH_CRON` | `*/30 * * * * *` | 失败通知调度周期 |
 
-关键路线:
+关键路由：
 
 ```bash
 
@@ -72,26 +72,26 @@ curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs/{jo
 
 ```
 
-参见 [V1.4.1 版本运行手册](docs/zh-CN/v1.4.1-release-runbook.md) 和 设计（local note）。最新的本地 V1.4.1 版本扫描记录图像摘要 `sha256:eec613fab9cdd1d873b95172f98d42ade5989238e2b0f76761b6b4f63b86515a`，图像大小 640,389,450 字节，没有 Python 发现，22 个接受的上游未修复 OS 发现将于 2026-08-15 到期。
+参见 [V1.4.1 发布运行手册](docs/zh-CN/v1.4.1-release-runbook.md) 和设计（本地说明）。最近一次本地 V1.4.1 发布扫描记录的镜像摘要为 `sha256:eec613fab9cdd1d873b95172f98d42ade5989238e2b0f76761b6b4f63b86515a`，镜像大小为 640,389,450 字节；没有 Python 发现项，22 个已接受的上游未修复 OS 发现项于 2026-08-15 到期。
 
-> V1.4.0将租户作用域、校验和验证的知识库存档和幂等恢复添加到新的隐藏知识库中。它是一个应用程序恢复层，而不是PostgreSQL、MinIO等或Milvus基础设施备份的替代品。
+> V1.4.0 新增租户范围、校验和验证的知识库存档，以及向新隐藏知识库执行的幂等恢复。它是应用层恢复机制，不能替代 PostgreSQL、MinIO、etcd 或 Milvus 基础设施备份。
 
-V1.4可验证恢复
+## V1.4 可验证恢复
 
-具有“KB_RECOVERY”功能的运营商使用“**Recovery**”选项卡创建、检查、下载、重试和删除存档，以及创建、重试或放弃恢复。归档对象在私有恢复桶中的`archives/{tenantId}/{archiveId}/`下密封；的清单。Json '最后写入。目标保持隐藏为“restore”，直到对象、记录、密集/稀疏向量、计数、模式和校验和验证。
+具有 `KB_RECOVERY` 权限的运维人员通过 **Recovery** 选项卡创建、检查、下载、重试和删除存档，以及创建、重试或放弃恢复。归档对象封存在私有恢复桶的 `archives/{tenantId}/{archiveId}/` 下，`manifest.json` 最后写入。目标知识库保持隐藏和 `RESTORING` 状态，直到对象、记录、稠密/稀疏向量、计数、模式与校验和全部验证通过。
 
-路由在`/api/v1/知识库/{kbId}/recovery`下面。命令返回‘ 202 Accepted ’；网络小组每三秒钟对非终端工作进行一次投票。参见[恢复运行手册](docs/v1.4-recovery-runbook.md)。
+路由位于 `/api/v1/knowledge-bases/{kbId}/recovery` 下。命令返回 `202 Accepted`；Web 面板每三秒轮询一次非终态作业。参见[恢复运行手册](docs/zh-CN/v1.4-recovery-runbook.md)。
 
-|变量|默认值|目的|
+| 变量 | 默认值 | 用途 |
 |---|---:|---|
-| ' DUPI_RECOVERY_BUCKET ' | ' dupi-recovery ' | MinIO专用私有bucket |
-| ' DUPI_RECOVERY_QUIESCENCE_TIMEOUT_SECONDS ' | ' 300 ' |等待激活的KB突变|
-| ' DUPI_RECOVERY_PAGE_SIZE ' | ' 500 ' |有界矢量快照页面大小|
-| ' DUPI_RECOVERY_MAX_CONCURRENT_JOBS ' | ' 2 ' |有界存档/恢复并发|
+| `DUPI_RECOVERY_BUCKET` | `dupi-recovery` | 专用的私有 MinIO 存储桶 |
+| `DUPI_RECOVERY_QUIESCENCE_TIMEOUT_SECONDS` | `300` | 等待活动知识库变更完成 |
+| `DUPI_RECOVERY_PAGE_SIZE` | `500` | 受限的向量快照分页大小 |
+| `DUPI_RECOVERY_MAX_CONCURRENT_JOBS` | `2` | 受限的存档/恢复并发数 |
 
-V1.4.0发布闸门
+### V1.4.0 发布门禁
 
-Worker镜像从官方CPU轮索引安装仅CPU的PyTorch，使用PyMilvus 2.5.18和当前修补的打包工具链，并以UID/GID ‘ 65534 ’运行。gate运行“pip check”，并在扫描前导入生产Worker模块。从存储库根目录运行：
+Worker 镜像从官方 CPU wheel 索引安装仅 CPU 版 PyTorch，使用 PyMilvus 2.5.18 和当前已修补的打包工具链，并以 UID/GID `65534` 运行。门禁会执行 `pip check`，并在扫描前导入生产 Worker 模块。请从仓库根目录运行：
 
 ```powershell
 
@@ -102,7 +102,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scan-release.ps1 `
 
 ```
 
-扫描将图像的“pip freeze—all”结果导出到“worker- requests .lock.txt”，然后在不解析第二个依赖图的情况下审计该锁。它接受`PATH`上的‘ pip-audit ’可执行文件或通过`python -m pip_audit`安装的`pip_audit`模块，最多重试三次临时审计失败，并在主机网络无法到达OSV时回落到固定的`dpii -rag-pip-audit:2.10.1`容器。每个路径首先删除陈旧的输出，并在`summary.md`中记录执行模式。只有当本地Trivy数据库被单独刷新时才使用‘ - trivyskipdbuupdate ’。结构化异常发布必须匹配规范化图像标签，准确覆盖每个活跃的上游非固定查找，并在2026-08-15到期；可修复的、过期的、未使用的或不匹配的条目无法通过门。发布扫描生成依赖锁、pip-audit JSON、CycloneDX/Syft SBOM、Trivy version/result JSON和summary。`artifacts/v1.4-release-scan`下的‘ Md ’。摘要记录了不可变的图像摘要和Trivy漏洞数据库时间戳。
+扫描会将镜像的准确 `pip freeze --all` 结果导出到 `worker-requirements.lock.txt`，然后在不解析第二份依赖图的情况下审计该锁文件。脚本接受 `PATH` 中的 `pip-audit` 可执行文件，或通过 `python -m pip_audit` 调用已安装的 `pip_audit` 模块；瞬态审计失败最多重试三次，主机网络无法访问 OSV 时回退到固定的 `dupi-rag-pip-audit:2.10.1` 容器。每条路径都会先删除陈旧输出，并在 `summary.md` 中记录执行模式。仅当本地 Trivy 数据库已单独刷新时使用 `-TrivySkipDbUpdate`。结构化例外清单必须匹配规范化的镜像标签，准确覆盖每个有效的上游未修复发现项，并于 `2026-08-15` 到期；可修复、已过期、未使用或不匹配的条目会使门禁失败。发布扫描会在 `artifacts/v1.4-release-scan` 下生成依赖锁文件、pip-audit JSON、CycloneDX/Syft SBOM、Trivy 版本/结果 JSON 和 `summary.md`。摘要记录不可变镜像摘要和 Trivy 漏洞数据库时间戳。
 
 > V1.3 增加可阻断的 RAG 质量策略/基线、版本化 Retrieval Profile，以及 Milvus 原生 Sparse BM25 的回填、双写、Shadow、Cutover 和 Rollback。生产部署要求 Milvus 2.5.4；升级前必须备份 Milvus/etcd/MinIO/PostgreSQL，并在隔离环境完成回填与回滚演练。
 
@@ -424,7 +424,7 @@ cd services/api
 | Post-V2.0 | 生产反馈表/事件流、多模态 OCR、Pipeline DSL、K8s/Helm、多租户合规审计、高并发压测与长期成本优化 |
 
 详细规划见 [docs/todo.md](docs/todo.md) 与 [docs/decisions.md](docs/decisions.md)。
-# V1.3 发布硬化
+## V1.3 发布硬化
 
 V1.3 使用 30 条、六分类检索清单及当前/legacy 冲突语料作为发布基准，Worker 支持 Rerank 启动预热和持久化 Hugging Face 缓存，知识库 RAG 评估页提供 Sparse Migration 状态轨道和受保护的 Cutover 操作。Milvus 2.4.1 到 2.5.4 的备份/恢复演练及依赖、许可证、CVE、镜像体积扫描均提供可重复脚本。
 
