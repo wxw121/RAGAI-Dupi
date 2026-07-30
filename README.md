@@ -422,7 +422,7 @@ See [docs/architecture.md](docs/architecture.md).
 | Post-V2.0 | Production feedback tables/events, multimodal OCR, Pipeline DSL, K8s/Helm, multi-tenant compliance audit, high-concurrency load tests, and long-running cost optimization |
 
 For detailed planning, see [docs/todo.md](docs/todo.md) and [docs/decisions.md](docs/decisions.md).
-# V1.3 Release hardening
+## V1.3 Release hardening
 
 V1.3 uses a 30-item, six-category retrieval checklist plus current/legacy conflict corpus as the release benchmark. Worker supports Rerank startup preheating and persistent Hugging Face caching. The RAG evaluation page of the knowledge base provides Sparse Migration status tracks and protected Cutover operations. The backup/recovery drills and dependencies, licenses, Cves, and image volume scans of Milvus 2.4.1 to 2.5.4 all provide repeatable scripts.
 

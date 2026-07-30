@@ -172,12 +172,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-browser-gate.ps1
 
 ## 相关缺陷修复
 
-** ** ** ** ** ** **created_at ' NOT NULL)**
+### 上传 500（`documents.created_at` NOT NULL）
 
 - **原因**：`Document.builder().id(UUID)` 预置主键时，JPA `save()` 走 merge 路径，`@PrePersist` 不执行；第二次 `save()` 将 `created_at` 更新为 null
 - **修复**：[`DocumentService.upload()`](../../services/api/src/main/java/com/dupi/rag/service/DocumentService.java) 在 builder 中显式设置 `createdAt`/`updatedAt`，并预先计算 `objectKey`
 - **部署**：`docker compose up -d --build api`
-# V1.3 Sparse Migration 浏览器门禁
+
+## V1.3 Sparse Migration 浏览器门禁
 
 `services/web/e2e/browser-gate.spec.ts` 在真实登录、真实隔离 KB 和真实 Retrieval Profile 流程内验证 Sparse Migration 页面。迁移 API 使用确定性路由夹具依次返回 PREPARING、DUAL_WRITING、SHADOW_VALIDATING、CUTOVER 和 COMPLETED，页面组件、确认对话框、按钮门禁和浏览器错误收集仍运行真实代码。
 

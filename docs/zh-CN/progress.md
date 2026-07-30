@@ -276,7 +276,7 @@ V1.5.0 RAG 质量升级P2完成：现有的VECTOR / HYBRID / RERANK模式和CLAS
 - [M2] — 向量检索 API、RAG Chat SSE 流式、citations
 - [M3] — 健康检查、错误处理、摄入重试
 - [V2 骨架] — BM25 混合检索、Rerank、语义分块、Excel 解析、生成中断端点
-# 2026-07-15 V1.3 发布硬化
+## 2026-07-15 V1.3 发布硬化
 
 - 已新增 30 条、六分类检索清单，支持幂等同步、冷/热三模式基准和 fallback/排名证据门禁。
 - 已新增 Rerank 启动预热、脱敏健康状态和 `hf_model_cache` 持久卷；默认模型保持 `BAAI/bge-reranker-base`。

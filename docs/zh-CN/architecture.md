@@ -30,7 +30,7 @@ ready list -> atomic move -> processing list
     -> executionId + monotonic sequence callback
     -> terminal callback acknowledgement -> processing ACK
 
-```
+```text
 
 `ingest_jobs`存储`execution_id`、回调序列、索赔所有者、租约到期、开始/完成时间和取消请求时间。Retry将旋转执行ID。API忽略过时的执行id，非递增序列，终端回归和`CANCEL_REQUESTED`之后的非取消回调。`GET /api/v1/internal/ingest/jobs/{jobId}/executions/{executionId}/state`返回‘ status ’、‘ executionCurrent ’、‘ terminal ’、‘ leaseExpired ’和‘ requeueEligible ’，因此Worker reaper只请求符合条件的处理有效负载。排队取消立即变为`CANCELLED`；正在运行的取消仍然是`CANCEL_REQUESTED`，直到工作线程清理和确认。
 
@@ -61,7 +61,7 @@ dupi-RAG 是企业级 RAG（检索增强生成）知识库引擎，类似 Dify/�
 
 ## 目录结构
 
-```
+```text
 
 dupi-RAG/
 ├── docs/                    # 项目记忆文档
@@ -106,7 +106,7 @@ dupi-RAG/
 
 ### 文档摄入（ETL）
 
-```
+```text
 
 上传文件 → 队列高水位检查 → MinIO → documents + ingest_jobs + ingest_outbox_events
   → outbox dispatcher → Redis 队列
@@ -125,7 +125,7 @@ Worker 的 `embed_batch` 会按 `EMBEDDING_BATCH_SIZE`（默认 `32`）拆分 Em
 
 ### 删除与向量补偿清理
 
-```
+```text
 
 删除文档 → 登记 document_tombstones → 登记 vector_cleanup_tasks → best-effort 删除 Milvus 向量
   → 删除数据库主记录 → 定时任务重试残留 Milvus 向量
@@ -140,7 +140,7 @@ Worker 的 `embed_batch` 会按 `EMBEDDING_BATCH_SIZE`（默认 `32`）拆分 Em
 
 ### RAG 问答
 
-```
+```text
 
 用户 query → Embedding → Milvus ANN Top-K（按 kb_id 过滤）
   → 拼装 Prompt（系统指令 + 引用上下文）
@@ -152,7 +152,7 @@ Worker 的 `embed_batch` 会按 `EMBEDDING_BATCH_SIZE`（默认 `32`）拆分 Em
 
 ### 混合检索与 Rerank
 
-```
+```text
 
 query → 向量检索 + BM25 检索 → RRF 融合 → Rerank 模型 → Top-N → LLM
 
