@@ -56,7 +56,7 @@ dupi-RAG 是企业级 RAG（检索增强生成）知识库引擎，类似 Dify/�
 - **元数据**：PostgreSQL 16
 - **对象存储**：MinIO
 - **缓存/队列**：Redis 7
-- **编排参考**：LlamaIndex（Python 侧）
+- **摄入与检索实现**：Python Worker 自研解析、分块、Embedding、混合检索与 Rerank 流程
 - **部署**：Docker Compose 单机栈
 
 ## 目录结构

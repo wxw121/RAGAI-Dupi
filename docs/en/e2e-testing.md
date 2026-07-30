@@ -4,10 +4,11 @@
 [中文](../zh-CN/e2e-testing.md) | **English**
 
 
-# 项目根目录（Windows 需 Bypass 执行策略）
+# Run from the repository root (Windows execution policy bypass required)
+```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-main-flow.ps1
 
-# 可选参数
+# Optional parameters
 powershell -NoProfile -File scripts/e2e-main-flow.ps1 `
   -BaseUrl "http://localhost:8080" `
   -SampleFile "examples\sample-knowledge.md" `
@@ -30,7 +31,7 @@ The report is written into `scripts/rag-regression-eval-last-run.json`. `caseRes
 
 Exit code: `0` All passed; `1` fails at any step (the report is still written to `e2e-last-run.json`).
 
-## Real Browser E2E Access Control (V1.2.1
+## Real Browser E2E Access Control (V1.2.1)
 
 This access control is located at `services/web/e2e/browser-gate.spec.ts` and runs through the root script:
 

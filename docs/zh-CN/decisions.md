@@ -109,7 +109,7 @@
 
 **背景**：技术栈要求 Go/Java + Python；需在企业 API 能力与 ML/解析生态间取舍。
 **决策**：主服务采用 Java Spring Boot；解析、Embedding、Rerank 由 Python Worker 承担。
-**理由**：Java 适合事务型 API 与企业集成；Python 拥有成熟的 PDF/DOCX 解析库与 LlamaIndex 生态，避免 JVM 侧 ML 依赖维护成本。
+**理由**：Java 适合事务型 API 与企业集成；Python 拥有成熟的 PDF/DOCX 解析库、Embedding 与 Rerank 生态，避免 JVM 侧 ML 依赖维护成本。
 **影响范围**：`services/api`、`services/worker`、Redis 任务队列契约。
 
 ## 2026-06-19 — V1 纯向量检索
