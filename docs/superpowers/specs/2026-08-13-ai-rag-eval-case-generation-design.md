@@ -73,6 +73,7 @@ The server parses and validates AI output rather than trusting it. It rejects un
 Generation is read-only. The response contains:
 
 - a knowledge-base document fingerprint derived from completed document IDs, filenames, update/status information, and indexed chunk counts;
+- a case fingerprint derived from current case IDs, update times, source assertions, and case keys;
 - retained case summaries;
 - invalid cases proposed for replacement;
 - generated case drafts grouped by document;
@@ -80,10 +81,10 @@ Generation is read-only. The response contains:
 
 ### Confirmation
 
-Confirmation sends the document fingerprint, the invalid case IDs from the preview, and the generated drafts back to the server. Within one transaction, the server:
+Confirmation sends both fingerprints, the invalid case IDs from the preview, and the generated drafts back to the server. Within one transaction, the server:
 
 1. locks or consistently reloads the knowledge base, completed documents, and affected cases;
-2. recomputes the document fingerprint;
+2. recomputes the document and case fingerprints;
 3. verifies every deletion target still belongs to the knowledge base and is still source-invalid;
 4. revalidates all generated drafts and uniqueness constraints;
 5. aborts with `409 Conflict` if documents or cases changed after preview;
