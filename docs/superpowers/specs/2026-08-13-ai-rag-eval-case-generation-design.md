@@ -13,7 +13,9 @@ The earlier design in `2026-08-12-remove-default-rag-eval-cases-design.md` stops
 - Cases without expected filenames remain valid; keyword-only and hit-count-only assertions are supported.
 - Invalid cases are visibly marked with their missing filenames.
 - Evaluation cannot start while source-invalid cases exist. The UI explains the blocker instead of producing a misleading failed quality report.
-- The user can ask AI to generate two evaluation cases for each currently completed document.
+- The user can ask AI to ensure each currently completed document has two valid single-source evaluation cases.
+- Generation only fills a document's deficit: zero existing valid single-source cases generates two, one generates one, and two or more generates none.
+- Valid multi-document and source-free cases are retained but do not count toward a document's two-case quota.
 - Existing valid cases are retained. Only source-invalid cases are candidates for replacement.
 - AI output is shown as one preview containing retained, replaced, and newly generated cases. Nothing is persisted until the user confirms.
 - Confirmation atomically removes the source-invalid cases shown in the preview and creates the generated cases.
@@ -34,11 +36,11 @@ Generation opens a loading state while the server processes completed documents 
 
 1. **Retained** — existing valid cases that will not change.
 2. **Replaced** — existing invalid cases that will be deleted on confirmation.
-3. **Generated** — two proposed cases per completed document.
+3. **Generated** — only the proposals needed to bring each completed document to two valid single-source cases.
 
 Each generated case displays its question, expected filename, keywords, minimum hit count, and TopK. The user can cancel without mutation or confirm the complete preview. After confirmation, the case list refreshes and evaluation becomes available when no invalid cases remain.
 
-If there are no completed documents, generation is unavailable with a direct explanation. A failure for one document does not discard successful proposals for other documents; the preview identifies failed documents, and confirmation is disabled until every completed document has two valid proposals. This preserves the approved two-cases-per-document coverage requirement.
+If there are no completed documents, generation is unavailable with a direct explanation. Documents already covered by at least two valid single-source cases are shown as covered and do not trigger an AI call. A failure for one uncovered document does not discard successful proposals for other documents; the preview identifies failed documents, and confirmation is disabled until existing cases plus proposals bring every completed document to two valid single-source cases.
 
 ## Backend design
 
@@ -57,7 +59,7 @@ Filename comparison uses the stored document filename after trimming and exact c
 
 A new generation service loads completed documents and selects a bounded representative context for each document from its indexed chunks. Context selection favors early chunks and distinct headings while enforcing a per-document character budget. Full documents are not sent to the model.
 
-Each document is sent to the existing configured chat model in a separate non-streaming request. The prompt requires a strict JSON object containing exactly two `REAL_QUERY` cases. Every proposal must include:
+Each document with a positive case deficit is sent to the existing configured chat model in a separate non-streaming request. The prompt requires a strict JSON object containing exactly the requested number of `REAL_QUERY` cases (one or two). Every proposal must include:
 
 - a concise, stable case key;
 - a question answerable from the supplied document;
@@ -66,7 +68,7 @@ Each document is sent to the existing configured chat model in a separate non-st
 - `minHits = 1`;
 - `topK = 5`.
 
-The server parses and validates AI output rather than trusting it. It rejects unknown fields, malformed JSON, duplicate case keys, missing questions, incorrect filenames, keywords absent from source context, or a count other than two. Case keys are made unique against retained cases and other proposals using a deterministic filename-derived prefix when necessary.
+The server parses and validates AI output rather than trusting it. It rejects unknown fields, malformed JSON, duplicate case keys, missing questions, incorrect filenames, keywords absent from source context, or a count different from the requested deficit. Case keys are made unique against retained cases and other proposals using a deterministic filename-derived prefix when necessary.
 
 Generation is read-only. The response contains:
 
@@ -116,7 +118,7 @@ Backend tests cover:
 - run rejection when invalid sources exist and normal execution when all sources are valid;
 - representative context limits and per-document isolation;
 - strict parsing and rejection of malformed or ungrounded AI proposals;
-- exactly two proposals per completed document;
+- zero, one, or two proposals according to each completed document's valid single-source case deficit;
 - preview being read-only;
 - confirmation retaining valid cases, deleting only previewed invalid cases, and inserting generated cases atomically;
 - stale fingerprint, changed cases, duplicate keys, partial AI failure, and transaction rollback.
