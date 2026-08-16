@@ -11,7 +11,6 @@ import org.springframework.stereotype.Service;
 import java.util.Collection;
 import java.util.EnumMap;
 import java.util.Map;
-import java.util.UUID;
 
 /** Dispatches already-claimed jobs to their dedicated domain workflow. */
 @Service
@@ -21,6 +20,7 @@ public class OperationJobRunner {
     private final OperationJobClaimService claimService;
     private final Map<OperationType, OperationWorkflow> workflows;
     private final int batchSize;
+    private final int cleanupLimit;
     private final boolean enabled;
 
     @Autowired
@@ -28,16 +28,23 @@ public class OperationJobRunner {
             OperationJobClaimService claimService,
             Collection<OperationWorkflow> workflows,
             @Value("${dupi.operations.runner-batch-size:10}") int batchSize,
+            @Value("${dupi.operations.runner-cleanup-limit:10}") int cleanupLimit,
             @Value("${dupi.operations.runner-enabled:true}") boolean enabled
     ) {
         this.claimService = claimService;
         this.workflows = registry(workflows);
         this.batchSize = Math.max(0, batchSize);
+        this.cleanupLimit = Math.max(0, cleanupLimit);
         this.enabled = enabled;
     }
 
+    public OperationJobRunner(OperationJobClaimService claimService, Collection<OperationWorkflow> workflows,
+                              int batchSize, boolean enabled) {
+        this(claimService, workflows, batchSize, batchSize, enabled);
+    }
+
     public OperationJobRunner(OperationJobClaimService claimService, Collection<OperationWorkflow> workflows) {
-        this(claimService, workflows, 10, true);
+        this(claimService, workflows, 10, 10, true);
     }
 
     @Scheduled(cron = "${dupi.operations.runner-cron:*/5 * * * * *}")
@@ -45,27 +52,53 @@ public class OperationJobRunner {
         if (!enabled) {
             return;
         }
-        for (int attempt = 0; attempt < batchSize; attempt++) {
-            try {
-                if (!runOne()) {
-                    return;
-                }
-            } catch (Exception e) {
-                log.warn("Unable to process one durable operation; continuing batch", e);
-            }
-        }
+        runBatch(batchSize);
     }
 
     /** @return whether a due job was claimed. */
     public boolean runOne() {
-        return claimService.claimNext().map(job -> {
+        return runBatch(1) == 1;
+    }
+
+    private int runBatch(int jobLimit) {
+        int processed = 0;
+        int cleaned = 0;
+        while (processed < jobLimit) {
+            OperationClaimResult result;
+            try {
+                result = claimService.claimNext();
+            } catch (Exception e) {
+                log.warn("Unable to claim one durable operation; continuing batch", e);
+                return processed;
+            }
+            if (result.kind() == OperationClaimKind.NONE) {
+                return processed;
+            }
+            if (result.kind() == OperationClaimKind.TERMINALIZED) {
+                cleaned++;
+                if (cleaned >= cleanupLimit) {
+                    return processed;
+                }
+                continue;
+            }
+            try {
+                process(result.job());
+            } catch (Exception e) {
+                log.warn("Unable to process one durable operation; continuing batch", e);
+            }
+            processed++;
+        }
+        return processed;
+    }
+
+    private void process(com.dupi.rag.domain.entity.OperationJob job) {
             OperationWorkflow workflow = workflows.get(job.getOperationType());
             if (workflow == null) {
-                persistFailure(job, "No workflow registered for operation type " + job.getOperationType());
-                return true;
+                OperationExecutionContext context = context(job);
+                persistOutcome(context, Outcome.failed("No workflow registered for operation type " + job.getOperationType()));
+                return;
             }
-            OperationExecutionContext context = new OperationExecutionContext(job.getId(), job.getClaimToken(),
-                    job.getClaimEpoch(), job.getPhase());
+            OperationExecutionContext context = context(job);
             Outcome outcome;
             try {
                 if (context.phase() == OperationPhase.COMPENSATION) {
@@ -80,7 +113,7 @@ public class OperationJobRunner {
                 } catch (Exception transitionError) {
                     log.warn("Could not start compensation for {}; lease permits recovery", job.getId(), transitionError);
                 }
-                return true;
+                return;
             } catch (RetryableOperationException e) {
                 outcome = Outcome.retry(reason(e));
             } catch (Exception e) {
@@ -88,8 +121,11 @@ public class OperationJobRunner {
                 outcome = Outcome.failed(reason(e));
             }
             persistOutcome(context, outcome);
-            return true;
-        }).orElse(false);
+    }
+
+    private OperationExecutionContext context(com.dupi.rag.domain.entity.OperationJob job) {
+        return new OperationExecutionContext(job.getId(), job.getClaimToken(), job.getClaimEpoch(),
+                job.getRetryEpoch() == null ? 0L : job.getRetryEpoch(), job.getPhase());
     }
 
     private void persistOutcome(OperationExecutionContext context, Outcome outcome) {
@@ -104,14 +140,6 @@ public class OperationJobRunner {
         } catch (Exception transitionError) {
             log.warn("Could not persist operation {} transition {}; its lease allows safe recovery", context.jobId(), outcome.kind,
                     transitionError);
-        }
-    }
-
-    private void persistFailure(com.dupi.rag.domain.entity.OperationJob job, String error) {
-        try {
-            claimService.fail(job.getId(), job.getClaimToken(), error);
-        } catch (Exception transitionError) {
-            log.warn("Could not persist unknown operation type for {}; its lease allows safe recovery", job.getId(), transitionError);
         }
     }
 

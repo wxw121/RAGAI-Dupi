@@ -6,6 +6,8 @@ import com.dupi.rag.domain.enums.OperationStatus;
 import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.repository.OperationJobRepository;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Instant;
@@ -22,51 +24,145 @@ class OperationJobClaimServiceTest {
     private final OperationJobClaimService service = new OperationJobClaimService(jobs);
 
     @Test
-    void expiredAttemptAtBudgetIsTerminalizedBeforeClaimingTheNextJob() {
+    void exhaustedRowIsTerminalizedInOneShortClaimCall() {
         ReflectionTestUtils.setField(service, "configuredMaxAttempts", 2);
-        OperationJob exhausted = job(OperationStatus.RUNNING, 2);
+        OperationJob exhausted = job(OperationStatus.RUNNING, 8, 2);
         exhausted.setLeaseExpiresAt(Instant.now().minusSeconds(1));
-        OperationJob next = job(OperationStatus.PREPARED, 0);
-        when(jobs.claimNextForUpdate(any())).thenReturn(Optional.of(exhausted), Optional.of(next));
-        when(jobs.saveAndFlush(next)).thenReturn(next);
+        when(jobs.claimNextForUpdate(any())).thenReturn(Optional.of(exhausted));
 
-        assertThat(service.claimNext()).containsSame(next);
+        OperationClaimResult result = service.claimNext();
+
+        assertThat(result.kind()).isEqualTo(OperationClaimKind.TERMINALIZED);
         assertThat(exhausted.getStatus()).isEqualTo(OperationStatus.FAILED);
+        assertThat(exhausted.getPhase()).isEqualTo(OperationPhase.FORWARD);
         assertThat(exhausted.getNextAttemptAt()).isNull();
-        assertThat(next.getClaimToken()).isNotNull();
+        verify(jobs, times(1)).claimNextForUpdate(any());
         verify(jobs).saveAndFlush(exhausted);
     }
 
     @Test
-    void renewLeaseRejectsAnOldTokenWithoutPersisting() {
+    void compensationStartsWithItsOwnFirstAttemptEvenAfterForwardBudgetWasConsumed() {
+        ReflectionTestUtils.setField(service, "configuredMaxAttempts", 2);
         UUID id = UUID.randomUUID();
-        OperationJob claimed = job(OperationStatus.RUNNING, 1);
-        claimed.setId(id); claimed.setClaimToken(UUID.randomUUID()); claimed.setClaimEpoch(3L);
-        claimed.setLeaseExpiresAt(Instant.now().plusSeconds(30));
-        when(jobs.findByIdForUpdate(id)).thenReturn(Optional.of(claimed));
-        OperationExecutionContext stale = new OperationExecutionContext(id, UUID.randomUUID(), 2, OperationPhase.FORWARD);
+        UUID token = UUID.randomUUID();
+        OperationJob forward = job(OperationStatus.RUNNING, 2, 2);
+        forward.setId(id);
+        forward.setClaimToken(token);
+        forward.setClaimEpoch(4L);
+        forward.setRetryEpoch(7L);
+        forward.setLeaseExpiresAt(Instant.now().plusSeconds(30));
+        when(jobs.findByIdForUpdate(id)).thenReturn(Optional.of(forward));
 
-        assertThatThrownBy(() -> service.renewLease(stale)).isInstanceOf(OperationConflictException.class);
+        service.beginCompensation(context(forward), "rollback");
+        when(jobs.claimNextForUpdate(any())).thenReturn(Optional.of(forward));
+        when(jobs.saveAndFlush(forward)).thenReturn(forward);
+        OperationClaimResult result = service.claimNext();
+
+        assertThat(result.kind()).isEqualTo(OperationClaimKind.CLAIMED);
+        assertThat(forward.getPhase()).isEqualTo(OperationPhase.COMPENSATION);
+        assertThat(forward.getAttemptCount()).isEqualTo(3);
+        assertThat(forward.getPhaseAttemptCount()).isEqualTo(1);
+    }
+
+    @Test
+    void compensationRetryExhaustsItsOwnBudgetAndPreservesPhase() {
+        ReflectionTestUtils.setField(service, "configuredMaxAttempts", 2);
+        OperationJob claimed = currentClaim(OperationPhase.COMPENSATION, 9, 2);
+        when(jobs.findByIdForUpdate(claimed.getId())).thenReturn(Optional.of(claimed));
+
+        service.scheduleRetry(context(claimed), "down");
+
+        assertThat(claimed.getStatus()).isEqualTo(OperationStatus.FAILED);
+        assertThat(claimed.getPhase()).isEqualTo(OperationPhase.COMPENSATION);
+        assertThat(claimed.getNextAttemptAt()).isNull();
+    }
+
+    @Test
+    void compensationCanRetryOnceThenExhaustItsFreshBudget() {
+        ReflectionTestUtils.setField(service, "configuredMaxAttempts", 2);
+        OperationJob compensation = currentClaim(OperationPhase.FORWARD, 5, 2);
+        when(jobs.findByIdForUpdate(compensation.getId())).thenReturn(Optional.of(compensation));
+        service.beginCompensation(context(compensation), "undo");
+
+        when(jobs.claimNextForUpdate(any())).thenReturn(Optional.of(compensation));
+        when(jobs.saveAndFlush(compensation)).thenReturn(compensation);
+        assertThat(service.claimNext().kind()).isEqualTo(OperationClaimKind.CLAIMED);
+        service.scheduleRetry(context(compensation), "temporary");
+        assertThat(compensation.getStatus()).isEqualTo(OperationStatus.COMPENSATING);
+        assertThat(compensation.getNextAttemptAt()).isNotNull();
+
+        assertThat(service.claimNext().kind()).isEqualTo(OperationClaimKind.CLAIMED);
+        service.scheduleRetry(context(compensation), "still down");
+        assertThat(compensation.getStatus()).isEqualTo(OperationStatus.FAILED);
+        assertThat(compensation.getPhase()).isEqualTo(OperationPhase.COMPENSATION);
+        assertThat(compensation.getNextAttemptAt()).isNull();
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = OperationStatus.class, names = {"PREPARED", "RETRY_WAIT", "COMPENSATING"})
+    void everyDueClaimableStatusChecksPhaseBudgetBeforeExecution(OperationStatus status) {
+        ReflectionTestUtils.setField(service, "configuredMaxAttempts", 2);
+        OperationJob exhausted = job(status, 7, 2);
+        if (status == OperationStatus.COMPENSATING) {
+            exhausted.setPhase(OperationPhase.COMPENSATION);
+        }
+        when(jobs.claimNextForUpdate(any())).thenReturn(Optional.of(exhausted));
+
+        assertThat(service.claimNext().kind()).isEqualTo(OperationClaimKind.TERMINALIZED);
+        assertThat(exhausted.getStatus()).isEqualTo(OperationStatus.FAILED);
+        assertThat(exhausted.getPhaseAttemptCount()).isEqualTo(2);
+    }
+
+    @Test
+    void fullContextIncludingRetryEpochAndPhaseIsFenced() {
+        OperationJob claimed = currentClaim(OperationPhase.COMPENSATION, 1, 1);
+        claimed.setRetryEpoch(3L);
+        when(jobs.findByIdForUpdate(claimed.getId())).thenReturn(Optional.of(claimed));
+
+        assertThatThrownBy(() -> service.renewLease(new OperationExecutionContext(
+                claimed.getId(), claimed.getClaimToken(), claimed.getClaimEpoch(), 2, OperationPhase.COMPENSATION)))
+                .isInstanceOf(OperationConflictException.class);
+        assertThatThrownBy(() -> service.renewLease(new OperationExecutionContext(
+                claimed.getId(), claimed.getClaimToken(), claimed.getClaimEpoch(), 3, OperationPhase.FORWARD)))
+                .isInstanceOf(OperationConflictException.class);
         verify(jobs, never()).save(any());
     }
 
     @Test
-    void compensationRetryRetainsItsPhaseAndTerminalFailureHasNoNextAttempt() {
-        UUID id = UUID.randomUUID(); UUID token = UUID.randomUUID();
-        OperationJob claimed = job(OperationStatus.RUNNING, 5);
-        claimed.setId(id); claimed.setClaimToken(token); claimed.setClaimEpoch(1L);
-        claimed.setLeaseExpiresAt(Instant.now().plusSeconds(30)); claimed.setPhase(OperationPhase.COMPENSATION);
-        when(jobs.findByIdForUpdate(id)).thenReturn(Optional.of(claimed));
+    void leaseRenewalExtendsCurrentOwnerAndRejectsAnExpiredOwner() {
+        OperationJob claimed = currentClaim(OperationPhase.FORWARD, 1, 1);
+        Instant previousExpiry = claimed.getLeaseExpiresAt();
+        when(jobs.findByIdForUpdate(claimed.getId())).thenReturn(Optional.of(claimed));
 
-        service.scheduleRetry(new OperationExecutionContext(id, token, 1, OperationPhase.COMPENSATION), "down");
+        OperationExecutionContext renewed = service.renewLease(context(claimed));
 
-        assertThat(claimed.getPhase()).isEqualTo(OperationPhase.COMPENSATION);
-        assertThat(claimed.getStatus()).isEqualTo(OperationStatus.FAILED);
-        assertThat(claimed.getNextAttemptAt()).isNull();
+        assertThat(claimed.getLeaseExpiresAt()).isAfter(previousExpiry);
+        assertThat(renewed).isEqualTo(context(claimed));
+        verify(jobs).save(claimed);
+
+        claimed.setLeaseExpiresAt(Instant.now().minusSeconds(1));
+        assertThatThrownBy(() -> service.renewLease(context(claimed)))
+                .isInstanceOf(OperationConflictException.class);
     }
 
-    private static OperationJob job(OperationStatus status, int attempts) {
+    private static OperationExecutionContext context(OperationJob job) {
+        return new OperationExecutionContext(job.getId(), job.getClaimToken(), job.getClaimEpoch(),
+                job.getRetryEpoch(), job.getPhase());
+    }
+
+    private static OperationJob currentClaim(OperationPhase phase, int attempts, int phaseAttempts) {
+        OperationJob job = job(OperationStatus.RUNNING, attempts, phaseAttempts);
+        job.setPhase(phase);
+        job.setClaimToken(UUID.randomUUID());
+        job.setClaimEpoch(1L);
+        job.setRetryEpoch(0L);
+        job.setLeaseExpiresAt(Instant.now().plusSeconds(30));
+        return job;
+    }
+
+    private static OperationJob job(OperationStatus status, int attempts, int phaseAttempts) {
         return OperationJob.builder().id(UUID.randomUUID()).status(status).phase(OperationPhase.FORWARD)
-                .attemptCount(attempts).runnable(true).nextAttemptAt(Instant.now()).claimEpoch(0L).build();
+                .attemptCount(attempts).phaseAttemptCount(phaseAttempts).runnable(true)
+                .nextAttemptAt(Instant.now()).claimEpoch(0L).retryEpoch(0L).build();
     }
 }

@@ -32,8 +32,8 @@ class OperationJobServiceTest {
     private final OperationJobRepository jobs = mock(OperationJobRepository.class);
     private final OperationStepRepository steps = mock(OperationStepRepository.class);
     private final OperationJobWriteService writes = mock(OperationJobWriteService.class);
-    private final OperationJobClaimService claims = mock(OperationJobClaimService.class);
-    private final OperationJobService service = new OperationJobService(jobs, steps, writes, claims);
+    private final OperationStepWriteService stepWrites = mock(OperationStepWriteService.class);
+    private final OperationJobService service = new OperationJobService(jobs, steps, writes, stepWrites);
 
     @AfterEach
     void clearContexts() {
@@ -119,12 +119,15 @@ class OperationJobServiceTest {
                 .status(com.dupi.rag.domain.enums.OperationStepStatus.COMPLETED)
                 .completedAt(Instant.now())
                 .build();
-        when(steps.findByJobIdAndStepKey(jobId, "store-archive")).thenReturn(Optional.of(completed));
+        OperationExecutionContext context = new OperationExecutionContext(
+                jobId, UUID.randomUUID(), 1, 0, OperationPhase.FORWARD);
+        when(stepWrites.recordStep(context, "store-archive", "STORE", "archives/job-id.zip"))
+                .thenReturn(completed);
 
-        var result = service.recordStep(jobId, "store-archive", "STORE", "archives/job-id.zip");
+        var result = service.recordStep(context, "store-archive", "STORE", "archives/job-id.zip");
 
         assertThat(result.getStatus()).isEqualTo(com.dupi.rag.domain.enums.OperationStepStatus.COMPLETED);
-        verify(steps, org.mockito.Mockito.never()).save(any());
+        verify(stepWrites).recordStep(context, "store-archive", "STORE", "archives/job-id.zip");
     }
 
     @Test
@@ -132,8 +135,12 @@ class OperationJobServiceTest {
         UUID jobId = UUID.randomUUID(); UUID kbId = UUID.randomUUID();
         TenantContext.setTenantId("tenant-a");
         SecurityContext.set("operator", "OPERATOR", List.of("KB_READ"), List.of(kbId.toString()));
-        OperationJob job = job(jobId, kbId); job.setStatus(OperationStatus.FAILED); job.setPhase(OperationPhase.COMPENSATION);
-        OperationStep failed = OperationStep.builder().jobId(jobId).status(com.dupi.rag.domain.enums.OperationStepStatus.FAILED).build();
+        OperationJob job = job(jobId, kbId); job.setStatus(OperationStatus.FAILED);
+        job.setPhase(OperationPhase.COMPENSATION); job.setPhaseAttemptCount(5);
+        OperationStep failed = OperationStep.builder().jobId(jobId)
+                .status(com.dupi.rag.domain.enums.OperationStepStatus.FAILED)
+                .startedAt(Instant.now().minusSeconds(30)).completedAt(Instant.now())
+                .lastError("old error").build();
         when(jobs.findById(jobId)).thenReturn(Optional.of(job));
         when(steps.findByJobIdAndStatus(jobId, com.dupi.rag.domain.enums.OperationStepStatus.FAILED)).thenReturn(List.of(failed));
         when(steps.findByJobIdOrderBySequenceNumberAsc(jobId)).thenReturn(List.of());
@@ -141,17 +148,38 @@ class OperationJobServiceTest {
         assertThat(service.retry(jobId).getStatus()).isEqualTo(OperationStatus.COMPENSATING);
         assertThat(failed.getStatus()).isEqualTo(com.dupi.rag.domain.enums.OperationStepStatus.RETRY_WAIT);
         assertThat(job.getRetryEpoch()).isEqualTo(1L);
+        assertThat(job.getPhaseAttemptCount()).isZero();
+        assertThat(failed.getStartedAt()).isNull();
+        assertThat(failed.getCompletedAt()).isNull();
+        assertThat(failed.getLastError()).isNull();
     }
 
     @Test
     void staleExecutionContextCannotStartAStep() {
         UUID jobId = UUID.randomUUID();
-        OperationExecutionContext context = new OperationExecutionContext(jobId, UUID.randomUUID(), 4, OperationPhase.FORWARD);
+        OperationExecutionContext context = new OperationExecutionContext(
+                jobId, UUID.randomUUID(), 4, 0, OperationPhase.FORWARD);
         doThrow(new com.dupi.rag.exception.OperationConflictException("Operation claim is no longer current"))
-                .when(claims).assertActiveClaim(context);
+                .when(stepWrites).startStep(context, "store");
 
         assertThatThrownBy(() -> service.startStep(context, "store"))
                 .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class);
+    }
+
+    @Test
+    void makeRunnableLocksPreparedIntakeAndPublishesItsDueTime() {
+        UUID jobId = UUID.randomUUID();
+        OperationJob job = job(jobId, UUID.randomUUID());
+        when(jobs.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(jobs.save(job)).thenReturn(job);
+        when(steps.findByJobIdOrderBySequenceNumberAsc(jobId)).thenReturn(List.of());
+
+        var response = service.makeRunnable(jobId);
+
+        assertThat(response.getStatus()).isEqualTo(OperationStatus.PREPARED);
+        assertThat(job.getRunnable()).isTrue();
+        assertThat(job.getNextAttemptAt()).isNotNull();
+        verify(jobs).findByIdForUpdate(jobId);
     }
 
     private static OperationJob job(UUID jobId, UUID kbId) {

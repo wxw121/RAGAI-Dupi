@@ -79,6 +79,10 @@ public class OperationJob {
     @lombok.Builder.Default
     private Integer attemptCount = 0;
 
+    @Column(name = "phase_attempt_count", nullable = false)
+    @lombok.Builder.Default
+    private Integer phaseAttemptCount = 0;
+
     @Column(nullable = false)
     @lombok.Builder.Default
     private Boolean runnable = false;
@@ -97,7 +101,7 @@ public class OperationJob {
     @Column(name = "lease_expires_at")
     private Instant leaseExpiresAt;
 
-    @Column(name = "next_attempt_at", nullable = false)
+    @Column(name = "next_attempt_at")
     private Instant nextAttemptAt;
 
     @Column(name = "last_error", columnDefinition = "TEXT")
@@ -125,6 +129,9 @@ public class OperationJob {
         }
         if (attemptCount == null) {
             attemptCount = 0;
+        }
+        if (phaseAttemptCount == null) {
+            phaseAttemptCount = 0;
         }
         if (runnable == null) {
             runnable = false;

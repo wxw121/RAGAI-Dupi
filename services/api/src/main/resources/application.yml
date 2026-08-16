@@ -109,6 +109,7 @@ dupi:
     runner-enabled: ${OPERATION_RUNNER_ENABLED:true}
     runner-cron: ${OPERATION_RUNNER_CRON:*/5 * * * * *}
     runner-batch-size: ${OPERATION_RUNNER_BATCH_SIZE:10}
+    runner-cleanup-limit: ${OPERATION_RUNNER_CLEANUP_LIMIT:10}
     lease-seconds: ${OPERATION_LEASE_SECONDS:60}
     max-attempts: ${OPERATION_MAX_ATTEMPTS:5}
   audit:
