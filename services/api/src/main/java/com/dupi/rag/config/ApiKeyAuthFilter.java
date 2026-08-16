@@ -216,6 +216,12 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
         if (uri.startsWith("/api/v1/ops/")) {
             return List.of("OPS_ADMIN");
         }
+        if ("GET".equalsIgnoreCase(method) && uri.matches("/api/v1/operations/[^/]+")) {
+            return List.of("KB_READ");
+        }
+        if ("POST".equalsIgnoreCase(method) && uri.matches("/api/v1/operations/[^/]+/retry")) {
+            return List.of("MAINTENANCE", "KB_READ");
+        }
         if (uri.contains("/recovery/")) {
             return List.of("KB_RECOVERY", "KB_READ");
         }

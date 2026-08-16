@@ -105,6 +105,9 @@ dupi:
   cleanup:
     # Spread compensation work across the day: at most five tasks are processed per minute.
     orphan-vectors-cron: ${ORPHAN_VECTOR_CLEANUP_CRON:0 * * * * *}
+  operations:
+    runner-cron: ${OPERATION_RUNNER_CRON:*/5 * * * * *}
+    runner-batch-size: ${OPERATION_RUNNER_BATCH_SIZE:10}
   audit:
     retention-days: ${AUDIT_RETENTION_DAYS:180}
     retention-cron: ${AUDIT_RETENTION_CRON:0 15 2 * * *}

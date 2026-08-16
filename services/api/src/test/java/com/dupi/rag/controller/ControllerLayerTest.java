@@ -39,6 +39,19 @@ import static org.mockito.Mockito.*;
 class ControllerLayerTest {
 
     @Test
+    void operationControllerDelegatesStatusAndRetry() {
+        OperationJobService service = mock(OperationJobService.class);
+        OperationController controller = new OperationController(service);
+        UUID jobId = UUID.randomUUID();
+        OperationJobResponse response = OperationJobResponse.builder().id(jobId).build();
+        when(service.get(jobId)).thenReturn(response);
+        when(service.retry(jobId)).thenReturn(response);
+
+        assertThat(controller.get(jobId)).isSameAs(response);
+        assertThat(controller.retry(jobId)).isSameAs(response);
+    }
+
+    @Test
     void authControllerIssuesSignedTokenAndRejectsInvalidCredentials() {
         ApiSecurityProperties properties = new ApiSecurityProperties();
         properties.setAuthSecret("test-secret");
