@@ -1,6 +1,7 @@
 package com.dupi.rag.controller;
 
 import com.dupi.rag.domain.entity.RecoveryArchive;
+import com.dupi.rag.dto.OperationJobResponse;
 import com.dupi.rag.domain.entity.RecoveryRestoreJob;
 import com.dupi.rag.domain.enums.RecoveryArchiveStatus;
 import com.dupi.rag.domain.enums.RecoveryRestoreStatus;
@@ -138,25 +139,23 @@ class RecoveryControllerTest {
     }
 
     @Test
-    void importArchiveReturnsCreatedVerifiedArchive() {
+    void importArchiveReturnsAcceptedOperationJob() {
         RecoveryArchiveService archives = mock(RecoveryArchiveService.class);
         RecoveryArchiveImportService archiveImports = mock(RecoveryArchiveImportService.class);
         RecoveryRestoreService restores = mock(RecoveryRestoreService.class);
         RecoveryJobExecutor executor = mock(RecoveryJobExecutor.class);
         RecoveryController controller = new RecoveryController(archives, archiveImports, restores, executor);
         UUID kbId = UUID.randomUUID();
-        RecoveryArchive imported = RecoveryArchive.builder().id(UUID.randomUUID())
-                .sourceKnowledgeBaseId(kbId).status(RecoveryArchiveStatus.COMPLETED)
-                .itemCount(8L).totalBytes(2048L).build();
+        OperationJobResponse imported = OperationJobResponse.builder().id(UUID.randomUUID()).build();
         MockMultipartFile file = new MockMultipartFile(
                 "file", "recovery.zip", "application/zip", new byte[] {1, 2, 3});
-        when(archiveImports.importZip(kbId, file, null)).thenReturn(imported);
+        when(archiveImports.submit(kbId, file, "request-1", null)).thenReturn(imported);
 
-        var response = controller.importArchive(kbId, file);
+        var response = controller.importArchive(kbId, file, "request-1");
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(response.getBody().id()).isEqualTo(imported.getId());
-        verify(archiveImports).importZip(kbId, file, null);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(response.getBody().getId()).isEqualTo(imported.getId());
+        verify(archiveImports).submit(kbId, file, "request-1", null);
         verifyNoInteractions(executor);
     }
 }

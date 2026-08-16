@@ -6,6 +6,7 @@ import com.dupi.rag.service.RecoveryArchiveImportService;
 import com.dupi.rag.service.RecoveryArchiveService;
 import com.dupi.rag.service.RecoveryJobExecutor;
 import com.dupi.rag.service.RecoveryRestoreService;
+import com.dupi.rag.dto.OperationJobResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.*;
@@ -40,10 +41,11 @@ public class RecoveryController {
     }
 
     @PostMapping(value = "/archives/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<RecoveryArchiveResponse> importArchive(
-            @PathVariable UUID kbId, @RequestPart("file") MultipartFile file) {
-        var archive = archiveImports.importZip(kbId, file, SecurityContext.getPrincipal());
-        return ResponseEntity.status(HttpStatus.CREATED).body(RecoveryArchiveResponse.from(archive));
+    public ResponseEntity<OperationJobResponse> importArchive(
+            @PathVariable UUID kbId, @RequestPart("file") MultipartFile file,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        var job = archiveImports.submit(kbId, file, idempotencyKey, SecurityContext.getPrincipal());
+        return ResponseEntity.accepted().body(job);
     }
 
     @GetMapping("/archives/{archiveId}")

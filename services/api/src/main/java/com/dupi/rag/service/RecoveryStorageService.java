@@ -23,7 +23,42 @@ public class RecoveryStorageService {
     private final RecoveryObjectStore objectStore;
 
     public StoredRecoveryObject put(String tenantId, UUID archiveId, String relativeKey, InputStream input) {
-        String objectKey = archivePrefix(tenantId, archiveId) + validateRelativeKey(relativeKey);
+        return putAtKey(archivePrefix(tenantId, archiveId) + validateRelativeKey(relativeKey), input);
+    }
+
+    public String stagingKey(UUID jobId) {
+        if (jobId == null) throw new IllegalArgumentException("Recovery staging job is required");
+        return "recovery-staging/" + jobId + ".zip";
+    }
+
+    public String bucket() {
+        return properties.getBucket();
+    }
+
+    public String finalKey(String tenantId, UUID jobId, String relativeKey) {
+        return archivePrefix(tenantId, jobId) + validateRelativeKey(relativeKey);
+    }
+
+    public StoredRecoveryObject putStaging(String stagingKey, InputStream input) {
+        if (stagingKey == null || !stagingKey.startsWith("recovery-staging/")) {
+            throw new IllegalArgumentException("Invalid recovery staging key");
+        }
+        return putAtKey(stagingKey, input);
+    }
+
+    public StoredRecoveryObject putFinal(String tenantId, UUID jobId, String relativeKey, InputStream input) {
+        return putAtKey(finalKey(tenantId, jobId, relativeKey), input);
+    }
+
+    public void deleteIfPresent(String objectKey) {
+        try {
+            objectStore.delete(properties.getBucket(), objectKey);
+        } catch (Exception ignored) {
+            // Object stores differ on delete-missing behaviour; cleanup is intentionally idempotent.
+        }
+    }
+
+    private StoredRecoveryObject putAtKey(String objectKey, InputStream input) {
         CountingDigestInputStream digestInput = new CountingDigestInputStream(input);
         try {
             objectStore.put(properties.getBucket(), objectKey, digestInput);
@@ -42,6 +77,16 @@ public class RecoveryStorageService {
                     && digestInput.hexDigest().equals(expected.sha256());
         } catch (Exception e) {
             return false;
+        }
+    }
+
+    public StoredRecoveryObject describe(String objectKey) {
+        try (InputStream input = objectStore.get(properties.getBucket(), objectKey)) {
+            CountingDigestInputStream digestInput = new CountingDigestInputStream(input);
+            digestInput.transferTo(OutputStreamSink.INSTANCE);
+            return new StoredRecoveryObject(properties.getBucket(), objectKey, digestInput.byteCount(), digestInput.hexDigest());
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to describe recovery object", e);
         }
     }
 

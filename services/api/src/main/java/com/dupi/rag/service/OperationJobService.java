@@ -91,6 +91,53 @@ public class OperationJobService {
         return toResponse(operationJobRepository.save(job));
     }
 
+    /**
+     * Records a durable intake fact before a job is exposed to workers.  This is deliberately
+     * separate from workflow step writes: a PREPARED, non-runnable job has no execution claim.
+     */
+    @Transactional
+    public void replaceIntakeInput(UUID jobId, Map<String, Object> input) {
+        OperationJob job = preparedIntake(jobId);
+        Map<String, Object> replacement = input == null ? Map.of() : Map.copyOf(input);
+        if (!Map.of("intake", "pending").equals(job.getInput()) && !replacement.equals(job.getInput())) {
+            throw new OperationConflictException("Operation intake plan already exists");
+        }
+        job.setInput(replacement);
+        operationJobRepository.saveAndFlush(job);
+    }
+
+    @Transactional
+    public OperationStep recordIntakeStep(UUID jobId, String stepKey, String stepType, String resourceRef) {
+        preparedIntake(jobId);
+        String key = stepKey == null ? "" : stepKey.trim();
+        if (key.isEmpty() || stepType == null || stepType.isBlank()) {
+            throw new IllegalArgumentException("Operation intake step requires a key and type");
+        }
+        return operationStepRepository.findByJobIdAndStepKey(jobId, key).orElseGet(() ->
+                operationStepRepository.saveAndFlush(OperationStep.builder()
+                        .jobId(jobId)
+                        .sequenceNumber(operationStepRepository.findByJobIdOrderBySequenceNumberAsc(jobId).size() + 1)
+                        .stepKey(key).stepType(stepType.trim()).resourceRef(resourceRef)
+                        .status(OperationStepStatus.PENDING).attemptCount(0).nextAttemptAt(Instant.now()).build()));
+    }
+
+    @Transactional
+    public void completeIntakeStep(UUID jobId, String stepKey) {
+        preparedIntake(jobId);
+        OperationStep step = operationStepRepository.findByJobIdAndStepKey(jobId, stepKey == null ? "" : stepKey.trim())
+                .orElseThrow(() -> new ResourceNotFoundException("Operation intake step not found: " + stepKey));
+        if (step.getStatus() == OperationStepStatus.COMPLETED) {
+            return;
+        }
+        if (step.getStatus() != OperationStepStatus.PENDING) {
+            throw new OperationConflictException("Operation intake step cannot complete while " + step.getStatus());
+        }
+        step.setStatus(OperationStepStatus.COMPLETED);
+        step.setCompletedAt(Instant.now());
+        step.setNextAttemptAt(null);
+        operationStepRepository.saveAndFlush(step);
+    }
+
     public OperationStep recordStep(OperationExecutionContext context, String stepKey,
                                     String stepType, String resourceRef) {
         return stepWriteService.recordStep(context, stepKey, stepType, resourceRef);
@@ -135,6 +182,15 @@ public class OperationJobService {
                 || ("KNOWLEDGE_BASE".equalsIgnoreCase(job.getAggregateType())
                 && !SecurityContext.canAccessKnowledgeBase(job.getAggregateId().toString()))) {
             throw new ResourceNotFoundException("Operation job not found: " + jobId);
+        }
+        return job;
+    }
+
+    private OperationJob preparedIntake(UUID jobId) {
+        OperationJob job = operationJobRepository.findByIdForUpdate(jobId)
+                .orElseThrow(() -> new ResourceNotFoundException("Operation job not found: " + jobId));
+        if (job.getStatus() != OperationStatus.PREPARED || Boolean.TRUE.equals(job.getRunnable())) {
+            throw new OperationConflictException("Operation intake is no longer writable");
         }
         return job;
     }
