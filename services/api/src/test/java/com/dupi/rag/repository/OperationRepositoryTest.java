@@ -23,6 +23,7 @@ class OperationRepositoryTest {
                 String.class
         );
 
+        assertThat(method.getReturnType()).isEqualTo(java.util.Optional.class);
         assertThat(method.getGenericReturnType()).isInstanceOf(ParameterizedType.class);
         assertThat(((ParameterizedType) method.getGenericReturnType()).getActualTypeArguments())
                 .containsExactly(com.dupi.rag.domain.entity.OperationJob.class);
@@ -36,6 +37,7 @@ class OperationRepositoryTest {
                 String.class
         );
 
+        assertThat(method.getReturnType()).isEqualTo(java.util.Optional.class);
         assertThat(method.getGenericReturnType()).isInstanceOf(ParameterizedType.class);
         assertThat(((ParameterizedType) method.getGenericReturnType()).getActualTypeArguments())
                 .containsExactly(com.dupi.rag.domain.entity.OperationStep.class);
@@ -45,25 +47,32 @@ class OperationRepositoryTest {
     void jobRepositoryLoadsOnlyRunnableDueJobsWithStableOrdering() throws NoSuchMethodException {
         var method = OperationJobRepository.class.getMethod(
                 "findDueByStatusInOrderByCreatedAtAsc",
-                List.class,
                 Instant.class
         );
 
+        assertThat(method.getReturnType()).isEqualTo(List.class);
+        assertThat(method.getGenericReturnType()).isInstanceOf(ParameterizedType.class);
+        assertThat(((ParameterizedType) method.getGenericReturnType()).getActualTypeArguments())
+                .containsExactly(com.dupi.rag.domain.entity.OperationJob.class);
         assertThat(method.getAnnotation(Query.class))
                 .isNotNull()
                 .extracting(Query::value)
                 .asString()
-                .contains("job.status in :statuses")
+                .contains("OperationStatus.PREPARED")
+                .contains("OperationStatus.RETRY_WAIT")
+                .contains("OperationStatus.COMPENSATING")
+                .doesNotContain("OperationStatus.RUNNING")
+                .doesNotContain("OperationStatus.COMPLETED")
+                .doesNotContain("OperationStatus.FAILED")
                 .contains("job.nextAttemptAt <= :now")
                 .contains("order by job.createdAt asc, job.id asc");
-        assertThat(OperationJobRepository.RUNNABLE_STATUSES)
-                .containsExactly(OperationStatus.PREPARED, OperationStatus.RETRY_WAIT, OperationStatus.COMPENSATING);
     }
 
     @Test
     void stepRepositoryCanLoadStepsInExecutionOrder() throws NoSuchMethodException {
         var method = OperationStepRepository.class.getMethod("findByJobIdOrderBySequenceNumberAsc", UUID.class);
 
+        assertThat(method.getReturnType()).isEqualTo(List.class);
         assertThat(method.getGenericReturnType()).isInstanceOf(ParameterizedType.class);
         assertThat(((ParameterizedType) method.getGenericReturnType()).getActualTypeArguments())
                 .containsExactly(com.dupi.rag.domain.entity.OperationStep.class);
