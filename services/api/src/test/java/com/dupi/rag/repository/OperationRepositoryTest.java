@@ -5,7 +5,9 @@ import com.dupi.rag.domain.enums.OperationStatus;
 import org.springframework.data.jpa.repository.Query;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.ParameterizedType;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -21,7 +23,9 @@ class OperationRepositoryTest {
                 String.class
         );
 
-        assertThat(method.getReturnType().getSimpleName()).isEqualTo("Optional");
+        assertThat(method.getGenericReturnType()).isInstanceOf(ParameterizedType.class);
+        assertThat(((ParameterizedType) method.getGenericReturnType()).getActualTypeArguments())
+                .containsExactly(com.dupi.rag.domain.entity.OperationJob.class);
     }
 
     @Test
@@ -32,35 +36,48 @@ class OperationRepositoryTest {
                 String.class
         );
 
-        assertThat(method.getReturnType().getSimpleName()).isEqualTo("Optional");
+        assertThat(method.getGenericReturnType()).isInstanceOf(ParameterizedType.class);
+        assertThat(((ParameterizedType) method.getGenericReturnType()).getActualTypeArguments())
+                .containsExactly(com.dupi.rag.domain.entity.OperationStep.class);
     }
 
     @Test
-    void jobRepositoryCanLoadDueJobsInCreationOrder() throws NoSuchMethodException {
+    void jobRepositoryLoadsOnlyRunnableDueJobsWithStableOrdering() throws NoSuchMethodException {
         var method = OperationJobRepository.class.getMethod(
-                "findByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc",
-                OperationStatus.class,
+                "findDueByStatusInOrderByCreatedAtAsc",
+                List.class,
                 Instant.class
         );
-
-        assertThat(method.getReturnType().getSimpleName()).isEqualTo("List");
-    }
-
-    @Test
-    void jobRepositoryCanCountDueJobs() throws NoSuchMethodException {
-        var method = OperationJobRepository.class.getMethod("countDueBefore", Instant.class);
 
         assertThat(method.getAnnotation(Query.class))
                 .isNotNull()
                 .extracting(Query::value)
                 .asString()
-                .contains("job.nextAttemptAt < :time");
+                .contains("job.status in :statuses")
+                .contains("job.nextAttemptAt <= :now")
+                .contains("order by job.createdAt asc, job.id asc");
+        assertThat(OperationJobRepository.RUNNABLE_STATUSES)
+                .containsExactly(OperationStatus.PREPARED, OperationStatus.RETRY_WAIT, OperationStatus.COMPENSATING);
     }
 
     @Test
     void stepRepositoryCanLoadStepsInExecutionOrder() throws NoSuchMethodException {
         var method = OperationStepRepository.class.getMethod("findByJobIdOrderBySequenceNumberAsc", UUID.class);
 
-        assertThat(method.getReturnType().getSimpleName()).isEqualTo("List");
+        assertThat(method.getGenericReturnType()).isInstanceOf(ParameterizedType.class);
+        assertThat(((ParameterizedType) method.getGenericReturnType()).getActualTypeArguments())
+                .containsExactly(com.dupi.rag.domain.entity.OperationStep.class);
+    }
+
+    @Test
+    void operationStatusKeepsPreparedWorkDistinctFromPendingSteps() {
+        assertThat(OperationStatus.values()).containsExactly(
+                OperationStatus.PREPARED,
+                OperationStatus.RUNNING,
+                OperationStatus.RETRY_WAIT,
+                OperationStatus.COMPENSATING,
+                OperationStatus.COMPLETED,
+                OperationStatus.FAILED
+        );
     }
 }

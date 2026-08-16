@@ -14,19 +14,26 @@ import java.util.UUID;
 
 public interface OperationJobRepository extends JpaRepository<OperationJob, UUID> {
 
+    List<OperationStatus> RUNNABLE_STATUSES = List.of(
+            OperationStatus.PREPARED,
+            OperationStatus.RETRY_WAIT,
+            OperationStatus.COMPENSATING
+    );
+
     Optional<OperationJob> findByTenantIdAndOperationTypeAndIdempotencyKey(
             String tenantId,
             OperationType operationType,
             String idempotencyKey
     );
 
-    List<OperationJob> findByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
-            OperationStatus status,
-            Instant nextAttemptAt
+    @Query("""
+            select job from OperationJob job
+            where job.status in :statuses
+              and job.nextAttemptAt <= :now
+            order by job.createdAt asc, job.id asc
+            """)
+    List<OperationJob> findDueByStatusInOrderByCreatedAtAsc(
+            @Param("statuses") List<OperationStatus> statuses,
+            @Param("now") Instant now
     );
-
-    long countByStatus(OperationStatus status);
-
-    @Query("select count(job) from OperationJob job where job.nextAttemptAt < :time")
-    long countDueBefore(@Param("time") Instant time);
 }
