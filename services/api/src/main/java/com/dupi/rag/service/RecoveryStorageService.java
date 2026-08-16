@@ -31,6 +31,15 @@ public class RecoveryStorageService {
         return "recovery-staging/" + jobId + ".zip";
     }
 
+    public String stagingKey(UUID jobId, String zipSha256) {
+        if (jobId == null) throw new IllegalArgumentException("Recovery staging job is required");
+        if (zipSha256 == null || !zipSha256.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("Recovery staging ZIP hash is required");
+        }
+        String suffix = zipSha256;
+        return "recovery-staging/" + suffix + "/" + jobId + ".zip";
+    }
+
     public String bucket() {
         return properties.getBucket();
     }
@@ -39,11 +48,23 @@ public class RecoveryStorageService {
         return archivePrefix(tenantId, jobId) + validateRelativeKey(relativeKey);
     }
 
-    public StoredRecoveryObject putStaging(String stagingKey, InputStream input) {
-        if (stagingKey == null || !stagingKey.startsWith("recovery-staging/")) {
+    /** Writes only to an absent content-addressed stage; matching bytes are an idempotent success. */
+    public synchronized StoredRecoveryObject putStaging(StoredRecoveryObject expected, InputStream input) {
+        if (expected == null || expected.objectKey() == null
+                || !expected.objectKey().startsWith("recovery-staging/")) {
             throw new IllegalArgumentException("Invalid recovery staging key");
         }
-        return putAtKey(stagingKey, input);
+        RecoveryStorageInspection before = inspect(expected);
+        if (before.outcome() == RecoveryStorageOutcome.MATCHING) return before.object();
+        if (before.outcome() != RecoveryStorageOutcome.ABSENT) {
+            throw new RecoveryStorageConflictException(
+                    "Recovery staging object already contains different bytes or version");
+        }
+        StoredRecoveryObject stored = putAtKey(expected.objectKey(), input);
+        if (stored.byteSize() != expected.byteSize() || !stored.sha256().equals(expected.sha256())) {
+            throw new RecoveryStorageConflictException("Recovery staging upload differs from its immutable plan");
+        }
+        return stored;
     }
 
     public StoredRecoveryObject putFinal(String tenantId, UUID jobId, String relativeKey, InputStream input) {
@@ -71,35 +92,54 @@ public class RecoveryStorageService {
         try {
             objectStore.put(properties.getBucket(), objectKey, digestInput);
             return new StoredRecoveryObject(properties.getBucket(), objectKey,
-                    digestInput.byteCount(), digestInput.hexDigest());
+                    digestInput.byteCount(), digestInput.hexDigest(),
+                    requireVersion(properties.getBucket(), objectKey));
         } catch (Exception e) {
             throw new RecoveryStorageUnavailableException("Failed to write recovery object", e);
         }
     }
 
-    public RecoveryStorageOutcome inspect(StoredRecoveryObject expected) {
-        try (InputStream input = objectStore.get(expected.bucket(), expected.objectKey())) {
+    public RecoveryStorageInspection inspect(StoredRecoveryObject expected) {
+        try {
+            String before = requireVersion(expected.bucket(), expected.objectKey());
+            try (InputStream input = objectStore.get(expected.bucket(), expected.objectKey())) {
             CountingDigestInputStream digestInput = new CountingDigestInputStream(input);
             digestInput.transferTo(OutputStreamSink.INSTANCE);
-            return digestInput.byteCount() == expected.byteSize()
-                    && digestInput.hexDigest().equals(expected.sha256())
-                    ? RecoveryStorageOutcome.MATCHING : RecoveryStorageOutcome.CONFLICT;
+                String after = requireVersion(expected.bucket(), expected.objectKey());
+                if (!before.equals(after)) {
+                    throw new RecoveryStorageUnavailableException(
+                            "Recovery object changed while it was being inspected",
+                            new IllegalStateException("object version changed during inspection"));
+                }
+                StoredRecoveryObject actual = new StoredRecoveryObject(expected.bucket(), expected.objectKey(),
+                        digestInput.byteCount(), digestInput.hexDigest(), after);
+                if (actual.byteSize() != expected.byteSize() || !actual.sha256().equals(expected.sha256())) {
+                    return RecoveryStorageInspection.of(RecoveryStorageOutcome.CONFLICT, actual);
+                }
+                if (expected.versionToken() != null && !expected.versionToken().equals(after)) {
+                    return RecoveryStorageInspection.of(RecoveryStorageOutcome.STALE_VERSION, actual);
+                }
+                return RecoveryStorageInspection.of(RecoveryStorageOutcome.MATCHING, actual);
+            }
         } catch (RecoveryObjectNotFoundException absent) {
-            return RecoveryStorageOutcome.ABSENT;
+            return RecoveryStorageInspection.absent();
+        } catch (RecoveryStorageUnavailableException exception) {
+            throw exception;
         } catch (Exception exception) {
             throw new RecoveryStorageUnavailableException("Failed to inspect recovery object", exception);
         }
     }
 
     public boolean verify(StoredRecoveryObject expected) {
-        return inspect(expected) == RecoveryStorageOutcome.MATCHING;
+        return inspect(expected).outcome() == RecoveryStorageOutcome.MATCHING;
     }
 
     public StoredRecoveryObject describe(String objectKey) {
         try (InputStream input = objectStore.get(properties.getBucket(), objectKey)) {
             CountingDigestInputStream digestInput = new CountingDigestInputStream(input);
             digestInput.transferTo(OutputStreamSink.INSTANCE);
-            return new StoredRecoveryObject(properties.getBucket(), objectKey, digestInput.byteCount(), digestInput.hexDigest());
+            return new StoredRecoveryObject(properties.getBucket(), objectKey, digestInput.byteCount(),
+                    digestInput.hexDigest(), requireVersion(properties.getBucket(), objectKey));
         } catch (Exception e) {
             throw new RecoveryStorageUnavailableException("Failed to describe recovery object", e);
         }
@@ -177,6 +217,14 @@ public class RecoveryStorageService {
             throw new IllegalArgumentException("Invalid relative archive key");
         }
         return key;
+    }
+
+    private String requireVersion(String bucket, String key) throws Exception {
+        String version = objectStore.version(bucket, key);
+        if (version == null || version.isBlank()) {
+            throw new IllegalStateException("Recovery object store did not return an object version");
+        }
+        return version;
     }
 
     private static final class CountingDigestInputStream extends FilterInputStream {

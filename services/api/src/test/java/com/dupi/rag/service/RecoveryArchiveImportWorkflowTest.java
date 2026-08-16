@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -44,6 +45,7 @@ class RecoveryArchiveImportWorkflowTest {
     private final OperationExecutionContext compensation = new OperationExecutionContext(
             jobId, UUID.randomUUID(), 3, 1, OperationPhase.COMPENSATION);
     private RecoveryArchiveImportPlan plan;
+    private StoredRecoveryObject stageEvidence;
     private RecoveryArchiveImportWorkflow workflow;
 
     @BeforeEach
@@ -53,10 +55,18 @@ class RecoveryArchiveImportWorkflowTest {
                 "embedding", 3, Map.of(), "a".repeat(64), "b".repeat(64), "admin", List.of(
                 new RecoveryArchiveImportPlan.Entry("record:one", "RECORD", "records/one.json",
                         bytes.length, sha(bytes))));
+        stageEvidence = new StoredRecoveryObject("bucket",
+                "recovery-staging/" + plan.zipSha256() + "/" + jobId + ".zip",
+                1, plan.zipSha256(), "etag-stage");
+        stepState.put("stage-zip", OperationStep.builder().jobId(jobId).stepKey("stage-zip")
+                .stepType("STAGE_UPLOAD").status(OperationStepStatus.COMPLETED)
+                .resourceRef(RecoveryStageEvidence.encode(stageEvidence)).build());
         when(jobs.findById(jobId)).thenReturn(Optional.of(OperationJob.builder().id(jobId).input(plan.toInput()).build()));
         when(claims.renewLease(any())).thenAnswer(call -> call.getArgument(0));
         when(storage.bucket()).thenReturn("bucket");
         when(storage.stagingKey(jobId)).thenReturn("recovery-staging/" + jobId + ".zip");
+        when(storage.stagingKey(jobId, plan.zipSha256()))
+                .thenReturn("recovery-staging/" + plan.zipSha256() + "/" + jobId + ".zip");
         when(storage.finalKey(eq("tenant-a"), eq(jobId), anyString()))
                 .thenAnswer(call -> "archives/tenant-a/" + jobId + "/" + call.getArgument(2));
         statefulSteps();
@@ -66,8 +76,8 @@ class RecoveryArchiveImportWorkflowTest {
 
     @Test
     void temporaryStorageFailureRequestsRetryAndKeepsPromotionReplayable() throws Exception {
-        when(storage.inspect(any())).thenReturn(RecoveryStorageOutcome.ABSENT);
-        when(storage.open("bucket", "recovery-staging/" + jobId + ".zip"))
+        when(storage.inspect(any())).thenReturn(matchingStage(), inspection(RecoveryStorageOutcome.ABSENT));
+        when(storage.open("bucket", stageEvidence.objectKey()))
                 .thenReturn(new ByteArrayInputStream(zip(Map.of("records/one.json", "one".getBytes()))));
         when(storage.putFinal(eq("tenant-a"), eq(jobId), eq("records/one.json"), any()))
                 .thenThrow(new RecoveryStorageUnavailableException("timeout", new Exception("down")));
@@ -82,9 +92,10 @@ class RecoveryArchiveImportWorkflowTest {
     void runningPromotionWithAbsentObjectReuploadsSameDeterministicKey() throws Exception {
         String promotion = "promote-" + sha("records/one.json".getBytes());
         stepState.put(promotion, step(promotion, OperationStepStatus.RUNNING));
-        when(storage.inspect(any())).thenReturn(RecoveryStorageOutcome.ABSENT, RecoveryStorageOutcome.MATCHING,
-                RecoveryStorageOutcome.CONFLICT);
-        when(storage.open("bucket", "recovery-staging/" + jobId + ".zip"))
+        when(storage.inspect(any())).thenReturn(matchingStage(), inspection(RecoveryStorageOutcome.ABSENT),
+                inspection(RecoveryStorageOutcome.MATCHING), matchingStage(),
+                inspection(RecoveryStorageOutcome.CONFLICT));
+        when(storage.open("bucket", stageEvidence.objectKey()))
                 .thenReturn(new ByteArrayInputStream(zip(Map.of("records/one.json", "one".getBytes()))));
         when(storage.putFinal(eq("tenant-a"), eq(jobId), eq("records/one.json"), any()))
                 .thenReturn(new StoredRecoveryObject("bucket",
@@ -97,11 +108,70 @@ class RecoveryArchiveImportWorkflowTest {
 
     @Test
     void permanentObjectConflictRequestsCompensationWithoutOverwriting() {
-        when(storage.inspect(any())).thenReturn(RecoveryStorageOutcome.CONFLICT);
+        when(storage.inspect(any())).thenReturn(matchingStage(), inspection(RecoveryStorageOutcome.CONFLICT));
 
         assertThatThrownBy(() -> workflow.executeForward(forward)).isInstanceOf(CompensateOperationException.class);
         verify(storage, never()).open(anyString(), anyString());
         verify(storage, never()).putFinal(anyString(), any(), anyString(), any());
+    }
+
+    @Test
+    void promotesMultipleMissingEntriesFromOneVersionBoundStagingScan() throws Exception {
+        byte[] first = new byte[96 * 1024];
+        java.util.Arrays.fill(first, (byte) 'a');
+        byte[] second = "later".getBytes();
+        plan = new RecoveryArchiveImportPlan(plan.sourceArchiveId(), "tenant-a", plan.knowledgeBaseId(), null,
+                "embedding", 3, Map.of(), plan.sourceManifestChecksum(), plan.zipSha256(), "admin", List.of(
+                new RecoveryArchiveImportPlan.Entry("record:first", "RECORD", "records/first.bin",
+                        first.length, sha(first)),
+                new RecoveryArchiveImportPlan.Entry("record:later", "RECORD", "records/later.json",
+                        second.length, sha(second))));
+        when(jobs.findById(jobId)).thenReturn(Optional.of(
+                OperationJob.builder().id(jobId).input(plan.toInput()).build()));
+        stageEvidence = new StoredRecoveryObject("bucket",
+                "recovery-staging/" + plan.zipSha256() + "/" + jobId + ".zip",
+                1, plan.zipSha256(), "etag-stage");
+        stepState.put("stage-zip", OperationStep.builder().jobId(jobId).stepKey("stage-zip")
+                .stepType("STAGE_UPLOAD").status(OperationStepStatus.COMPLETED)
+                .resourceRef(RecoveryStageEvidence.encode(stageEvidence)).build());
+        LinkedHashMap<String, byte[]> stagedEntries = new LinkedHashMap<>();
+        stagedEntries.put("records/first.bin", first);
+        stagedEntries.put("records/later.json", second);
+        byte[] stagedZip = zip(stagedEntries);
+        AtomicInteger renewals = new AtomicInteger();
+        java.util.concurrent.atomic.AtomicBoolean renewedWhileReading = new java.util.concurrent.atomic.AtomicBoolean();
+        when(claims.renewLease(forward)).thenAnswer(call -> {
+            renewals.incrementAndGet();
+            return forward;
+        });
+        Map<String, Integer> inspections = new java.util.concurrent.ConcurrentHashMap<>();
+        when(storage.inspect(any())).thenAnswer(call -> {
+            StoredRecoveryObject expected = call.getArgument(0);
+            if (expected.objectKey().startsWith("recovery-staging/")) {
+                return new RecoveryStorageInspection(RecoveryStorageOutcome.MATCHING, stageEvidence);
+            }
+            if (expected.objectKey().endsWith("manifest.json")) return inspection(RecoveryStorageOutcome.CONFLICT);
+            int attempt = inspections.merge(expected.objectKey(), 1, Integer::sum);
+            return inspection(attempt == 1 ? RecoveryStorageOutcome.ABSENT : RecoveryStorageOutcome.MATCHING);
+        });
+        when(storage.open("bucket", stageEvidence.objectKey()))
+                .thenReturn(new ChunkedInputStream(stagedZip, 1024));
+        when(storage.putFinal(eq("tenant-a"), eq(jobId), anyString(), any()))
+                .thenAnswer(call -> {
+                    String path = call.getArgument(2);
+                    int beforeRead = renewals.get();
+                    byte[] bytes = ((java.io.InputStream) call.getArgument(3)).readAllBytes();
+                    if (renewals.get() > beforeRead) renewedWhileReading.set(true);
+                    return new StoredRecoveryObject("bucket", "archives/tenant-a/" + jobId + "/" + path,
+                            bytes.length, sha(bytes), "etag-" + path);
+                });
+
+        assertThatThrownBy(() -> workflow.executeForward(forward))
+                .isInstanceOf(CompensateOperationException.class);
+
+        verify(storage, times(1)).open("bucket", stageEvidence.objectKey());
+        verify(storage).putFinal(eq("tenant-a"), eq(jobId), eq("records/later.json"), any());
+        assertThat(renewedWhileReading).isTrue();
     }
 
     @Test
@@ -117,7 +187,7 @@ class RecoveryArchiveImportWorkflowTest {
         assertThat(stepState.get("cleanup-metadata").getStatus()).isEqualTo(OperationStepStatus.COMPLETED);
         assertThat(stepState.values()).anyMatch(step -> step.getStepKey().startsWith("cleanup-object-")
                 && step.getStatus() == OperationStepStatus.RETRY_WAIT);
-        verify(storage, never()).delete("recovery-staging/" + jobId + ".zip");
+        verify(storage, never()).delete("recovery-staging/" + plan.zipSha256() + "/" + jobId + ".zip");
 
         doNothing().when(storage).delete(anyString());
         workflow.executeCompensation(compensation);
@@ -132,8 +202,8 @@ class RecoveryArchiveImportWorkflowTest {
     void realRunnerMovesTemporaryStorageFailureToRetryWaitAndConflictToCompensation() throws Exception {
         OperationJob firstJob = claimedJob(OperationPhase.FORWARD);
         when(claims.claimNext()).thenReturn(OperationClaimResult.claimed(firstJob));
-        when(storage.inspect(any())).thenReturn(RecoveryStorageOutcome.ABSENT);
-        when(storage.open("bucket", "recovery-staging/" + jobId + ".zip"))
+        when(storage.inspect(any())).thenReturn(matchingStage(), inspection(RecoveryStorageOutcome.ABSENT));
+        when(storage.open("bucket", stageEvidence.objectKey()))
                 .thenReturn(new ByteArrayInputStream(zip(Map.of("records/one.json", "one".getBytes()))));
         when(storage.putFinal(eq("tenant-a"), eq(jobId), eq("records/one.json"), any()))
                 .thenThrow(new RecoveryStorageUnavailableException("timeout", new Exception("down")));
@@ -152,7 +222,7 @@ class RecoveryArchiveImportWorkflowTest {
         when(storage.bucket()).thenReturn("bucket");
         when(storage.finalKey(eq("tenant-a"), eq(jobId), anyString()))
                 .thenAnswer(call -> "archives/tenant-a/" + jobId + "/" + call.getArgument(2));
-        when(storage.inspect(any())).thenReturn(RecoveryStorageOutcome.CONFLICT);
+        when(storage.inspect(any())).thenReturn(matchingStage(), inspection(RecoveryStorageOutcome.CONFLICT));
         doAnswer(call -> { conflictJob.setPhase(OperationPhase.COMPENSATION); conflictJob.setStatus(OperationStatus.COMPENSATING); return null; })
                 .when(claims).beginCompensation(any(), anyString());
 
@@ -182,6 +252,8 @@ class RecoveryArchiveImportWorkflowTest {
         });
         when(stepRepository.findByJobIdOrderBySequenceNumberAsc(jobId))
                 .thenAnswer(call -> new ArrayList<>(stepState.values()));
+        when(stepRepository.findByJobIdAndStepKey(eq(jobId), anyString()))
+                .thenAnswer(call -> Optional.ofNullable(stepState.get(call.getArgument(1))));
     }
 
     private OperationStep step(String key, OperationStepStatus status) {
@@ -204,5 +276,22 @@ class RecoveryArchiveImportWorkflowTest {
     }
     private static String uncheckedSha(byte[] bytes) {
         try { return sha(bytes); } catch (Exception exception) { throw new AssertionError(exception); }
+    }
+    private static RecoveryStorageInspection inspection(RecoveryStorageOutcome outcome) {
+        return new RecoveryStorageInspection(outcome, null);
+    }
+    private RecoveryStorageInspection matchingStage() {
+        return new RecoveryStorageInspection(RecoveryStorageOutcome.MATCHING, stageEvidence);
+    }
+    private static final class ChunkedInputStream extends java.io.FilterInputStream {
+        private final int chunkSize;
+        private ChunkedInputStream(byte[] bytes, int chunkSize) {
+            super(new ByteArrayInputStream(bytes));
+            this.chunkSize = chunkSize;
+        }
+        @Override public int read(byte[] bytes, int offset, int length) throws java.io.IOException {
+            Thread.yield();
+            return super.read(bytes, offset, Math.min(length, chunkSize));
+        }
     }
 }

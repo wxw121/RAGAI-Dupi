@@ -14,7 +14,11 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -37,11 +41,18 @@ public class RecoveryArchiveImportWorkflow implements OperationWorkflow {
     public void executeForward(OperationExecutionContext context) {
         RecoveryArchiveImportPlan plan = plan(context);
         try {
-            for (RecoveryArchiveImportPlan.Entry entry : plan.entries()) promote(context, plan, entry);
+            StoredRecoveryObject stageEvidence = stageEvidence(context);
+            requireMatchingStage(context, stageEvidence);
+            List<Promotion> missing = new ArrayList<>();
+            for (RecoveryArchiveImportPlan.Entry entry : plan.entries()) {
+                preparePromotion(context, plan, entry, missing);
+            }
+            promoteMissing(context, plan, stageEvidence, missing);
+            requireMatchingStage(context, stageEvidence);
             RecoveryManifest manifest = manifests.seal(plan.finalHeader(context.jobId()), plan.finalItems(context.jobId()));
             StoredRecoveryObject storedManifest = promoteManifest(context, plan, manifest);
             persist(context, plan, manifest, storedManifest);
-            deleteStaging(context);
+            deleteStaging(context, plan, stageEvidence);
         } catch (RetryableOperationException exception) {
             throw exception;
         } catch (RecoveryStorageUnavailableException | DataAccessException exception) {
@@ -68,7 +79,7 @@ public class RecoveryArchiveImportWorkflow implements OperationWorkflow {
         String manifestKey = storage.finalKey(plan.tenantId(), context.jobId(), "manifest.json");
         cleanup(context, "cleanup-manifest", "CLEANUP_OBJECT", manifestKey,
                 () -> fencedDelete(context, manifestKey));
-        String stagingKey = storage.stagingKey(context.jobId());
+        String stagingKey = storage.stagingKey(context.jobId(), plan.zipSha256());
         cleanup(context, "cleanup-staging", "CLEANUP_STAGING", stagingKey,
                 () -> fencedDelete(context, stagingKey));
 
@@ -80,8 +91,9 @@ public class RecoveryArchiveImportWorkflow implements OperationWorkflow {
         }
     }
 
-    private void promote(OperationExecutionContext context, RecoveryArchiveImportPlan plan,
-                         RecoveryArchiveImportPlan.Entry entry) throws IOException {
+    private void preparePromotion(OperationExecutionContext context, RecoveryArchiveImportPlan plan,
+                                  RecoveryArchiveImportPlan.Entry entry,
+                                  List<Promotion> missing) {
         String stepKey = "promote-" + digest(entry.relativePath());
         StoredRecoveryObject expected = expected(plan, context.jobId(), entry.relativePath(),
                 entry.byteSize(), entry.sha256());
@@ -95,19 +107,51 @@ public class RecoveryArchiveImportWorkflow implements OperationWorkflow {
             throw new RecoveryStorageConflictException("Deterministic Recovery object contains different bytes: " + expected.objectKey());
         }
         startIfNeeded(context, stepKey, step);
-        StoredRecoveryObject stored = copyZipEntry(context, storage.stagingKey(context.jobId()),
-                plan.tenantId(), context.jobId(), entry.relativePath());
-        if (stored.byteSize() != entry.byteSize() || !stored.sha256().equals(entry.sha256())) {
-            throw new RecoveryStorageConflictException("Promoted Recovery object differs from its immutable plan");
+        missing.add(new Promotion(entry, stepKey, expected));
+    }
+
+    private void promoteMissing(OperationExecutionContext context, RecoveryArchiveImportPlan plan,
+                                StoredRecoveryObject stageEvidence,
+                                List<Promotion> missing) throws IOException {
+        if (missing.isEmpty()) return;
+        String stagingKey = stageEvidence.objectKey();
+        Map<String, Promotion> remaining = new HashMap<>();
+        for (Promotion promotion : missing) remaining.put(promotion.entry().relativePath(), promotion);
+        renew(context);
+        try (InputStream staged = storage.open(storage.bucket(), stagingKey);
+             ZipInputStream zip = new ZipInputStream(staged, java.nio.charset.StandardCharsets.UTF_8)) {
+            byte[] skipBuffer = new byte[64 * 1024];
+            for (ZipEntry zipEntry; (zipEntry = zip.getNextEntry()) != null;) {
+                if (zipEntry.isDirectory()) continue;
+                LeaseRenewingInputStream entryStream = new LeaseRenewingInputStream(zip, context);
+                Promotion promotion = remaining.remove(zipEntry.getName());
+                if (promotion == null) {
+                    while (entryStream.read(skipBuffer) >= 0) { }
+                    continue;
+                }
+                StoredRecoveryObject stored = storage.putFinal(plan.tenantId(), context.jobId(),
+                        promotion.entry().relativePath(), entryStream);
+                renew(context);
+                if (stored.byteSize() != promotion.entry().byteSize()
+                        || !stored.sha256().equals(promotion.entry().sha256())) {
+                    throw new RecoveryStorageConflictException(
+                            "Promoted Recovery object differs from its immutable plan");
+                }
+                RecoveryStorageOutcome storedOutcome = inspect(context, promotion.expected());
+                if (storedOutcome == RecoveryStorageOutcome.CONFLICT) {
+                    throw new RecoveryStorageConflictException(
+                            "Promoted Recovery object conflicts at its deterministic key");
+                }
+                if (storedOutcome == RecoveryStorageOutcome.ABSENT) {
+                    throw new RetryableOperationException("Promoted Recovery object is not yet visible");
+                }
+                operations.completeStep(context, promotion.stepKey());
+            }
         }
-        RecoveryStorageOutcome storedOutcome = inspect(context, expected);
-        if (storedOutcome == RecoveryStorageOutcome.CONFLICT) {
-            throw new RecoveryStorageConflictException("Promoted Recovery object conflicts at its deterministic key");
+        if (!remaining.isEmpty()) {
+            throw new RecoveryStorageConflictException(
+                    "Staged Recovery ZIP is missing planned entry: " + remaining.keySet().stream().sorted().findFirst().orElse("unknown"));
         }
-        if (storedOutcome == RecoveryStorageOutcome.ABSENT) {
-            throw new RetryableOperationException("Promoted Recovery object is not yet visible");
-        }
-        operations.completeStep(context, stepKey);
     }
 
     private StoredRecoveryObject promoteManifest(OperationExecutionContext context,
@@ -155,8 +199,9 @@ public class RecoveryArchiveImportWorkflow implements OperationWorkflow {
         completeUnlessCompleted(context, stepKey, step);
     }
 
-    private void deleteStaging(OperationExecutionContext context) {
-        String key = storage.stagingKey(context.jobId());
+    private void deleteStaging(OperationExecutionContext context, RecoveryArchiveImportPlan plan,
+                               StoredRecoveryObject evidence) {
+        String key = evidence.objectKey();
         cleanup(context, "delete-staging", "DELETE_STAGING", key, () -> fencedDelete(context, key));
     }
 
@@ -185,26 +230,30 @@ public class RecoveryArchiveImportWorkflow implements OperationWorkflow {
 
     private RecoveryStorageOutcome inspect(OperationExecutionContext context, StoredRecoveryObject expected) {
         renew(context);
-        RecoveryStorageOutcome outcome = storage.inspect(expected);
+        RecoveryStorageOutcome outcome = storage.inspect(expected).outcome();
         renew(context);
+        if (outcome == RecoveryStorageOutcome.STALE_VERSION) {
+            throw new RetryableOperationException("Recovery staging object version changed");
+        }
         return outcome;
     }
 
-    private StoredRecoveryObject copyZipEntry(OperationExecutionContext context, String stagingKey,
-                                               String tenant, UUID jobId, String path) throws IOException {
-        renew(context);
-        try (InputStream staged = storage.open(storage.bucket(), stagingKey);
-             ZipInputStream zip = new ZipInputStream(staged, java.nio.charset.StandardCharsets.UTF_8)) {
-            for (ZipEntry entry; (entry = zip.getNextEntry()) != null;) {
-                if (!entry.isDirectory() && path.equals(entry.getName())) {
-                    renew(context);
-                    StoredRecoveryObject stored = storage.putFinal(tenant, jobId, path, zip);
-                    renew(context);
-                    return stored;
-                }
-            }
+    private StoredRecoveryObject stageEvidence(OperationExecutionContext context) {
+        return steps.findByJobIdAndStepKey(context.jobId(), RecoveryArchiveImportIntakeWriteService.STAGE_STEP)
+                .filter(step -> step.getStatus() == OperationStepStatus.COMPLETED)
+                .map(step -> RecoveryStageEvidence.decode(step.getResourceRef()))
+                .orElseThrow(() -> new RecoveryStorageConflictException(
+                        "Recovery import is missing completed staging evidence"));
+    }
+
+    private void requireMatchingStage(OperationExecutionContext context, StoredRecoveryObject evidence) {
+        RecoveryStorageOutcome outcome = inspect(context, evidence);
+        if (outcome == RecoveryStorageOutcome.ABSENT) {
+            throw new RetryableOperationException("Recovery staging object is temporarily absent");
         }
-        throw new RecoveryStorageConflictException("Staged Recovery ZIP is missing planned entry: " + path);
+        if (outcome == RecoveryStorageOutcome.CONFLICT) {
+            throw new RecoveryStorageConflictException("Recovery staging object differs from its published plan");
+        }
     }
 
     private void startIfNeeded(OperationExecutionContext context, String stepKey, OperationStep step) {
@@ -230,6 +279,47 @@ public class RecoveryArchiveImportWorkflow implements OperationWorkflow {
     private String digest(byte[] value) {
         try { return HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(value)); }
         catch (java.security.NoSuchAlgorithmException exception) { throw new IllegalStateException(exception); }
+    }
+
+    private record Promotion(RecoveryArchiveImportPlan.Entry entry, String stepKey,
+                             StoredRecoveryObject expected) { }
+
+    private final class LeaseRenewingInputStream extends java.io.FilterInputStream {
+        private static final long RENEW_BYTES = 64L * 1024L;
+        private static final long RENEW_NANOS = 5_000_000_000L;
+        private final OperationExecutionContext context;
+        private long bytesSinceRenew;
+        private long lastRenewed = System.nanoTime();
+
+        private LeaseRenewingInputStream(InputStream input, OperationExecutionContext context) {
+            super(input);
+            this.context = context;
+        }
+
+        @Override public int read() throws IOException {
+            int value = super.read();
+            if (value >= 0) afterRead(1);
+            return value;
+        }
+
+        @Override public int read(byte[] bytes, int offset, int length) throws IOException {
+            int bounded = (int) Math.min(length, RENEW_BYTES);
+            int read = super.read(bytes, offset, bounded);
+            if (read > 0) afterRead(read);
+            return read;
+        }
+
+        @Override public void close() { /* the owning ZipInputStream controls this stream */ }
+
+        private void afterRead(int count) {
+            bytesSinceRenew += count;
+            long now = System.nanoTime();
+            if (bytesSinceRenew >= RENEW_BYTES || now - lastRenewed >= RENEW_NANOS) {
+                renew(context);
+                bytesSinceRenew = 0;
+                lastRenewed = now;
+            }
+        }
     }
 
     @FunctionalInterface

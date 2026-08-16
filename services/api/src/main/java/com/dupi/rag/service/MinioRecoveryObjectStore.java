@@ -61,6 +61,19 @@ public class MinioRecoveryObjectStore implements RecoveryObjectStore {
         }
     }
 
+    @Override
+    public String version(String bucket, String key) throws Exception {
+        try {
+            StatObjectResponse response = minioClient.statObject(
+                    StatObjectArgs.builder().bucket(bucket).object(key).build());
+            String versionId = response.versionId();
+            return versionId == null || versionId.isBlank() ? response.etag() : versionId;
+        } catch (ErrorResponseException exception) {
+            if (isMissing(exception)) throw new RecoveryObjectNotFoundException(bucket, key, exception);
+            throw exception;
+        }
+    }
+
     private boolean isMissing(ErrorResponseException exception) {
         String code = exception.errorResponse() == null ? null : exception.errorResponse().code();
         return "NoSuchKey".equals(code) || "NoSuchObject".equals(code) || "NotFound".equals(code);

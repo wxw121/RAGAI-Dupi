@@ -2,7 +2,6 @@ package com.dupi.rag.service;
 
 import com.dupi.rag.config.RecoveryProperties;
 import com.dupi.rag.domain.entity.KnowledgeBase;
-import com.dupi.rag.domain.enums.OperationType;
 import com.dupi.rag.dto.OperationJobResponse;
 import com.dupi.rag.dto.recovery.RecoveryManifest;
 import com.dupi.rag.dto.recovery.RecoveryManifestItem;
@@ -46,7 +45,7 @@ public class RecoveryArchiveImportService {
     private final RecoveryStorageService storage;
     private final RecoveryProperties properties;
     private final RecoveryManifestService manifests;
-    private final OperationJobService operations;
+    private final RecoveryArchiveImportIntakeService intakeService;
 
     public OperationJobResponse submit(UUID knowledgeBaseId, MultipartFile file, String idempotencyKey, String actor) {
         KnowledgeBase knowledgeBase = knowledgeBases.findOrThrow(knowledgeBaseId);
@@ -65,40 +64,78 @@ public class RecoveryArchiveImportService {
                     knowledgeBase.getTenantId(), knowledgeBaseId, source.header().sourceRevision(),
                     source.header().embeddingModel(), source.header().embeddingDimension(), source.header().collectionSettings(),
                     source.manifestChecksum(), zipSha256, creator, entries);
-            RecoveryImportIntake intake = operations.createOrResumeRecoveryImport(plan, key, creator);
+            RecoveryImportIntake intake = intakeService.createOrResume(plan, key, creator);
             OperationJobResponse job = intake.job();
             if (intake.published()) return job;
-            String stagingKey = storage.stagingKey(job.getId());
+            if (intake.cleanupPending()) {
+                throw new IllegalStateException("Recovery ZIP staging cleanup is still in progress");
+            }
+            String stagingKey = storage.stagingKey(job.getId(), zipSha256);
             StoredRecoveryObject expectedStage = new StoredRecoveryObject(storage.bucket(), stagingKey,
                     file.getSize(), zipSha256);
-            RecoveryStorageOutcome stageOutcome = storage.inspect(expectedStage);
+            RecoveryStorageInspection inspection = storage.inspect(
+                    intake.stageObject() == null ? expectedStage : intake.stageObject());
+            RecoveryStorageOutcome stageOutcome = inspection.outcome();
+            if (stageOutcome == RecoveryStorageOutcome.STALE_VERSION) {
+                scheduleCleanup(job.getId(), plan,
+                        new IllegalStateException("Recovery ZIP staging version changed"));
+                throw new IllegalStateException("Recovery ZIP staging changed before publication");
+            }
             if (stageOutcome == RecoveryStorageOutcome.CONFLICT) {
-                throw new com.dupi.rag.exception.OperationConflictException(
-                        "Recovery import staging key contains different bytes");
+                try {
+                    storage.delete(stagingKey);
+                    inspection = storage.inspect(expectedStage);
+                } catch (RuntimeException cleanupFailure) {
+                    scheduleCleanup(job.getId(), plan, cleanupFailure);
+                    throw new IllegalStateException("Recovery ZIP staging cleanup failed", cleanupFailure);
+                }
+                if (inspection.outcome() != RecoveryStorageOutcome.ABSENT) {
+                    IllegalStateException conflict = new IllegalStateException(
+                            "Recovery import staging key could not be cleared");
+                    scheduleCleanup(job.getId(), plan, conflict);
+                    throw conflict;
+                }
+                stageOutcome = RecoveryStorageOutcome.ABSENT;
             }
             if (stageOutcome == RecoveryStorageOutcome.ABSENT) {
                 StoredRecoveryObject stored;
                 try (InputStream input = file.getInputStream()) {
-                    stored = storage.putStaging(stagingKey, input);
+                    stored = storage.putStaging(expectedStage, input);
                 } catch (Exception exception) {
                     try { storage.delete(stagingKey); } catch (Exception cleanup) { exception.addSuppressed(cleanup); }
+                    scheduleCleanup(job.getId(), plan, exception);
                     throw new IllegalStateException("Recovery ZIP staging upload failed", exception);
                 }
+                inspection = storage.inspect(expectedStage);
                 if (stored.byteSize() != file.getSize() || !zipSha256.equals(stored.sha256())
-                        || storage.inspect(expectedStage) != RecoveryStorageOutcome.MATCHING) {
-                    storage.delete(stagingKey);
-                    throw new IllegalArgumentException("Recovery ZIP staging verification failed");
+                        || inspection.outcome() != RecoveryStorageOutcome.MATCHING) {
+                    IllegalArgumentException invalidStage = new IllegalArgumentException(
+                            "Recovery ZIP staging verification failed");
+                    try { storage.delete(stagingKey); } catch (Exception cleanup) { invalidStage.addSuppressed(cleanup); }
+                    scheduleCleanup(job.getId(), plan, invalidStage);
+                    throw invalidStage;
                 }
             }
-            operations.completeRecoveryImportStage(job.getId(), plan);
-            if (storage.inspect(expectedStage) != RecoveryStorageOutcome.MATCHING) {
+            StoredRecoveryObject evidence = inspection.object();
+            RecoveryStorageInspection publicationCheck = storage.inspect(evidence);
+            if (publicationCheck.outcome() != RecoveryStorageOutcome.MATCHING) {
+                scheduleCleanup(job.getId(), plan,
+                        new IllegalStateException("Recovery ZIP staging changed before publication"));
                 throw new IllegalStateException("Recovery ZIP staging changed before publication");
             }
-            return operations.publishRecoveryImport(job.getId(), plan);
+            return intakeService.completeStageAndPublish(job.getId(), plan, publicationCheck.object());
         } catch (IOException exception) {
             throw invalid("Recovery ZIP could not be read", exception);
         } finally {
             deleteTemporaryDirectory(temporaryDirectory);
+        }
+    }
+
+    private void scheduleCleanup(UUID jobId, RecoveryArchiveImportPlan plan, Throwable failure) {
+        try {
+            intakeService.scheduleCleanup(jobId, plan, failure);
+        } catch (RuntimeException persistenceFailure) {
+            failure.addSuppressed(persistenceFailure);
         }
     }
 

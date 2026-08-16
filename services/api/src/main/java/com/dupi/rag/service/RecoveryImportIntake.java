@@ -7,5 +7,11 @@ import com.dupi.rag.dto.OperationJobResponse;
 public record RecoveryImportIntake(
         OperationJobResponse job,
         OperationStepStatus stageStatus,
-        boolean published
-) { }
+        boolean published,
+        StoredRecoveryObject stageObject,
+        boolean cleanupPending
+) {
+    public RecoveryImportIntake(OperationJobResponse job, OperationStepStatus stageStatus, boolean published) {
+        this(job, stageStatus, published, null, false);
+    }
+}

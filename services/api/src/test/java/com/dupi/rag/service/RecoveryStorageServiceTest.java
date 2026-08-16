@@ -59,11 +59,41 @@ class RecoveryStorageServiceTest {
         StoredRecoveryObject expected = new StoredRecoveryObject("dupi-recovery", "planned", 7,
                 "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5");
 
-        assertThat(storage.inspect(expected)).isEqualTo(RecoveryStorageOutcome.ABSENT);
+        assertThat(storage.inspect(expected).outcome()).isEqualTo(RecoveryStorageOutcome.ABSENT);
         objectStore.objects.put("planned", "payload".getBytes(StandardCharsets.UTF_8));
-        assertThat(storage.inspect(expected)).isEqualTo(RecoveryStorageOutcome.MATCHING);
+        RecoveryStorageInspection matching = storage.inspect(expected);
+        assertThat(matching.outcome()).isEqualTo(RecoveryStorageOutcome.MATCHING);
+        assertThat(matching.object().versionToken()).isEqualTo("version-1");
         objectStore.objects.put("planned", "changed".getBytes(StandardCharsets.UTF_8));
-        assertThat(storage.inspect(expected)).isEqualTo(RecoveryStorageOutcome.CONFLICT);
+        assertThat(storage.inspect(expected).outcome()).isEqualTo(RecoveryStorageOutcome.CONFLICT);
+    }
+
+    @Test
+    void inspectionRejectsAChangedObjectVersionEvenWhenBytesStillMatch() {
+        InMemoryRecoveryObjectStore objectStore = new InMemoryRecoveryObjectStore();
+        RecoveryStorageService storage = service(objectStore);
+        objectStore.objects.put("planned", "payload".getBytes(StandardCharsets.UTF_8));
+        StoredRecoveryObject expected = new StoredRecoveryObject("dupi-recovery", "planned", 7,
+                "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5", "version-1");
+
+        objectStore.version = "version-2";
+
+        assertThat(storage.inspect(expected).outcome()).isEqualTo(RecoveryStorageOutcome.STALE_VERSION);
+    }
+
+    @Test
+    void stagingPutNeverOverwritesAConflictingObject() {
+        InMemoryRecoveryObjectStore objectStore = new InMemoryRecoveryObjectStore();
+        RecoveryStorageService storage = service(objectStore);
+        objectStore.objects.put("recovery-staging/hash/job.zip", "other".getBytes(StandardCharsets.UTF_8));
+        StoredRecoveryObject expected = new StoredRecoveryObject("dupi-recovery",
+                "recovery-staging/hash/job.zip", 7,
+                "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5");
+
+        assertThatThrownBy(() -> storage.putStaging(expected,
+                new ByteArrayInputStream("payload".getBytes(StandardCharsets.UTF_8))))
+                .isInstanceOf(RecoveryStorageConflictException.class);
+        assertThat(objectStore.objects.get(expected.objectKey())).isEqualTo("other".getBytes(StandardCharsets.UTF_8));
     }
 
     @Test
@@ -82,6 +112,7 @@ class RecoveryStorageServiceTest {
     void inspectionOutageIsNotReportedAsAbsentOrConflict() {
         RecoveryObjectStore failing = new RecoveryObjectStore() {
             @Override public void put(String bucket, String key, InputStream input) { }
+            @Override public String version(String bucket, String key) throws Exception { throw new Exception("auth denied"); }
             @Override public InputStream get(String bucket, String key) throws Exception { throw new Exception("auth denied"); }
             @Override public List<String> list(String bucket, String prefix) { return List.of(); }
             @Override public void delete(String bucket, String key) { }
@@ -160,6 +191,9 @@ class RecoveryStorageServiceTest {
             @Override public InputStream get(String bucket, String key) throws Exception {
                 throw new Exception("read failed");
             }
+            @Override public String version(String bucket, String key) throws Exception {
+                throw new Exception("stat failed");
+            }
             @Override public List<String> list(String bucket, String prefix) throws Exception {
                 throw new Exception("list failed");
             }
@@ -194,6 +228,7 @@ class RecoveryStorageServiceTest {
     private static final class InMemoryRecoveryObjectStore implements RecoveryObjectStore {
         private final Map<String, byte[]> objects = new LinkedHashMap<>();
         private Exception deleteFailure;
+        private String version = "version-1";
 
         @Override
         public void put(String bucket, String key, InputStream input) throws Exception {
@@ -218,6 +253,12 @@ class RecoveryStorageServiceTest {
         public void delete(String bucket, String key) throws Exception {
             if (deleteFailure != null) throw deleteFailure;
             objects.remove(key);
+        }
+
+        @Override
+        public String version(String bucket, String key) throws Exception {
+            if (!objects.containsKey(key)) throw new RecoveryObjectNotFoundException(bucket, key);
+            return version;
         }
     }
 }

@@ -4,5 +4,6 @@ package com.dupi.rag.service;
 public enum RecoveryStorageOutcome {
     ABSENT,
     MATCHING,
-    CONFLICT
+    CONFLICT,
+    STALE_VERSION
 }

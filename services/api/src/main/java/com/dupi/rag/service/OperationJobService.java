@@ -78,74 +78,6 @@ public class OperationJobService {
         return toResponse(job);
     }
 
-    /** Creates the immutable Recovery intake and its required stage step in one transaction. */
-    public RecoveryImportIntake createOrResumeRecoveryImport(
-            RecoveryArchiveImportPlan plan, String idempotencyKey, String createdBy) {
-        if (plan == null) throw new IllegalArgumentException("Recovery import plan is required");
-        String tenant = TenantContext.getTenantId();
-        String key = normalizeKey(idempotencyKey);
-        validateCreate(OperationType.RECOVERY_ARCHIVE_IMPORT, "KNOWLEDGE_BASE",
-                plan.knowledgeBaseId(), key, createdBy);
-        if (!tenant.equals(plan.tenantId())) {
-            throw new OperationConflictException("Recovery import tenant does not match the active tenant");
-        }
-        operationJobRepository.findFirstByOperationTypeAndIdempotencyKeyOrderByCreatedAtAsc(
-                        OperationType.RECOVERY_ARCHIVE_IMPORT, key)
-                .filter(job -> !tenant.equals(job.getTenantId()))
-                .ifPresent(job -> { throw new OperationConflictException(
-                        "Recovery import idempotency key already belongs to another tenant"); });
-        var existing = operationJobRepository.findByTenantIdAndOperationTypeAndIdempotencyKey(
-                tenant, OperationType.RECOVERY_ARCHIVE_IMPORT, key);
-        if (existing.isPresent()) return recoveryIntake(existing.get(), plan);
-        try {
-            return recoveryIntake(writeService.insertRecoveryImport(tenant, plan, key, createdBy.trim()), plan);
-        } catch (DataIntegrityViolationException conflict) {
-            OperationJob winner = operationJobRepository.findByTenantIdAndOperationTypeAndIdempotencyKey(
-                            tenant, OperationType.RECOVERY_ARCHIVE_IMPORT, key)
-                    .orElseThrow(() -> conflict);
-            return recoveryIntake(winner, plan);
-        }
-    }
-
-    @Transactional
-    public void completeRecoveryImportStage(UUID jobId, RecoveryArchiveImportPlan plan) {
-        OperationJob job = operationJobRepository.findByIdForUpdate(jobId)
-                .orElseThrow(() -> new ResourceNotFoundException("Operation job not found: " + jobId));
-        validateRecoveryPlan(job, plan);
-        if (job.getStatus() != OperationStatus.PREPARED || Boolean.TRUE.equals(job.getRunnable())) {
-            throw new OperationConflictException("Recovery import intake is no longer writable");
-        }
-        OperationStep step = requiredStage(jobId);
-        if (step.getStatus() == OperationStepStatus.COMPLETED) return;
-        if (step.getStatus() != OperationStepStatus.PENDING) {
-            throw new OperationConflictException("Recovery import stage cannot complete while " + step.getStatus());
-        }
-        step.setStatus(OperationStepStatus.COMPLETED);
-        step.setCompletedAt(Instant.now());
-        step.setNextAttemptAt(null);
-        operationStepRepository.saveAndFlush(step);
-    }
-
-    /** The only Recovery import publication gate; the caller has already verified staging bytes. */
-    @Transactional
-    public OperationJobResponse publishRecoveryImport(UUID jobId, RecoveryArchiveImportPlan plan) {
-        OperationJob job = operationJobRepository.findByIdForUpdate(jobId)
-                .orElseThrow(() -> new ResourceNotFoundException("Operation job not found: " + jobId));
-        validateRecoveryPlan(job, plan);
-        if (Boolean.TRUE.equals(job.getRunnable())) return toResponse(job);
-        if (job.getStatus() != OperationStatus.PREPARED) {
-            throw new OperationConflictException("Only prepared Recovery import intake can become runnable");
-        }
-        OperationStep stage = requiredStage(jobId);
-        if (stage.getStatus() != OperationStepStatus.COMPLETED
-                || !("recovery-staging/" + jobId + ".zip").equals(stage.getResourceRef())) {
-            throw new OperationConflictException("Recovery import staging is not complete");
-        }
-        job.setRunnable(true);
-        job.setNextAttemptAt(Instant.now());
-        return toResponse(operationJobRepository.saveAndFlush(job));
-    }
-
     public OperationStep recordStep(OperationExecutionContext context, String stepKey,
                                     String stepType, String resourceRef) {
         return stepWriteService.recordStep(context, stepKey, stepType, resourceRef);
@@ -192,47 +124,6 @@ public class OperationJobService {
             throw new ResourceNotFoundException("Operation job not found: " + jobId);
         }
         return job;
-    }
-
-    private RecoveryImportIntake recoveryIntake(OperationJob job, RecoveryArchiveImportPlan plan) {
-        validateRecoveryPlan(job, plan);
-        OperationStep stage = requiredStage(job.getId());
-        return new RecoveryImportIntake(toResponse(job), stage.getStatus(), Boolean.TRUE.equals(job.getRunnable()));
-    }
-
-    private OperationStep requiredStage(UUID jobId) {
-        return operationStepRepository.findByJobIdAndStepKey(jobId, "stage-zip")
-                .orElseThrow(() -> new OperationConflictException("Recovery import intake is missing its required stage step"));
-    }
-
-    private void validateRecoveryPlan(OperationJob job, RecoveryArchiveImportPlan plan) {
-        RecoveryArchiveImportPlan stored;
-        try {
-            stored = RecoveryArchiveImportPlan.fromInput(job.getInput());
-        } catch (RuntimeException invalid) {
-            throw new OperationConflictException("Recovery import idempotency key has an invalid immutable plan");
-        }
-        if (job.getOperationType() != OperationType.RECOVERY_ARCHIVE_IMPORT
-                || !"KNOWLEDGE_BASE".equals(job.getAggregateType())
-                || !plan.tenantId().equals(job.getTenantId())
-                || !plan.knowledgeBaseId().equals(job.getAggregateId())
-                || !sameImmutableRecoveryPlan(plan, stored)) {
-            throw new OperationConflictException("Recovery import idempotency key already belongs to different input");
-        }
-    }
-
-    private boolean sameImmutableRecoveryPlan(RecoveryArchiveImportPlan requested,
-                                               RecoveryArchiveImportPlan stored) {
-        return java.util.Objects.equals(requested.sourceArchiveId(), stored.sourceArchiveId())
-                && java.util.Objects.equals(requested.tenantId(), stored.tenantId())
-                && java.util.Objects.equals(requested.knowledgeBaseId(), stored.knowledgeBaseId())
-                && java.util.Objects.equals(requested.sourceRevision(), stored.sourceRevision())
-                && java.util.Objects.equals(requested.embeddingModel(), stored.embeddingModel())
-                && requested.embeddingDimension() == stored.embeddingDimension()
-                && java.util.Objects.equals(requested.collectionSettings(), stored.collectionSettings())
-                && java.util.Objects.equals(requested.sourceManifestChecksum(), stored.sourceManifestChecksum())
-                && java.util.Objects.equals(requested.zipSha256(), stored.zipSha256())
-                && java.util.Objects.equals(requested.entries(), stored.entries());
     }
 
     private OperationJobResponse toResponse(OperationJob job) {
