@@ -7,6 +7,7 @@ import com.dupi.rag.domain.entity.OperationStep;
 import com.dupi.rag.domain.enums.OperationStatus;
 import com.dupi.rag.domain.enums.OperationStepStatus;
 import com.dupi.rag.domain.enums.OperationType;
+import com.dupi.rag.domain.enums.OperationPhase;
 import com.dupi.rag.dto.OperationJobResponse;
 import com.dupi.rag.dto.OperationStepResponse;
 import com.dupi.rag.exception.OperationConflictException;
@@ -30,17 +31,24 @@ public class OperationJobService {
     private final OperationJobRepository operationJobRepository;
     private final OperationStepRepository operationStepRepository;
     private final OperationJobWriteService writeService;
+    private final OperationJobClaimService claimService;
+
+    public OperationJobService(OperationJobRepository operationJobRepository, OperationStepRepository operationStepRepository,
+                               OperationJobWriteService writeService) {
+        this(operationJobRepository, operationStepRepository, writeService, null);
+    }
 
     @Autowired
     public OperationJobService(OperationJobRepository operationJobRepository, OperationStepRepository operationStepRepository,
-                               OperationJobWriteService writeService) {
+                               OperationJobWriteService writeService, OperationJobClaimService claimService) {
         this.operationJobRepository = operationJobRepository;
         this.operationStepRepository = operationStepRepository;
         this.writeService = writeService;
+        this.claimService = claimService;
     }
 
     public OperationJobService(OperationJobRepository operationJobRepository, OperationStepRepository operationStepRepository) {
-        this(operationJobRepository, operationStepRepository, null);
+        this(operationJobRepository, operationStepRepository, null, null);
     }
 
     public OperationJobResponse create(OperationType type, String aggregateType, UUID aggregateId,
@@ -65,7 +73,7 @@ public class OperationJobService {
         if (job.getStatus() != OperationStatus.FAILED) {
             throw new OperationConflictException("Only failed operations can be retried");
         }
-        job.setStatus(OperationStatus.PREPARED);
+        job.setStatus(job.getPhase() == OperationPhase.COMPENSATION ? OperationStatus.COMPENSATING : OperationStatus.PREPARED);
         job.setRunnable(true);
         job.setAttemptCount(0);
         job.setNextAttemptAt(Instant.now());
@@ -73,6 +81,15 @@ public class OperationJobService {
         job.setCompletedAt(null);
         job.setClaimToken(null);
         job.setLeaseExpiresAt(null);
+        job.setRetryEpoch((job.getRetryEpoch() == null ? 0L : job.getRetryEpoch()) + 1);
+        operationStepRepository.findByJobIdAndStatus(jobId, OperationStepStatus.FAILED).forEach(step -> {
+            step.setStatus(OperationStepStatus.RETRY_WAIT);
+            step.setRetryEpoch(job.getRetryEpoch());
+            step.setLastError(null);
+            step.setCompletedAt(null);
+            step.setNextAttemptAt(job.getNextAttemptAt());
+            operationStepRepository.save(step);
+        });
         operationJobRepository.save(job);
         return toResponse(job);
     }
@@ -128,6 +145,11 @@ public class OperationJobService {
         return operationStepRepository.save(step);
     }
 
+    public OperationStep startStep(OperationExecutionContext context, String stepKey) {
+        requireActive(context);
+        return startStep(context.jobId(), stepKey);
+    }
+
     @Transactional
     public OperationStep retryStep(UUID jobId, String stepKey, String diagnostic) {
         OperationStep step = step(jobId, stepKey); require(step, OperationStepStatus.RUNNING);
@@ -136,21 +158,32 @@ public class OperationJobService {
         return operationStepRepository.save(step);
     }
 
+    public OperationStep retryStep(OperationExecutionContext context, String stepKey, String diagnostic, Instant nextAttemptAt) {
+        requireActive(context);
+        OperationStep step = step(context.jobId(), stepKey); require(step, OperationStepStatus.RUNNING);
+        step.setStatus(OperationStepStatus.RETRY_WAIT); step.setLastError(diagnostic); step.setNextAttemptAt(nextAttemptAt);
+        return operationStepRepository.save(step);
+    }
+
     @Transactional
     public OperationStep failStep(UUID jobId, String stepKey, String diagnostic) {
         OperationStep step = step(jobId, stepKey); require(step, OperationStepStatus.RUNNING);
-        step.setStatus(OperationStepStatus.FAILED); step.setLastError(diagnostic); step.setCompletedAt(Instant.now());
+        step.setStatus(OperationStepStatus.FAILED); step.setLastError(diagnostic); step.setCompletedAt(Instant.now()); step.setNextAttemptAt(null);
         return operationStepRepository.save(step);
     }
+
+    public OperationStep failStep(OperationExecutionContext context, String stepKey, String diagnostic) { requireActive(context); return failStep(context.jobId(), stepKey, diagnostic); }
 
     @Transactional
     public void completeStep(UUID jobId, String stepKey) {
         OperationStep step = step(jobId, stepKey);
         if (step.getStatus() == OperationStepStatus.COMPLETED) return;
         require(step, OperationStepStatus.RUNNING);
-        step.setStatus(OperationStepStatus.COMPLETED); step.setCompletedAt(Instant.now()); step.setLastError(null);
+        step.setStatus(OperationStepStatus.COMPLETED); step.setCompletedAt(Instant.now()); step.setLastError(null); step.setNextAttemptAt(null);
         operationStepRepository.save(step);
     }
+
+    public void completeStep(OperationExecutionContext context, String stepKey) { requireActive(context); completeStep(context.jobId(), stepKey); }
 
     @Transactional
     public OperationStep compensateStep(UUID jobId, String stepKey) {
@@ -158,8 +191,11 @@ public class OperationJobService {
         if (step.getStatus() == OperationStepStatus.COMPENSATED) return step;
         require(step, OperationStepStatus.COMPLETED, OperationStepStatus.FAILED);
         step.setStatus(OperationStepStatus.COMPENSATED); step.setCompletedAt(Instant.now());
+        step.setNextAttemptAt(null);
         return operationStepRepository.save(step);
     }
+
+    public OperationStep compensateStep(OperationExecutionContext context, String stepKey) { requireActive(context); return compensateStep(context.jobId(), stepKey); }
 
     private OperationJobResponse createNew(String tenant, OperationType type, String aggregateType, UUID aggregateId,
                                             String key, Map<String, Object> input, String createdBy) {
@@ -195,6 +231,11 @@ public class OperationJobService {
     private void require(OperationStep step, OperationStepStatus... allowed) {
         for (OperationStepStatus status : allowed) if (step.getStatus() == status) return;
         throw new OperationConflictException("Operation step cannot transition while " + step.getStatus());
+    }
+
+    private void requireActive(OperationExecutionContext context) {
+        if (claimService == null) throw new OperationConflictException("Operation execution context is required");
+        claimService.assertActiveClaim(context);
     }
 
     private OperationJobResponse toResponse(OperationJob job) {

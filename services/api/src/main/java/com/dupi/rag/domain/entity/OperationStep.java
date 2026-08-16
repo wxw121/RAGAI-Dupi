@@ -57,6 +57,10 @@ public class OperationStep {
     @lombok.Builder.Default
     private Integer attemptCount = 0;
 
+    @Column(name = "retry_epoch", nullable = false)
+    @lombok.Builder.Default
+    private Long retryEpoch = 0L;
+
     @Column(name = "next_attempt_at", nullable = false)
     private Instant nextAttemptAt;
 
@@ -82,6 +86,9 @@ public class OperationStep {
         }
         if (attemptCount == null) {
             attemptCount = 0;
+        }
+        if (retryEpoch == null) {
+            retryEpoch = 0L;
         }
         Instant now = Instant.now();
         if (nextAttemptAt == null) {

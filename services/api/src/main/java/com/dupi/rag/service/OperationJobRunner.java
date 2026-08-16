@@ -1,6 +1,7 @@
 package com.dupi.rag.service;
 
 import com.dupi.rag.domain.enums.OperationType;
+import com.dupi.rag.domain.enums.OperationPhase;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -63,32 +64,45 @@ public class OperationJobRunner {
                 persistFailure(job, "No workflow registered for operation type " + job.getOperationType());
                 return true;
             }
+            OperationExecutionContext context = new OperationExecutionContext(job.getId(), job.getClaimToken(),
+                    job.getClaimEpoch(), job.getPhase());
             Outcome outcome;
             try {
-                workflow.execute(job.getId());
+                if (context.phase() == OperationPhase.COMPENSATION) {
+                    workflow.executeCompensation(context);
+                } else {
+                    workflow.executeForward(context);
+                }
                 outcome = Outcome.completed();
+            } catch (CompensateOperationException e) {
+                try {
+                    claimService.beginCompensation(context, reason(e));
+                } catch (Exception transitionError) {
+                    log.warn("Could not start compensation for {}; lease permits recovery", job.getId(), transitionError);
+                }
+                return true;
             } catch (RetryableOperationException e) {
                 outcome = Outcome.retry(reason(e));
             } catch (Exception e) {
                 log.warn("Durable operation {} failed permanently", job.getId(), e);
                 outcome = Outcome.failed(reason(e));
             }
-            persistOutcome(job, outcome);
+            persistOutcome(context, outcome);
             return true;
         }).orElse(false);
     }
 
-    private void persistOutcome(com.dupi.rag.domain.entity.OperationJob job, Outcome outcome) {
+    private void persistOutcome(OperationExecutionContext context, Outcome outcome) {
         try {
             if (outcome.kind == OutcomeKind.COMPLETED) {
-                claimService.complete(job.getId(), job.getClaimToken());
+                claimService.complete(context);
             } else if (outcome.kind == OutcomeKind.RETRY) {
-                claimService.scheduleRetry(job.getId(), job.getClaimToken(), outcome.error);
+                claimService.scheduleRetry(context, outcome.error);
             } else {
-                claimService.fail(job.getId(), job.getClaimToken(), outcome.error);
+                claimService.fail(context, outcome.error);
             }
         } catch (Exception transitionError) {
-            log.warn("Could not persist operation {} transition {}; its lease allows safe recovery", job.getId(), outcome.kind,
+            log.warn("Could not persist operation {} transition {}; its lease allows safe recovery", context.jobId(), outcome.kind,
                     transitionError);
         }
     }
@@ -145,4 +159,9 @@ class RetryableOperationException extends RuntimeException {
     RetryableOperationException(String message, Throwable cause) {
         super(message, cause);
     }
+}
+
+/** A forward workflow requests its own persisted compensation phase. */
+class CompensateOperationException extends RuntimeException {
+    CompensateOperationException(String message) { super(message); }
 }

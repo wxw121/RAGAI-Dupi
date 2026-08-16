@@ -12,6 +12,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -30,8 +31,8 @@ class OperationJobRunnerTest {
 
         new OperationJobRunner(claimService, List.of(recoveryWorkflow)).runOne();
 
-        verify(recoveryWorkflow).execute(jobId);
-        verify(claimService).complete(eq(jobId), eq(jobId));
+        verify(recoveryWorkflow).executeForward(any(OperationExecutionContext.class));
+        verify(claimService).complete(any(OperationExecutionContext.class));
     }
 
     @Test
@@ -39,11 +40,11 @@ class OperationJobRunnerTest {
         when(recoveryWorkflow.type()).thenReturn(OperationType.RECOVERY_ARCHIVE_IMPORT);
         when(claimService.claimNext()).thenReturn(Optional.of(job(OperationType.RECOVERY_ARCHIVE_IMPORT)));
         doThrow(new RetryableOperationException("minio unavailable"))
-                .when(recoveryWorkflow).execute(jobId);
+                .when(recoveryWorkflow).executeForward(any(OperationExecutionContext.class));
 
         new OperationJobRunner(claimService, List.of(recoveryWorkflow)).runOne();
 
-        verify(claimService).scheduleRetry(eq(jobId), eq(jobId), contains("minio unavailable"));
+        verify(claimService).scheduleRetry(any(OperationExecutionContext.class), contains("minio unavailable"));
     }
 
     @Test

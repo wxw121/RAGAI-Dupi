@@ -6,10 +6,13 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import com.dupi.rag.domain.enums.OperationStepStatus;
 
 public interface OperationStepRepository extends JpaRepository<OperationStep, UUID> {
 
     Optional<OperationStep> findByJobIdAndStepKey(UUID jobId, String stepKey);
 
     List<OperationStep> findByJobIdOrderBySequenceNumberAsc(UUID jobId);
+
+    List<OperationStep> findByJobIdAndStatus(UUID jobId, OperationStepStatus status);
 }

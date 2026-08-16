@@ -2,6 +2,7 @@ package com.dupi.rag.domain.entity;
 
 import com.dupi.rag.domain.enums.OperationStatus;
 import com.dupi.rag.domain.enums.OperationType;
+import com.dupi.rag.domain.enums.OperationPhase;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -61,6 +62,11 @@ public class OperationJob {
     @lombok.Builder.Default
     private OperationStatus status = OperationStatus.PREPARED;
 
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 32)
+    @lombok.Builder.Default
+    private OperationPhase phase = OperationPhase.FORWARD;
+
     @Column(name = "idempotency_key", nullable = false, length = 256)
     private String idempotencyKey;
 
@@ -83,6 +89,10 @@ public class OperationJob {
     @Column(name = "claim_epoch", nullable = false)
     @lombok.Builder.Default
     private Long claimEpoch = 0L;
+
+    @Column(name = "retry_epoch", nullable = false)
+    @lombok.Builder.Default
+    private Long retryEpoch = 0L;
 
     @Column(name = "lease_expires_at")
     private Instant leaseExpiresAt;
@@ -121,6 +131,9 @@ public class OperationJob {
         }
         if (claimEpoch == null) {
             claimEpoch = 0L;
+        }
+        if (retryEpoch == null) {
+            retryEpoch = 0L;
         }
         if (input == null) {
             input = Map.of();
