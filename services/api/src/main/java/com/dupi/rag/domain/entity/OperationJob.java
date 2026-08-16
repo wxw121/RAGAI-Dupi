@@ -73,6 +73,20 @@ public class OperationJob {
     @lombok.Builder.Default
     private Integer attemptCount = 0;
 
+    @Column(nullable = false)
+    @lombok.Builder.Default
+    private Boolean runnable = false;
+
+    @Column(name = "claim_token")
+    private UUID claimToken;
+
+    @Column(name = "claim_epoch", nullable = false)
+    @lombok.Builder.Default
+    private Long claimEpoch = 0L;
+
+    @Column(name = "lease_expires_at")
+    private Instant leaseExpiresAt;
+
     @Column(name = "next_attempt_at", nullable = false)
     private Instant nextAttemptAt;
 
@@ -101,6 +115,12 @@ public class OperationJob {
         }
         if (attemptCount == null) {
             attemptCount = 0;
+        }
+        if (runnable == null) {
+            runnable = false;
+        }
+        if (claimEpoch == null) {
+            claimEpoch = 0L;
         }
         if (input == null) {
             input = Map.of();

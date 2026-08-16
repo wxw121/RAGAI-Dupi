@@ -25,7 +25,8 @@ public class OperationJobResponse {
     private OperationStatus status;
     private Integer attemptCount;
     private Instant nextAttemptAt;
-    private String lastError;
+    private String errorCode;
+    private String errorMessage;
     private Instant createdAt;
     private Instant updatedAt;
     private Instant completedAt;

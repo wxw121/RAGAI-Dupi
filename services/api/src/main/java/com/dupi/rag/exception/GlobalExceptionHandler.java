@@ -39,6 +39,15 @@ public class GlobalExceptionHandler {
                 "Check the request parameters and try again."));
     }
 
+    @ExceptionHandler(OperationConflictException.class)
+    public ResponseEntity<ApiErrorResponse> handleOperationConflict(OperationConflictException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(error(
+                "operation_conflict",
+                ex.getMessage(),
+                "operation",
+                "Refresh the operation status before retrying."));
+    }
+
     @ExceptionHandler(RetrievalProfileConflictException.class)
     public ResponseEntity<ApiErrorResponse> handleRetrievalProfileConflict(RetrievalProfileConflictException ex) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(error(

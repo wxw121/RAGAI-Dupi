@@ -21,7 +21,6 @@ public class OperationStepResponse {
     private String stepKey;
     private String stepType;
     private OperationStepStatus status;
-    private String resourceRef;
     private Integer attemptCount;
     private String lastError;
     private Instant startedAt;

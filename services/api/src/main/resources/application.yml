@@ -106,8 +106,11 @@ dupi:
     # Spread compensation work across the day: at most five tasks are processed per minute.
     orphan-vectors-cron: ${ORPHAN_VECTOR_CLEANUP_CRON:0 * * * * *}
   operations:
+    runner-enabled: ${OPERATION_RUNNER_ENABLED:true}
     runner-cron: ${OPERATION_RUNNER_CRON:*/5 * * * * *}
     runner-batch-size: ${OPERATION_RUNNER_BATCH_SIZE:10}
+    lease-seconds: ${OPERATION_LEASE_SECONDS:60}
+    max-attempts: ${OPERATION_MAX_ATTEMPTS:5}
   audit:
     retention-days: ${AUDIT_RETENTION_DAYS:180}
     retention-cron: ${AUDIT_RETENTION_CRON:0 15 2 * * *}

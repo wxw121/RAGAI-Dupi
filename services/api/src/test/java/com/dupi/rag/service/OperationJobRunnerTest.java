@@ -31,7 +31,7 @@ class OperationJobRunnerTest {
         new OperationJobRunner(claimService, List.of(recoveryWorkflow)).runOne();
 
         verify(recoveryWorkflow).execute(jobId);
-        verify(claimService).complete(jobId);
+        verify(claimService).complete(eq(jobId), eq(jobId));
     }
 
     @Test
@@ -43,7 +43,7 @@ class OperationJobRunnerTest {
 
         new OperationJobRunner(claimService, List.of(recoveryWorkflow)).runOne();
 
-        verify(claimService).scheduleRetry(eq(jobId), contains("minio unavailable"));
+        verify(claimService).scheduleRetry(eq(jobId), eq(jobId), contains("minio unavailable"));
     }
 
     @Test
@@ -53,7 +53,7 @@ class OperationJobRunnerTest {
 
         new OperationJobRunner(claimService, List.of(recoveryWorkflow)).runOne();
 
-        verify(claimService).fail(jobId, "No workflow registered for operation type KNOWLEDGE_BASE_DELETE");
+        verify(claimService).fail(jobId, jobId, "No workflow registered for operation type KNOWLEDGE_BASE_DELETE");
     }
 
     @Test
@@ -70,6 +70,7 @@ class OperationJobRunnerTest {
     private OperationJob job(OperationType type) {
         return OperationJob.builder()
                 .id(jobId)
+                .claimToken(jobId)
                 .operationType(type)
                 .status(OperationStatus.RUNNING)
                 .build();
