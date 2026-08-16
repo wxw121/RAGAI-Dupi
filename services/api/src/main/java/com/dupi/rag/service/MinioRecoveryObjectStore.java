@@ -2,6 +2,7 @@ package com.dupi.rag.service;
 
 import io.minio.*;
 import io.minio.messages.Item;
+import io.minio.errors.ErrorResponseException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
@@ -28,7 +29,15 @@ public class MinioRecoveryObjectStore implements RecoveryObjectStore {
 
     @Override
     public InputStream get(String bucket, String key) throws Exception {
-        return minioClient.getObject(GetObjectArgs.builder().bucket(bucket).object(key).build());
+        try {
+            minioClient.statObject(StatObjectArgs.builder().bucket(bucket).object(key).build());
+            return minioClient.getObject(GetObjectArgs.builder().bucket(bucket).object(key).build());
+        } catch (ErrorResponseException exception) {
+            if (isMissing(exception)) {
+                throw new RecoveryObjectNotFoundException(bucket, key, exception);
+            }
+            throw exception;
+        }
     }
 
     @Override
@@ -50,5 +59,10 @@ public class MinioRecoveryObjectStore implements RecoveryObjectStore {
         if (!minioClient.bucketExists(BucketExistsArgs.builder().bucket(bucket).build())) {
             minioClient.makeBucket(MakeBucketArgs.builder().bucket(bucket).build());
         }
+    }
+
+    private boolean isMissing(ErrorResponseException exception) {
+        String code = exception.errorResponse() == null ? null : exception.errorResponse().code();
+        return "NoSuchKey".equals(code) || "NoSuchObject".equals(code) || "NotFound".equals(code);
     }
 }

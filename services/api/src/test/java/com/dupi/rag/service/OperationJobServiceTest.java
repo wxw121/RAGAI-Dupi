@@ -8,24 +8,34 @@ import com.dupi.rag.domain.enums.OperationStatus;
 import com.dupi.rag.domain.enums.OperationType;
 import com.dupi.rag.domain.enums.OperationPhase;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.repository.OperationJobRepository;
 import com.dupi.rag.repository.OperationStepRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataIntegrityViolationException;
 
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 class OperationJobServiceTest {
 
@@ -167,19 +177,177 @@ class OperationJobServiceTest {
     }
 
     @Test
-    void makeRunnableLocksPreparedIntakeAndPublishesItsDueTime() {
+    void recoveryImportReplayReturnsSameRunnableJobWhenImmutablePlanMatches() {
         UUID jobId = UUID.randomUUID();
-        OperationJob job = job(jobId, UUID.randomUUID());
-        when(jobs.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
-        when(jobs.save(job)).thenReturn(job);
+        UUID kbId = UUID.randomUUID();
+        RecoveryArchiveImportPlan plan = plan(kbId, "a".repeat(64));
+        TenantContext.setTenantId("tenant-a");
+        OperationJob job = job(jobId, kbId);
+        job.setRunnable(true);
+        job.setStatus(OperationStatus.RUNNING);
+        job.setInput(plan.toInput());
+        when(jobs.findByTenantIdAndOperationTypeAndIdempotencyKey(
+                "tenant-a", OperationType.RECOVERY_ARCHIVE_IMPORT, "request-1"))
+                .thenReturn(Optional.of(job));
+        when(steps.findByJobIdAndStepKey(jobId, "stage-zip")).thenReturn(Optional.of(
+                OperationStep.builder().status(com.dupi.rag.domain.enums.OperationStepStatus.COMPLETED).build()));
         when(steps.findByJobIdOrderBySequenceNumberAsc(jobId)).thenReturn(List.of());
 
-        var response = service.makeRunnable(jobId);
+        RecoveryImportIntake intake = service.createOrResumeRecoveryImport(plan, "request-1", "operator");
 
-        assertThat(response.getStatus()).isEqualTo(OperationStatus.PREPARED);
+        assertThat(intake.job().getId()).isEqualTo(jobId);
+        assertThat(intake.published()).isTrue();
+        verify(writes, org.mockito.Mockito.never()).insertRecoveryImport(any(), any(), any(), any());
+    }
+
+    @Test
+    void recoveryImportReplayRejectsSameKeyForDifferentZipOrKnowledgeBase() {
+        UUID kbId = UUID.randomUUID();
+        TenantContext.setTenantId("tenant-a");
+        OperationJob existing = job(UUID.randomUUID(), kbId);
+        existing.setInput(plan(kbId, "a".repeat(64)).toInput());
+        when(jobs.findByTenantIdAndOperationTypeAndIdempotencyKey(
+                "tenant-a", OperationType.RECOVERY_ARCHIVE_IMPORT, "request-1"))
+                .thenReturn(Optional.of(existing));
+
+        assertThatThrownBy(() -> service.createOrResumeRecoveryImport(
+                plan(kbId, "b".repeat(64)), "request-1", "operator"))
+                .isInstanceOf(OperationConflictException.class);
+        assertThatThrownBy(() -> service.createOrResumeRecoveryImport(
+                plan(UUID.randomUUID(), "a".repeat(64)), "request-1", "operator"))
+                .isInstanceOf(OperationConflictException.class);
+    }
+
+    @Test
+    void concurrentRecoveryImportLoserReloadsWinnerAfterFailedInsertTransaction() {
+        UUID kbId = UUID.randomUUID();
+        RecoveryArchiveImportPlan plan = plan(kbId, "a".repeat(64));
+        TenantContext.setTenantId("tenant-a");
+        OperationJob winner = job(UUID.randomUUID(), kbId); winner.setInput(plan.toInput());
+        when(jobs.findByTenantIdAndOperationTypeAndIdempotencyKey(
+                "tenant-a", OperationType.RECOVERY_ARCHIVE_IMPORT, "request-1"))
+                .thenReturn(Optional.empty(), Optional.of(winner));
+        when(writes.insertRecoveryImport("tenant-a", plan, "request-1", "operator"))
+                .thenThrow(new DataIntegrityViolationException("unique winner"));
+        when(steps.findByJobIdAndStepKey(winner.getId(), "stage-zip")).thenReturn(Optional.of(
+                OperationStep.builder().status(com.dupi.rag.domain.enums.OperationStepStatus.PENDING).build()));
+        when(steps.findByJobIdOrderBySequenceNumberAsc(winner.getId())).thenReturn(List.of());
+
+        assertThat(service.createOrResumeRecoveryImport(plan, "request-1", "operator").job().getId())
+                .isEqualTo(winner.getId());
+        verify(jobs, times(2)).findByTenantIdAndOperationTypeAndIdempotencyKey(
+                "tenant-a", OperationType.RECOVERY_ARCHIVE_IMPORT, "request-1");
+    }
+
+    @Test
+    void concurrentSameKeySubmissionsConvergeOnOneWinner() throws Exception {
+        UUID kbId = UUID.randomUUID(); RecoveryArchiveImportPlan plan = plan(kbId, "a".repeat(64));
+        CyclicBarrier firstReads = new CyclicBarrier(2);
+        AtomicInteger reads = new AtomicInteger();
+        AtomicReference<OperationJob> winner = new AtomicReference<>();
+        when(jobs.findByTenantIdAndOperationTypeAndIdempotencyKey(
+                "tenant-a", OperationType.RECOVERY_ARCHIVE_IMPORT, "race-key")).thenAnswer(call -> {
+            if (reads.incrementAndGet() <= 2) { firstReads.await(5, TimeUnit.SECONDS); return Optional.empty(); }
+            return Optional.ofNullable(winner.get());
+        });
+        when(writes.insertRecoveryImport("tenant-a", plan, "race-key", "operator")).thenAnswer(call -> {
+            OperationJob candidate = job(UUID.randomUUID(), kbId); candidate.setInput(plan.toInput());
+            if (winner.compareAndSet(null, candidate)) return candidate;
+            throw new DataIntegrityViolationException("unique winner");
+        });
+        when(steps.findByJobIdAndStepKey(any(), eq("stage-zip"))).thenReturn(Optional.of(
+                OperationStep.builder().status(com.dupi.rag.domain.enums.OperationStepStatus.PENDING).build()));
+        when(steps.findByJobIdOrderBySequenceNumberAsc(any())).thenReturn(List.of());
+
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var first = pool.submit(() -> { TenantContext.setTenantId("tenant-a"); try {
+                return service.createOrResumeRecoveryImport(plan, "race-key", "operator").job().getId();
+            } finally { TenantContext.clear(); }});
+            var second = pool.submit(() -> { TenantContext.setTenantId("tenant-a"); try {
+                return service.createOrResumeRecoveryImport(plan, "race-key", "operator").job().getId();
+            } finally { TenantContext.clear(); }});
+
+            assertThat(first.get(10, TimeUnit.SECONDS)).isEqualTo(second.get(10, TimeUnit.SECONDS));
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void recoveryImportRejectsPlanFromAnotherTenantBeforeCreating() {
+        TenantContext.setTenantId("tenant-a");
+        assertThatThrownBy(() -> service.createOrResumeRecoveryImport(
+                new RecoveryArchiveImportPlan(UUID.randomUUID(), "tenant-b", UUID.randomUUID(), null,
+                        "embedding", 3, Map.of(), "c".repeat(64), "d".repeat(64), "operator", List.of()),
+                "request-1", "operator"))
+                .isInstanceOf(OperationConflictException.class);
+        verifyNoInteractions(writes);
+    }
+
+    @Test
+    void sameRecoveryImportKeyAlreadyOwnedByAnotherTenantIsAConflict() {
+        UUID kbId = UUID.randomUUID(); RecoveryArchiveImportPlan plan = new RecoveryArchiveImportPlan(
+                UUID.randomUUID(), "tenant-b", kbId, null, "embedding", 3, Map.of(),
+                "c".repeat(64), "d".repeat(64), "operator", List.of());
+        TenantContext.setTenantId("tenant-b");
+        OperationJob otherTenant = job(UUID.randomUUID(), UUID.randomUUID());
+        otherTenant.setTenantId("tenant-a");
+        when(jobs.findFirstByOperationTypeAndIdempotencyKeyOrderByCreatedAtAsc(
+                OperationType.RECOVERY_ARCHIVE_IMPORT, "shared-key"))
+                .thenReturn(Optional.of(otherTenant));
+
+        assertThatThrownBy(() -> service.createOrResumeRecoveryImport(plan, "shared-key", "operator"))
+                .isInstanceOf(OperationConflictException.class);
+        verifyNoInteractions(writes);
+    }
+
+    @Test
+    void recoveryImportPublishGateRejectsMissingPendingAndFailedIntakeSteps() {
+        UUID jobId = UUID.randomUUID(); UUID kbId = UUID.randomUUID();
+        RecoveryArchiveImportPlan plan = plan(kbId, "a".repeat(64));
+        OperationJob job = job(jobId, kbId); job.setInput(plan.toInput());
+        when(jobs.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(steps.findByJobIdAndStepKey(jobId, "stage-zip"))
+                .thenReturn(Optional.empty(), Optional.of(OperationStep.builder()
+                        .status(com.dupi.rag.domain.enums.OperationStepStatus.PENDING).build()),
+                        Optional.of(OperationStep.builder()
+                                .status(com.dupi.rag.domain.enums.OperationStepStatus.FAILED).build()));
+
+        assertThatThrownBy(() -> service.publishRecoveryImport(jobId, plan))
+                .isInstanceOf(OperationConflictException.class);
+        assertThatThrownBy(() -> service.publishRecoveryImport(jobId, plan))
+                .isInstanceOf(OperationConflictException.class);
+        assertThatThrownBy(() -> service.publishRecoveryImport(jobId, plan))
+                .isInstanceOf(OperationConflictException.class);
+        assertThat(job.getRunnable()).isFalse();
+    }
+
+    @Test
+    void recoveryImportPublishGateLocksAndPublishesOnlyMatchingCompletedIntake() {
+        UUID jobId = UUID.randomUUID(); UUID kbId = UUID.randomUUID();
+        RecoveryArchiveImportPlan plan = plan(kbId, "a".repeat(64));
+        OperationJob job = job(jobId, kbId); job.setInput(plan.toInput());
+        OperationStep stage = OperationStep.builder().status(com.dupi.rag.domain.enums.OperationStepStatus.COMPLETED)
+                .resourceRef("recovery-staging/" + jobId + ".zip").build();
+        when(jobs.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(steps.findByJobIdAndStepKey(jobId, "stage-zip")).thenReturn(Optional.of(stage));
+        when(jobs.saveAndFlush(job)).thenReturn(job);
+        when(steps.findByJobIdOrderBySequenceNumberAsc(jobId)).thenReturn(List.of(stage));
+
+        var response = service.publishRecoveryImport(jobId, plan);
+
+        assertThat(response.getId()).isEqualTo(jobId);
         assertThat(job.getRunnable()).isTrue();
-        assertThat(job.getNextAttemptAt()).isNotNull();
         verify(jobs).findByIdForUpdate(jobId);
+        verify(jobs).saveAndFlush(job);
+    }
+
+    private static RecoveryArchiveImportPlan plan(UUID kbId, String zipSha) {
+        return new RecoveryArchiveImportPlan(UUID.randomUUID(), "tenant-a", kbId, null,
+                "embedding", 3, Map.of("metric", "COSINE"), "c".repeat(64), zipSha,
+                "operator", List.of(new RecoveryArchiveImportPlan.Entry(
+                "record:a", "RECORD", "records/a.json", 3, "d".repeat(64))));
     }
 
     private static OperationJob job(UUID jobId, UUID kbId) {

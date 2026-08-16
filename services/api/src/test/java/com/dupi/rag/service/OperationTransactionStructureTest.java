@@ -6,6 +6,9 @@ import com.dupi.rag.domain.enums.OperationPhase;
 import com.dupi.rag.domain.enums.OperationStatus;
 import com.dupi.rag.repository.OperationJobRepository;
 import com.dupi.rag.repository.OperationStepRepository;
+import com.dupi.rag.repository.RecoveryArchiveRepository;
+import com.dupi.rag.repository.RecoveryArchiveItemRepository;
+import com.dupi.rag.config.RecoveryProperties;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 import org.springframework.aop.support.AopUtils;
@@ -23,6 +26,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -66,6 +70,46 @@ class OperationTransactionStructureTest {
         }
     }
 
+    @Test
+    void proxiedRecoveryMetadataRejectsStaleContextBeforeAnyDomainWrite() {
+        OperationJobRepository jobs = mock(OperationJobRepository.class);
+        RecoveryArchiveRepository archives = mock(RecoveryArchiveRepository.class);
+        RecoveryArchiveItemRepository items = mock(RecoveryArchiveItemRepository.class);
+        TrackingTransactionManager transactions = new TrackingTransactionManager();
+        OperationJob job = currentJob();
+        when(jobs.findByIdForUpdate(job.getId())).thenReturn(Optional.of(job));
+        RecoveryArchiveImportPlan plan = new RecoveryArchiveImportPlan(UUID.randomUUID(), "tenant-a",
+                UUID.randomUUID(), null, "embedding", 3, Map.of(), "a".repeat(64), "b".repeat(64),
+                "admin", List.of());
+        RecoveryManifestService manifests = new RecoveryManifestService(
+                new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules());
+        var manifest = manifests.seal(plan.finalHeader(job.getId()), plan.finalItems(job.getId()));
+        StoredRecoveryObject stored = new StoredRecoveryObject("dupi-recovery",
+                "archives/tenant-a/" + job.getId() + "/manifest.json", 2, "c".repeat(64));
+        OperationExecutionContext stale = new OperationExecutionContext(job.getId(), UUID.randomUUID(),
+                job.getClaimEpoch(), job.getRetryEpoch(), job.getPhase());
+
+        try (AnnotationConfigApplicationContext spring = new AnnotationConfigApplicationContext()) {
+            spring.registerBean(OperationJobRepository.class, () -> jobs);
+            spring.registerBean(RecoveryArchiveRepository.class, () -> archives);
+            spring.registerBean(RecoveryArchiveItemRepository.class, () -> items);
+            spring.registerBean(RecoveryProperties.class, () -> { RecoveryProperties value = new RecoveryProperties(); value.setBucket("dupi-recovery"); return value; });
+            spring.registerBean("transactionManager", PlatformTransactionManager.class, () -> transactions);
+            spring.register(MetadataTransactionConfig.class);
+            spring.refresh();
+
+            RecoveryArchiveImportPersistenceService persistence = spring.getBean(RecoveryArchiveImportPersistenceService.class);
+            assertThat(AopUtils.isAopProxy(persistence)).isTrue();
+            assertThatThrownBy(() -> persistence.persist(stale, plan, manifest, stored))
+                    .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class);
+            verify(jobs).findByIdForUpdate(job.getId());
+            verifyNoInteractions(archives, items);
+            assertThat(transactions.begins).isEqualTo(1);
+            assertThat(transactions.commits).isZero();
+            assertThat(transactions.rollbacks).isEqualTo(1);
+        }
+    }
+
     @Configuration
     @EnableTransactionManagement(proxyTargetClass = true)
     static class TransactionConfig {
@@ -81,10 +125,27 @@ class OperationTransactionStructureTest {
         }
     }
 
+    @Configuration
+    @EnableTransactionManagement(proxyTargetClass = true)
+    static class MetadataTransactionConfig {
+        @Bean
+        OperationDomainGuard operationDomainGuard(OperationJobRepository jobs) {
+            return new OperationDomainGuard(jobs);
+        }
+
+        @Bean
+        RecoveryArchiveImportPersistenceService recoveryArchiveImportPersistenceService(
+                RecoveryArchiveRepository archives, RecoveryArchiveItemRepository items,
+                RecoveryProperties properties, OperationDomainGuard guard) {
+            return new RecoveryArchiveImportPersistenceService(archives, items, properties, guard);
+        }
+    }
+
     static class TrackingTransactionManager extends AbstractPlatformTransactionManager {
         private final ThreadLocal<Boolean> active = ThreadLocal.withInitial(() -> false);
         int begins;
         int commits;
+        int rollbacks;
 
         @Override
         protected Object doGetTransaction() {
@@ -109,7 +170,13 @@ class OperationTransactionStructureTest {
 
         @Override
         protected void doRollback(DefaultTransactionStatus status) {
+            rollbacks++;
             active.remove();
+        }
+
+        @Override
+        protected void doSetRollbackOnly(DefaultTransactionStatus status) {
+            // The participating MANDATORY guard marks the outer metadata transaction rollback-only.
         }
 
         @Override

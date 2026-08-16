@@ -32,7 +32,7 @@ public record RecoveryArchiveImportPlan(
         Map<String, Object> input = new LinkedHashMap<>();
         input.put("sourceArchiveId", sourceArchiveId.toString());
         input.put("tenantId", tenantId); input.put("knowledgeBaseId", knowledgeBaseId.toString());
-        input.put("sourceRevision", sourceRevision == null ? null : sourceRevision.toString());
+        if (sourceRevision != null) input.put("sourceRevision", sourceRevision.toString());
         input.put("embeddingModel", embeddingModel); input.put("embeddingDimension", embeddingDimension);
         input.put("collectionSettings", collectionSettings == null ? Map.of() : collectionSettings);
         input.put("sourceManifestChecksum", sourceManifestChecksum); input.put("zipSha256", zipSha256);

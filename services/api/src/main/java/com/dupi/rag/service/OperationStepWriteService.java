@@ -105,7 +105,9 @@ public class OperationStepWriteService {
         if (step.getStatus() == OperationStepStatus.COMPENSATED) {
             return step;
         }
-        require(step, OperationStepStatus.COMPLETED, OperationStepStatus.FAILED);
+        require(step, OperationStepStatus.PENDING, OperationStepStatus.RUNNING,
+                OperationStepStatus.RETRY_WAIT, OperationStepStatus.COMPLETED,
+                OperationStepStatus.FAILED);
         step.setStatus(OperationStepStatus.COMPENSATED);
         step.setCompletedAt(Instant.now());
         step.setNextAttemptAt(null);

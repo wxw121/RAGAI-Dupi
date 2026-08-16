@@ -50,12 +50,20 @@ public class RecoveryStorageService {
         return putAtKey(finalKey(tenantId, jobId, relativeKey), input);
     }
 
-    public void deleteIfPresent(String objectKey) {
+    public void delete(String objectKey) {
         try {
             objectStore.delete(properties.getBucket(), objectKey);
-        } catch (Exception ignored) {
-            // Object stores differ on delete-missing behaviour; cleanup is intentionally idempotent.
+        } catch (RecoveryObjectNotFoundException absent) {
+            // A confirmed missing object satisfies an idempotent delete.
+        } catch (Exception exception) {
+            throw new RecoveryStorageUnavailableException("Failed to delete recovery object", exception);
         }
+    }
+
+    /** @deprecated use {@link #delete(String)}; retained for older domain callers. */
+    @Deprecated
+    public void deleteIfPresent(String objectKey) {
+        delete(objectKey);
     }
 
     private StoredRecoveryObject putAtKey(String objectKey, InputStream input) {
@@ -65,19 +73,26 @@ public class RecoveryStorageService {
             return new StoredRecoveryObject(properties.getBucket(), objectKey,
                     digestInput.byteCount(), digestInput.hexDigest());
         } catch (Exception e) {
-            throw new IllegalStateException("Failed to write recovery object", e);
+            throw new RecoveryStorageUnavailableException("Failed to write recovery object", e);
         }
     }
 
-    public boolean verify(StoredRecoveryObject expected) {
+    public RecoveryStorageOutcome inspect(StoredRecoveryObject expected) {
         try (InputStream input = objectStore.get(expected.bucket(), expected.objectKey())) {
             CountingDigestInputStream digestInput = new CountingDigestInputStream(input);
             digestInput.transferTo(OutputStreamSink.INSTANCE);
             return digestInput.byteCount() == expected.byteSize()
-                    && digestInput.hexDigest().equals(expected.sha256());
-        } catch (Exception e) {
-            return false;
+                    && digestInput.hexDigest().equals(expected.sha256())
+                    ? RecoveryStorageOutcome.MATCHING : RecoveryStorageOutcome.CONFLICT;
+        } catch (RecoveryObjectNotFoundException absent) {
+            return RecoveryStorageOutcome.ABSENT;
+        } catch (Exception exception) {
+            throw new RecoveryStorageUnavailableException("Failed to inspect recovery object", exception);
         }
+    }
+
+    public boolean verify(StoredRecoveryObject expected) {
+        return inspect(expected) == RecoveryStorageOutcome.MATCHING;
     }
 
     public StoredRecoveryObject describe(String objectKey) {
@@ -86,7 +101,7 @@ public class RecoveryStorageService {
             digestInput.transferTo(OutputStreamSink.INSTANCE);
             return new StoredRecoveryObject(properties.getBucket(), objectKey, digestInput.byteCount(), digestInput.hexDigest());
         } catch (Exception e) {
-            throw new IllegalStateException("Failed to describe recovery object", e);
+            throw new RecoveryStorageUnavailableException("Failed to describe recovery object", e);
         }
     }
 
@@ -104,8 +119,10 @@ public class RecoveryStorageService {
     public InputStream open(String bucket, String objectKey) {
         try {
             return objectStore.get(bucket, objectKey);
+        } catch (RecoveryObjectNotFoundException absent) {
+            throw new RecoveryStorageConflictException("Recovery object is absent: " + objectKey, absent);
         } catch (Exception e) {
-            throw new IllegalStateException("Failed to open recovery object", e);
+            throw new RecoveryStorageUnavailableException("Failed to open recovery object", e);
         }
     }
 

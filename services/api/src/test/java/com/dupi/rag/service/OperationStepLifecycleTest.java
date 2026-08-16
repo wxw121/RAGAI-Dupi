@@ -92,6 +92,23 @@ class OperationStepLifecycleTest {
     }
 
     @Test
+    void compensationCanReconcileEveryForwardStepState() {
+        for (OperationStepStatus status : List.of(OperationStepStatus.PENDING,
+                OperationStepStatus.RUNNING, OperationStepStatus.RETRY_WAIT,
+                OperationStepStatus.FAILED, OperationStepStatus.COMPLETED)) {
+            String key = "cleanup-" + status;
+            OperationStep step = OperationStep.builder().jobId(jobId).stepKey(key)
+                    .status(status).nextAttemptAt(Instant.now()).build();
+            when(steps.findByJobIdAndStepKey(jobId, key)).thenReturn(Optional.of(step));
+
+            service.compensateStep(context, key);
+
+            assertThat(step.getStatus()).isEqualTo(OperationStepStatus.COMPENSATED);
+            assertThat(step.getNextAttemptAt()).isNull();
+        }
+    }
+
+    @Test
     void staleOwnerCannotReachRecordStepRepositoryWrites() {
         doThrow(new com.dupi.rag.exception.OperationConflictException("stale"))
                 .when(guard).assertActive(context);

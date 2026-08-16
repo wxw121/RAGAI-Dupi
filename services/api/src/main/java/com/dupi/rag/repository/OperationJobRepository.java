@@ -21,6 +21,11 @@ public interface OperationJobRepository extends JpaRepository<OperationJob, UUID
             String idempotencyKey
     );
 
+    Optional<OperationJob> findFirstByOperationTypeAndIdempotencyKeyOrderByCreatedAtAsc(
+            OperationType operationType,
+            String idempotencyKey
+    );
+
     @Query("""
             select job from OperationJob job
             where job.status in (

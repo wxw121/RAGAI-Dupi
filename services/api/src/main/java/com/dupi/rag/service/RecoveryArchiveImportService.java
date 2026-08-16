@@ -60,30 +60,41 @@ public class RecoveryArchiveImportService {
             String zipSha256 = digest(file);
             String key = idempotencyKey == null || idempotencyKey.isBlank()
                     ? zipSha256 + ":" + knowledgeBaseId : idempotencyKey.trim();
-            OperationJobResponse job = operations.create(OperationType.RECOVERY_ARCHIVE_IMPORT, "KNOWLEDGE_BASE",
-                    knowledgeBaseId, key, Map.of("intake", "pending"), actor == null || actor.isBlank() ? "system" : actor);
+            String creator = actor == null || actor.isBlank() ? "system" : actor;
             RecoveryArchiveImportPlan plan = new RecoveryArchiveImportPlan(source.header().archiveId(),
                     knowledgeBase.getTenantId(), knowledgeBaseId, source.header().sourceRevision(),
                     source.header().embeddingModel(), source.header().embeddingDimension(), source.header().collectionSettings(),
-                    source.manifestChecksum(), zipSha256, actor == null || actor.isBlank() ? "system" : actor, entries);
+                    source.manifestChecksum(), zipSha256, creator, entries);
+            RecoveryImportIntake intake = operations.createOrResumeRecoveryImport(plan, key, creator);
+            OperationJobResponse job = intake.job();
+            if (intake.published()) return job;
             String stagingKey = storage.stagingKey(job.getId());
-            operations.replaceIntakeInput(job.getId(), plan.toInput());
-            var stage = operations.recordIntakeStep(job.getId(), "stage-zip", "STAGE_UPLOAD", stagingKey);
-            if (stage.getStatus() != com.dupi.rag.domain.enums.OperationStepStatus.COMPLETED) {
+            StoredRecoveryObject expectedStage = new StoredRecoveryObject(storage.bucket(), stagingKey,
+                    file.getSize(), zipSha256);
+            RecoveryStorageOutcome stageOutcome = storage.inspect(expectedStage);
+            if (stageOutcome == RecoveryStorageOutcome.CONFLICT) {
+                throw new com.dupi.rag.exception.OperationConflictException(
+                        "Recovery import staging key contains different bytes");
+            }
+            if (stageOutcome == RecoveryStorageOutcome.ABSENT) {
                 StoredRecoveryObject stored;
                 try (InputStream input = file.getInputStream()) {
                     stored = storage.putStaging(stagingKey, input);
                 } catch (Exception exception) {
-                    storage.deleteIfPresent(stagingKey);
+                    try { storage.delete(stagingKey); } catch (Exception cleanup) { exception.addSuppressed(cleanup); }
                     throw new IllegalStateException("Recovery ZIP staging upload failed", exception);
                 }
-                if (!zipSha256.equals(stored.sha256()) || !storage.verify(stored)) {
-                    storage.deleteIfPresent(stagingKey);
+                if (stored.byteSize() != file.getSize() || !zipSha256.equals(stored.sha256())
+                        || storage.inspect(expectedStage) != RecoveryStorageOutcome.MATCHING) {
+                    storage.delete(stagingKey);
                     throw new IllegalArgumentException("Recovery ZIP staging verification failed");
                 }
-                operations.completeIntakeStep(job.getId(), "stage-zip");
             }
-            return operations.makeRunnable(job.getId());
+            operations.completeRecoveryImportStage(job.getId(), plan);
+            if (storage.inspect(expectedStage) != RecoveryStorageOutcome.MATCHING) {
+                throw new IllegalStateException("Recovery ZIP staging changed before publication");
+            }
+            return operations.publishRecoveryImport(job.getId(), plan);
         } catch (IOException exception) {
             throw invalid("Recovery ZIP could not be read", exception);
         } finally {
@@ -110,9 +121,9 @@ public class RecoveryArchiveImportService {
         try (ZipInputStream zip = new ZipInputStream(file.getInputStream(), java.nio.charset.StandardCharsets.UTF_8)) {
             ZipEntry zipEntry; byte[] buffer = new byte[8192];
             while ((zipEntry = zip.getNextEntry()) != null) {
+                if (++count > properties.getMaxImportEntries()) throw invalid("Recovery ZIP contains too many files");
                 if (zipEntry.isDirectory()) { safeEntryName(trimDirectory(zipEntry.getName())); zip.closeEntry(); continue; }
                 String name = safeEntryName(zipEntry.getName());
-                if (++count > properties.getMaxImportEntries()) throw invalid("Recovery ZIP contains too many files");
                 if (entries.containsKey(name)) throw invalid("Recovery ZIP contains duplicate entry: " + name);
                 Path target = directory.resolve(name).normalize();
                 if (!target.startsWith(directory)) throw invalid("Recovery ZIP contains an unsafe path: " + name);
@@ -162,7 +173,16 @@ public class RecoveryArchiveImportService {
         if (!knowledgeBase.getTenantId().equals(manifest.header().tenantId())) throw invalid("Recovery ZIP belongs to a different tenant");
         if (!knowledgeBase.getId().equals(manifest.header().sourceKnowledgeBaseId())) throw invalid("Recovery ZIP belongs to a different knowledge base");
     }
-    private String digest(MultipartFile file) throws IOException { try (InputStream input = file.getInputStream()) { return HexFormat.of().formatHex(sha256().digest(input.readAllBytes())); } }
+    private String digest(MultipartFile file) throws IOException {
+        MessageDigest digest = sha256();
+        try (InputStream input = file.getInputStream()) {
+            byte[] buffer = new byte[8192];
+            for (int read; (read = input.read(buffer)) >= 0;) {
+                if (read > 0) digest.update(buffer, 0, read);
+            }
+        }
+        return HexFormat.of().formatHex(digest.digest());
+    }
     private String archivePrefix(String tenant, UUID archiveId) { return "archives/" + tenant + "/" + archiveId + "/"; }
     private String trimDirectory(String value) { return value.endsWith("/") ? value.substring(0, value.length() - 1) : value; }
     private String safeEntryName(String name) {

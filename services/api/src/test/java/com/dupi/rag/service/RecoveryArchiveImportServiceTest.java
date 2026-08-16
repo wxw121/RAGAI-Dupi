@@ -14,6 +14,9 @@ import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.web.multipart.MultipartFile;
+import java.io.FilterInputStream;
+import java.io.IOException;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.security.MessageDigest;
@@ -33,8 +36,9 @@ import static org.mockito.Mockito.*;
 class RecoveryArchiveImportServiceTest {
     @Mock KnowledgeBaseService knowledgeBases; @Mock RecoveryStorageService storage; @Mock OperationJobService operations;
     private RecoveryArchiveImportService service; private RecoveryManifestService manifests; private UUID kbId;
+    private RecoveryProperties properties;
     @BeforeEach void setUp() {
-        RecoveryProperties properties = new RecoveryProperties(); properties.setBucket("dupi-recovery");
+        properties = new RecoveryProperties(); properties.setBucket("dupi-recovery");
         manifests = new RecoveryManifestService(new ObjectMapper().findAndRegisterModules());
         service = new RecoveryArchiveImportService(knowledgeBases, storage, properties, manifests, operations);
         kbId = UUID.randomUUID(); lenient().when(knowledgeBases.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).tenantId("tenant-a").build());
@@ -50,18 +54,91 @@ class RecoveryArchiveImportServiceTest {
     }
     @Test void createsTracksStagesThenMakesJobRunnable() throws Exception {
         UUID jobId = UUID.randomUUID(); OperationJobResponse job = OperationJobResponse.builder().id(jobId).build();
-        when(operations.create(any(), anyString(), any(), anyString(), anyMap(), anyString())).thenReturn(job);
-        when(operations.recordIntakeStep(eq(jobId), eq("stage-zip"), anyString(), anyString())).thenReturn(com.dupi.rag.domain.entity.OperationStep.builder().status(com.dupi.rag.domain.enums.OperationStepStatus.PENDING).build());
+        when(operations.createOrResumeRecoveryImport(any(), eq("request-1"), eq("admin")))
+                .thenReturn(new RecoveryImportIntake(job, com.dupi.rag.domain.enums.OperationStepStatus.PENDING, false));
         when(storage.stagingKey(jobId)).thenReturn("recovery-staging/" + jobId + ".zip");
+        when(storage.bucket()).thenReturn("dupi-recovery");
+        when(storage.inspect(any())).thenReturn(RecoveryStorageOutcome.ABSENT, RecoveryStorageOutcome.MATCHING,
+                RecoveryStorageOutcome.MATCHING);
         when(storage.putStaging(anyString(), any())).thenAnswer(call -> { byte[] bytes = ((InputStream) call.getArgument(1)).readAllBytes(); return new StoredRecoveryObject("dupi-recovery", call.getArgument(0), bytes.length, sha(bytes)); });
-        when(storage.verify(any())).thenReturn(true); when(operations.makeRunnable(jobId)).thenReturn(job);
+        when(operations.publishRecoveryImport(eq(jobId), any())).thenReturn(job);
         assertThat(service.submit(kbId, archive(false, false, false), "request-1", "admin").getId()).isEqualTo(jobId);
         InOrder order = inOrder(operations, storage);
-        order.verify(operations).create(any(), eq("KNOWLEDGE_BASE"), eq(kbId), eq("request-1"), anyMap(), eq("admin"));
-        order.verify(operations).replaceIntakeInput(eq(jobId), anyMap());
-        order.verify(operations).recordIntakeStep(eq(jobId), eq("stage-zip"), eq("STAGE_UPLOAD"), contains(jobId.toString()));
+        order.verify(operations).createOrResumeRecoveryImport(any(), eq("request-1"), eq("admin"));
         order.verify(storage).putStaging(contains(jobId.toString()), any());
-        order.verify(operations).completeIntakeStep(jobId, "stage-zip"); order.verify(operations).makeRunnable(jobId);
+        order.verify(operations).completeRecoveryImportStage(eq(jobId), any());
+        order.verify(operations).publishRecoveryImport(eq(jobId), any());
+    }
+
+    @Test void fallbackDigestUsesBoundedReadsInsteadOfBulkAllocation() throws Exception {
+        UUID jobId = UUID.randomUUID();
+        MockMultipartFile source = archive(false, false, false);
+        MultipartFile streamingOnly = new BulkRejectingMultipartFile(source);
+        String expectedZipSha = sha(source.getBytes());
+        OperationJobResponse job = OperationJobResponse.builder().id(jobId).build();
+        when(operations.createOrResumeRecoveryImport(any(), eq(expectedZipSha + ":" + kbId), eq("admin")))
+                .thenReturn(new RecoveryImportIntake(job, com.dupi.rag.domain.enums.OperationStepStatus.PENDING, false));
+        when(storage.stagingKey(jobId)).thenReturn("recovery-staging/" + jobId + ".zip");
+        when(storage.bucket()).thenReturn("dupi-recovery");
+        when(storage.inspect(any())).thenReturn(RecoveryStorageOutcome.ABSENT,
+                RecoveryStorageOutcome.MATCHING, RecoveryStorageOutcome.MATCHING);
+        when(storage.putStaging(anyString(), any())).thenReturn(
+                new StoredRecoveryObject("dupi-recovery", "recovery-staging/" + jobId + ".zip",
+                        source.getSize(), expectedZipSha));
+        when(operations.publishRecoveryImport(eq(jobId), any())).thenReturn(job);
+
+        assertThat(service.submit(kbId, streamingOnly, null, "admin").getId()).isEqualTo(jobId);
+        verify(operations).createOrResumeRecoveryImport(any(), eq(expectedZipSha + ":" + kbId), eq("admin"));
+    }
+
+    @Test void entryLimitCountsDirectoryOnlyZipRecords() throws Exception {
+        properties.setMaxImportEntries(2);
+        LinkedHashMap<String, byte[]> entries = new LinkedHashMap<>();
+        entries.put("one/", null); entries.put("two/", null); entries.put("three/", null);
+        assertThatThrownBy(() -> service.submit(kbId, zipOf(entries), "dirs", "admin"))
+                .hasMessageContaining("too many files");
+        verifyNoInteractions(storage, operations);
+    }
+
+    @Test void entryLimitCountsDirectoriesAndFilesTogether() throws Exception {
+        properties.setMaxImportEntries(1);
+        LinkedHashMap<String, byte[]> entries = new LinkedHashMap<>();
+        entries.put("one/", null);
+        entries.put("manifest.json", "{}".getBytes());
+        assertThatThrownBy(() -> service.submit(kbId, zipOf(entries), "mixed", "admin"))
+                .hasMessageContaining("too many files");
+        verifyNoInteractions(storage, operations);
+    }
+
+    @Test void publishedIdempotentReplayReturnsSameJobWithoutTouchingIntakeOrStorage() throws Exception {
+        UUID jobId = UUID.randomUUID(); OperationJobResponse job = OperationJobResponse.builder().id(jobId).build();
+        when(operations.createOrResumeRecoveryImport(any(), eq("request-1"), eq("admin")))
+                .thenReturn(new RecoveryImportIntake(job,
+                        com.dupi.rag.domain.enums.OperationStepStatus.COMPLETED, true));
+
+        assertThat(service.submit(kbId, archive(false, false, false), "request-1", "admin").getId())
+                .isEqualTo(jobId);
+
+        verifyNoInteractions(storage);
+        verify(operations, never()).completeRecoveryImportStage(any(), any());
+        verify(operations, never()).publishRecoveryImport(any(), any());
+    }
+
+    @Test void failedStageUploadLeavesTrackedIntakeUnpublished() throws Exception {
+        UUID jobId = UUID.randomUUID(); OperationJobResponse job = OperationJobResponse.builder().id(jobId).build();
+        when(operations.createOrResumeRecoveryImport(any(), eq("request-1"), eq("admin")))
+                .thenReturn(new RecoveryImportIntake(job,
+                        com.dupi.rag.domain.enums.OperationStepStatus.PENDING, false));
+        when(storage.stagingKey(jobId)).thenReturn("recovery-staging/" + jobId + ".zip");
+        when(storage.bucket()).thenReturn("dupi-recovery");
+        when(storage.inspect(any())).thenReturn(RecoveryStorageOutcome.ABSENT);
+        when(storage.putStaging(anyString(), any())).thenThrow(
+                new RecoveryStorageUnavailableException("upload timeout", new Exception("down")));
+
+        assertThatThrownBy(() -> service.submit(kbId, archive(false, false, false), "request-1", "admin"))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("staging upload failed");
+        verify(operations, never()).completeRecoveryImportStage(any(), any());
+        verify(operations, never()).publishRecoveryImport(any(), any());
     }
     private MockMultipartFile archive(boolean duplicate, boolean reserved, boolean traversal) throws Exception {
         UUID source = UUID.randomUUID(); Map<String, byte[]> files = new LinkedHashMap<>();
@@ -73,5 +150,37 @@ class RecoveryArchiveImportServiceTest {
         ByteArrayOutputStream output = new ByteArrayOutputStream(); try (ZipOutputStream zip = new ZipOutputStream(output)) { if (traversal) { zip.putNextEntry(new ZipEntry("../bad")); zip.write(1); zip.closeEntry(); } for (var entry : files.entrySet()) { zip.putNextEntry(new ZipEntry(entry.getKey())); zip.write(entry.getValue()); zip.closeEntry(); } zip.putNextEntry(new ZipEntry("manifest.json")); zip.write(manifests.serialize(manifest)); zip.closeEntry(); }
         return new MockMultipartFile("file", "recovery.zip", "application/zip", output.toByteArray());
     }
+    private MockMultipartFile zipOf(Map<String, byte[]> entries) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (ZipOutputStream zip = new ZipOutputStream(output)) {
+            for (var entry : entries.entrySet()) {
+                zip.putNextEntry(new ZipEntry(entry.getKey()));
+                if (entry.getValue() != null) zip.write(entry.getValue());
+                zip.closeEntry();
+            }
+        }
+        return new MockMultipartFile("file", "recovery.zip", "application/zip", output.toByteArray());
+    }
     private static String sha(byte[] bytes) throws Exception { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
+
+    private static final class BulkRejectingMultipartFile implements MultipartFile {
+        private final MultipartFile delegate;
+        private BulkRejectingMultipartFile(MultipartFile delegate) { this.delegate = delegate; }
+        @Override public String getName() { return delegate.getName(); }
+        @Override public String getOriginalFilename() { return delegate.getOriginalFilename(); }
+        @Override public String getContentType() { return delegate.getContentType(); }
+        @Override public boolean isEmpty() { return delegate.isEmpty(); }
+        @Override public long getSize() { return delegate.getSize(); }
+        @Override public byte[] getBytes() throws IOException { return delegate.getBytes(); }
+        @Override public InputStream getInputStream() throws IOException {
+            return new FilterInputStream(delegate.getInputStream()) {
+                @Override public byte[] readAllBytes() throws IOException {
+                    throw new IOException("bulk read forbidden");
+                }
+            };
+        }
+        @Override public void transferTo(java.io.File destination) throws IOException, IllegalStateException {
+            delegate.transferTo(destination);
+        }
+    }
 }

@@ -15,6 +15,7 @@ import java.util.zip.ZipInputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 class RecoveryStorageServiceTest {
 
@@ -49,6 +50,47 @@ class RecoveryStorageServiceTest {
         objectStore.objects.put(stored.objectKey(), "changed".getBytes(StandardCharsets.UTF_8));
 
         assertThat(storage.verify(stored)).isFalse();
+    }
+
+    @Test
+    void inspectionDistinguishesAbsentMatchingAndConflictingObjects() {
+        InMemoryRecoveryObjectStore objectStore = new InMemoryRecoveryObjectStore();
+        RecoveryStorageService storage = service(objectStore);
+        StoredRecoveryObject expected = new StoredRecoveryObject("dupi-recovery", "planned", 7,
+                "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5");
+
+        assertThat(storage.inspect(expected)).isEqualTo(RecoveryStorageOutcome.ABSENT);
+        objectStore.objects.put("planned", "payload".getBytes(StandardCharsets.UTF_8));
+        assertThat(storage.inspect(expected)).isEqualTo(RecoveryStorageOutcome.MATCHING);
+        objectStore.objects.put("planned", "changed".getBytes(StandardCharsets.UTF_8));
+        assertThat(storage.inspect(expected)).isEqualTo(RecoveryStorageOutcome.CONFLICT);
+    }
+
+    @Test
+    void deleteMissingSucceedsButDeleteOutageIsRetryable() {
+        InMemoryRecoveryObjectStore objectStore = new InMemoryRecoveryObjectStore();
+        RecoveryStorageService storage = service(objectStore);
+        assertThatCode(() -> storage.delete("missing")).doesNotThrowAnyException();
+
+        objectStore.deleteFailure = new Exception("timeout");
+        assertThatThrownBy(() -> storage.delete("planned"))
+                .isInstanceOf(RecoveryStorageUnavailableException.class)
+                .hasMessageContaining("delete");
+    }
+
+    @Test
+    void inspectionOutageIsNotReportedAsAbsentOrConflict() {
+        RecoveryObjectStore failing = new RecoveryObjectStore() {
+            @Override public void put(String bucket, String key, InputStream input) { }
+            @Override public InputStream get(String bucket, String key) throws Exception { throw new Exception("auth denied"); }
+            @Override public List<String> list(String bucket, String prefix) { return List.of(); }
+            @Override public void delete(String bucket, String key) { }
+        };
+
+        assertThatThrownBy(() -> service(failing).inspect(new StoredRecoveryObject("dupi-recovery", "planned", 0,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")))
+                .isInstanceOf(RecoveryStorageUnavailableException.class)
+                .hasMessageContaining("inspect");
     }
 
     @Test
@@ -127,7 +169,8 @@ class RecoveryStorageServiceTest {
 
         assertThatThrownBy(() -> storage.put("tenant", UUID.randomUUID(), "a", new ByteArrayInputStream(new byte[0])))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("write");
-        assertThat(storage.verify(new StoredRecoveryObject("b", "k", 0, "sha"))).isFalse();
+        assertThatThrownBy(() -> storage.verify(new StoredRecoveryObject("b", "k", 0, "sha")))
+                .isInstanceOf(RecoveryStorageUnavailableException.class);
         assertThatThrownBy(() -> storage.open("b", "k"))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("open");
         assertThatThrownBy(() -> storage.readSmall("b", "k", 1))
@@ -150,6 +193,7 @@ class RecoveryStorageServiceTest {
 
     private static final class InMemoryRecoveryObjectStore implements RecoveryObjectStore {
         private final Map<String, byte[]> objects = new LinkedHashMap<>();
+        private Exception deleteFailure;
 
         @Override
         public void put(String bucket, String key, InputStream input) throws Exception {
@@ -159,8 +203,10 @@ class RecoveryStorageServiceTest {
         }
 
         @Override
-        public InputStream get(String bucket, String key) {
-            return new ByteArrayInputStream(objects.get(key));
+        public InputStream get(String bucket, String key) throws Exception {
+            byte[] value = objects.get(key);
+            if (value == null) throw new RecoveryObjectNotFoundException(bucket, key);
+            return new ByteArrayInputStream(value);
         }
 
         @Override
@@ -169,7 +215,8 @@ class RecoveryStorageServiceTest {
         }
 
         @Override
-        public void delete(String bucket, String key) {
+        public void delete(String bucket, String key) throws Exception {
+            if (deleteFailure != null) throw deleteFailure;
             objects.remove(key);
         }
     }
