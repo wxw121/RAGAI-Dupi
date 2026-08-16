@@ -2,10 +2,12 @@ package com.dupi.rag.service;
 
 import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.entity.RagEvalRun;
+import com.dupi.rag.domain.entity.RagQualityPolicy;
 import com.dupi.rag.domain.entity.RetrievalProfile;
 import com.dupi.rag.domain.enums.RagEvalRunStatus;
 import com.dupi.rag.domain.enums.RagQualityGateStatus;
 import com.dupi.rag.repository.RagEvalRunRepository;
+import com.dupi.rag.repository.RagQualityPolicyRepository;
 import com.dupi.rag.repository.RetrievalProfileRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -27,6 +29,7 @@ import static org.mockito.ArgumentMatchers.any;
 class RetrievalProfileServiceTest {
     @Mock RetrievalProfileRepository profileRepository;
     @Mock RagEvalRunRepository runRepository;
+    @Mock RagQualityPolicyRepository qualityPolicyRepository;
     @Mock KnowledgeBaseService knowledgeBaseService;
     @Mock AuditLogService auditLogService;
     @Mock KnowledgeBaseMaintenanceService maintenanceService;
@@ -131,6 +134,32 @@ class RetrievalProfileServiceTest {
     }
 
     @Test
+    void activateAllowsMatchingUnbaselinedSnapshotWhenPolicyDoesNotBlockIt() {
+        UUID kbId = UUID.randomUUID();
+        RetrievalProfile profile = profile(kbId);
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).name("KB").build();
+        RagEvalRun run = RagEvalRun.builder()
+                .kbId(kbId)
+                .status(RagEvalRunStatus.COMPLETED)
+                .gateStatus(RagQualityGateStatus.UNBASELINED)
+                .profileSnapshot(profile.snapshot())
+                .build();
+        RagQualityPolicy policy = RagQualityPolicy.builder().kbId(kbId)
+                .blockWhenUnbaselined(false).build();
+        when(profileRepository.findByIdAndKbId(profile.getId(), kbId)).thenReturn(Optional.of(profile));
+        when(qualityPolicyRepository.findByKbId(kbId)).thenReturn(Optional.of(policy));
+        when(runRepository.findByKbIdAndStatusAndGateStatus(
+                kbId, RagEvalRunStatus.COMPLETED, RagQualityGateStatus.PASS)).thenReturn(List.of());
+        when(runRepository.findByKbIdAndStatusAndGateStatus(
+                kbId, RagEvalRunStatus.COMPLETED, RagQualityGateStatus.UNBASELINED)).thenReturn(List.of(run));
+        when(knowledgeBaseService.findForUpdateOrThrow(kbId)).thenReturn(kb);
+
+        service().activate(kbId, profile.getId());
+
+        assertThat(kb.getActiveRetrievalProfileId()).isEqualTo(profile.getId());
+    }
+
+    @Test
     void rollbackReactivatesOlderPassingProfileAndAuditsTransition() {
         UUID kbId = UUID.randomUUID();
         RetrievalProfile previous = profile(kbId);
@@ -170,6 +199,21 @@ class RetrievalProfileServiceTest {
         verify(auditLogService).recordSuccessInCurrentTransaction(
                 "RETRIEVAL_PROFILE_ROLLBACK", "KNOWLEDGE_BASE", kbId,
                 "Rolled back retrieval profile from " + previous.getId() + " to " + target.getId());
+    }
+
+    @Test
+    void restoreDefaultClearsActiveProfileAndPreservesProfileHistory() {
+        UUID kbId = UUID.randomUUID();
+        RetrievalProfile profile = profile(kbId);
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).activeRetrievalProfileId(profile.getId()).build();
+        when(knowledgeBaseService.findForUpdateOrThrow(kbId)).thenReturn(kb);
+
+        service().restoreDefault(kbId);
+
+        assertThat(kb.getActiveRetrievalProfileId()).isNull();
+        verify(auditLogService).recordSuccessInCurrentTransaction(
+                "RETRIEVAL_PROFILE_RESTORE_DEFAULT", "KNOWLEDGE_BASE", kbId,
+                "Restored default retrieval strategy from profile " + profile.getId());
     }
 
     @Test
@@ -214,7 +258,7 @@ class RetrievalProfileServiceTest {
     }
 
     private RetrievalProfileService service() {
-        return new RetrievalProfileService(profileRepository, runRepository, knowledgeBaseService, auditLogService,
+        return new RetrievalProfileService(profileRepository, runRepository, qualityPolicyRepository, knowledgeBaseService, auditLogService,
                 maintenanceService);
     }
 

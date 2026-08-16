@@ -78,9 +78,9 @@ curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs/{jo
 
 ## V1.4 可验证恢复
 
-具有 `KB_RECOVERY` 权限的运维人员通过 **Recovery** 选项卡创建、检查、下载、重试和删除存档，以及创建、重试或放弃恢复。归档对象封存在私有恢复桶的 `archives/{tenantId}/{archiveId}/` 下，`manifest.json` 最后写入。目标知识库保持隐藏和 `RESTORING` 状态，直到对象、记录、稠密/稀疏向量、计数、模式与校验和全部验证通过。
+具有 `KB_RECOVERY` 权限的运维人员通过 **Recovery** 选项卡创建、检查、下载、导入、重试和删除存档，以及创建、重试或放弃恢复。下载的 Recovery ZIP 可通过 **Import ZIP** 重新上传；服务会校验 `manifest.json`、知识库/租户归属、必需条目及每个文件的大小和 SHA-256，验证通过后以新的内部归档 ID 保存并显示为 `COMPLETED`，随后可照常 Restore。新归档同时保存 Markdown 文档引用的图片资产及其元数据，恢复时重新映射到目标知识库。恢复库名称格式为 `原名称 (restored · Archive {archiveId前8位} · yyyy-MM-dd HH:mm:ss.SSS UTC)`，同一归档多次恢复也可按创建时间区分。归档对象封存在私有恢复桶的 `archives/{tenantId}/{archiveId}/` 下。目标知识库保持隐藏和 `RESTORING` 状态，直到对象、记录、稠密/稀疏向量、计数、模式与校验和全部验证通过。
 
-路由位于 `/api/v1/knowledge-bases/{kbId}/recovery` 下。命令返回 `202 Accepted`；Web 面板每三秒轮询一次非终态作业。参见[恢复运行手册](docs/zh-CN/v1.4-recovery-runbook.md)。
+路由位于 `/api/v1/knowledge-bases/{kbId}/recovery` 下。后台命令返回 `202 Accepted`，完成全部校验的 ZIP 导入返回 `201 Created`；Web 面板每三秒轮询一次非终态作业。参见[恢复运行手册](docs/zh-CN/v1.4-recovery-runbook.md)。
 
 | 变量 | 默认值 | 用途 |
 |---|---:|---|
@@ -88,6 +88,12 @@ curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs/{jo
 | `DUPI_RECOVERY_QUIESCENCE_TIMEOUT_SECONDS` | `300` | 等待活动知识库变更完成 |
 | `DUPI_RECOVERY_PAGE_SIZE` | `500` | 受限的向量快照分页大小 |
 | `DUPI_RECOVERY_MAX_CONCURRENT_JOBS` | `2` | 受限的存档/恢复并发数 |
+| `DUPI_MULTIPART_MAX_FILE_SIZE` / `DUPI_MULTIPART_MAX_REQUEST_SIZE` | `1GB` | API 单文件和单请求上传上限；反向代理同时限制为 1 GiB |
+| `DUPI_RECOVERY_MAX_IMPORT_ZIP_BYTES` | `1073741824` | Recovery ZIP 压缩后大小上限 |
+| `DUPI_RECOVERY_MAX_IMPORT_UNCOMPRESSED_BYTES` | `8589934592` | Recovery ZIP 解压后总大小上限 |
+| `DUPI_RECOVERY_MAX_IMPORT_ENTRY_BYTES` | `4294967296` | ZIP 单个条目解压后大小上限 |
+| `DUPI_RECOVERY_MAX_IMPORT_ENTRIES` | `20000` | ZIP 文件条目数上限 |
+| `DUPI_RECOVERY_MAX_IMPORT_COMPRESSION_RATIO` | `100` | ZIP 最大压缩比，防止压缩炸弹 |
 
 ### V1.4.0 发布门禁
 
@@ -215,7 +221,7 @@ docker compose up -d --build
 1. **新建知识库** → 选择向量检索或混合检索，点击卡片进入详情
 2. **文档管理** → 上传文件，等待状态 `COMPLETED`；点击查看按钮检查对象、摄入任务、分块总数、最多 20 个分块样例与索引就绪状态
 3. **智能问答** → 基于已摄入文档提问（需配置 `CHAT_API_KEY` 与 `EMBEDDING_API_KEY`）
-4. **RAG 评估** → 管理持久化用例（空库自动创建内置用例，每库最多 100 条），选择是否启用 Rerank，运行并查看最近 10 次结果与逐用例诊断
+4. **RAG 评估** → 按知识库真实文档创建和管理持久化用例（空用例集保持为空，每库最多 100 条），选择是否启用 Rerank，运行并查看最近 10 次结果与逐用例诊断
 
 ### 4. 验证
 

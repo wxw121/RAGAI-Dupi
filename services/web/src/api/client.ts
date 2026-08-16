@@ -4,6 +4,7 @@ const CSRF_TOKEN_KEY = 'dupi.auth.csrf'
 const COOKIE_SESSION_MARKER = 'cookie-session'
 const CSRF_HEADER = 'X-Dupi-CSRF-Token'
 const AUTH_EXPIRED_MESSAGE = '登录状态已过期，请重新登录'
+export const AUTH_EXPIRED_EVENT = 'dupi:auth-expired'
 
 export interface LoginResponse {
   csrfToken: string
@@ -33,6 +34,7 @@ async function parseError(res: Response): Promise<HttpError> {
   } catch {
     /* 响应体不是 JSON 时忽略解析失败，继续使用 HTTP 状态文本作为错误信息。 */
   }
+  if (res.status === 401) expireAuth()
   const message = body?.message ?? res.statusText ?? 'Request failed'
   return new HttpError(res.status, message, body, res.headers?.get?.('Retry-After') ?? null)
 }
@@ -49,6 +51,11 @@ export function clearAuthToken(): void {
   localStorage.removeItem(CSRF_TOKEN_KEY)
 }
 
+function expireAuth(): void {
+  clearAuthToken()
+  window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT))
+}
+
 export function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const csrfToken = localStorage.getItem(CSRF_TOKEN_KEY)
   if (!csrfToken) return extra
@@ -58,7 +65,7 @@ export function authHeaders(extra: Record<string, string> = {}): Record<string, 
 export function csrfHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const csrfToken = localStorage.getItem(CSRF_TOKEN_KEY)
   if (!csrfToken) {
-    clearAuthToken()
+    expireAuth()
     throw new HttpError(401, AUTH_EXPIRED_MESSAGE)
   }
   return { ...extra, [CSRF_HEADER]: csrfToken }

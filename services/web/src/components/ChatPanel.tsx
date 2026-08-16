@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { cancelChat, streamChat } from '@/api/chat'
+import { cancelChat, getCitationContent, streamChat } from '@/api/chat'
 import {
   batchDeleteChatSessions,
   deleteChatSession,
@@ -17,10 +17,12 @@ import { MarkdownContent } from '@/components/MarkdownContent'
 import { ChatHistorySidebar } from '@/components/ChatHistorySidebar'
 import { ChatHistoryDrawer } from '@/components/ChatHistoryDrawer'
 import { ChatErrorNotice } from '@/components/ChatErrorNotice'
+import { Dialog } from '@/components/ui/dialog'
 
 interface ChatPanelProps {
   kbId: string
   completedDocCount: number
+  onSessionCountChange?: (count: number) => void
 }
 
 function formatChatError(message: string): string {
@@ -42,11 +44,14 @@ function formatChatError(message: string): string {
   return message
 }
 
-export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
+export function ChatPanel({ kbId, completedDocCount, onSessionCountChange }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [citations, setCitations] = useState<Citation[]>([])
+  const [selectedCitation, setSelectedCitation] = useState<Citation | null>(null)
+  const [citationContent, setCitationContent] = useState('')
+  const [citationLoading, setCitationLoading] = useState(false)
   const [retrievalDiagnostics, setRetrievalDiagnostics] =
     useState<RetrievalDiagnostics | null>(null)
   const [sessions, setSessions] = useState<ChatSession[]>([])
@@ -59,9 +64,38 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
   const abortRef = useRef<AbortController | null>(null)
   const detailRequestIdRef = useRef(0)
   const streamRunIdRef = useRef(0)
+  const citationRequestIdRef = useRef(0)
   const { showError } = useToast()
 
   const canChat = completedDocCount > 0
+
+  const closeCitation = () => {
+    citationRequestIdRef.current += 1
+    setSelectedCitation(null)
+    setCitationContent('')
+    setCitationLoading(false)
+  }
+
+  const openCitation = async (citation: Citation) => {
+    const requestId = ++citationRequestIdRef.current
+    setSelectedCitation(citation)
+    setCitationContent(citation.snippet)
+    setCitationLoading(true)
+    try {
+      const response = await getCitationContent(kbId, citation.chunkId)
+      if (citationRequestIdRef.current === requestId) {
+        setCitationContent(response.content)
+      }
+    } catch (error) {
+      if (citationRequestIdRef.current === requestId) {
+        showError(error instanceof Error ? error.message : '读取引用原文失败')
+      }
+    } finally {
+      if (citationRequestIdRef.current === requestId) {
+        setCitationLoading(false)
+      }
+    }
+  }
 
   useEffect(() => {
     messagesRef.current = messages
@@ -74,6 +108,10 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
   useEffect(() => {
     kbIdRef.current = kbId
   }, [kbId])
+
+  useEffect(() => {
+    onSessionCountChange?.(sessions.length)
+  }, [onSessionCountChange, sessions.length])
 
   const loadSessionDetail = useCallback(
     async (sessionId: string) => {
@@ -452,16 +490,21 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
                     aria-label="引用来源"
                   >
                     {citations.slice(0, 5).map((c) => (
-                      <div
+                      <button
+                        type="button"
                         key={c.chunkId}
-                        className="h-28 w-52 shrink-0 overflow-hidden rounded-2xl border border-border bg-background px-3 py-2 text-xs shadow-sm"
-                        title={c.snippet}
+                        className="group h-32 w-56 shrink-0 overflow-hidden rounded-2xl border border-border bg-background px-3 py-2 text-left text-xs shadow-sm transition-colors hover:border-primary/40 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        onClick={() => void openCitation(c)}
+                        aria-label={`查看引用原文：${c.fileName}`}
                       >
-                        <p className="truncate font-medium">{c.fileName}</p>
-                        <div className="mt-1 line-clamp-4 text-muted-foreground">
+                        <p className="truncate font-medium" title={c.fileName}>{c.fileName}</p>
+                        <div className="mt-1 line-clamp-3 text-muted-foreground">
                           <MarkdownContent content={c.snippet} compact />
                         </div>
-                      </div>
+                        <span className="mt-1 block text-[11px] font-medium text-primary opacity-80 group-hover:opacity-100">
+                          查看完整原文
+                        </span>
+                      </button>
                     ))}
                   </div>
                 )}
@@ -539,6 +582,21 @@ export function ChatPanel({ kbId, completedDocCount }: ChatPanelProps) {
           </div>
         </div>
       </section>
+      <Dialog
+        open={selectedCitation != null}
+        onClose={closeCitation}
+        title={selectedCitation ? `引用原文 · ${selectedCitation.fileName}` : '引用原文'}
+        footer={
+          <Button variant="outline" onClick={closeCitation}>
+            关闭
+          </Button>
+        }
+      >
+        <div className="max-h-[65vh] overflow-y-auto rounded-xl border bg-muted/20 p-4">
+          {citationLoading && <p className="mb-3 text-xs text-muted-foreground">正在读取完整原文…</p>}
+          <MarkdownContent content={citationContent} />
+        </div>
+      </Dialog>
     </div>
   )
 }

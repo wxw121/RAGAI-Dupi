@@ -54,6 +54,7 @@ public class DocumentService {
     private final KnowledgeBaseMaintenanceService maintenanceService;
     private final UploadQuotaService uploadQuotaService;
     private final ProfileIndexStateService profileIndexStateService;
+    private final DocumentAssetService documentAssetService;
 
     public DocumentResponse upload(UUID kbId, MultipartFile file) {
         return upload(kbId, file, null);
@@ -134,6 +135,7 @@ public class DocumentService {
         boolean objectUploaded = false;
         IngestJob job = null;
         boolean jobSaved = false;
+        DocumentResponse response;
         try {
             documentRepository.save(doc);
             profileIndexStateService.bumpRevision(kb);
@@ -161,7 +163,7 @@ public class DocumentService {
             doc.setErrorMessage(null);
             documentRepository.save(doc);
 
-            return toResponse(doc, job);
+            response = toResponse(doc, job);
         } catch (Exception e) {
             if (objectUploaded) {
                 try {
@@ -203,6 +205,13 @@ public class DocumentService {
             }
             throw new IllegalStateException("Upload failed", e);
         }
+        auditLogService.recordSuccess(
+                "DOCUMENT_UPLOAD",
+                "DOCUMENT",
+                doc.getId(),
+                "Uploaded document " + doc.getFileName()
+        );
+        return response;
     }
 
     String fileFingerprint(MultipartFile file) {
@@ -263,15 +272,20 @@ public class DocumentService {
         vectorCleanupTaskService.enqueueProfileDocument(docId);
         vectorCleanupTaskService.enqueueLegacyDocument(docId);
         try {
-            milvusVectorService.deleteProfileByDocId(docId);
+            if (milvusVectorService.deleteProfileByDocId(docId)) {
+                vectorCleanupTaskService.completePendingProfileDocument(docId);
+            }
         } catch (Exception e) {
             log.warn("Failed to delete profile Milvus vectors for doc {}", docId, e);
         }
         try {
-            milvusVectorService.deleteByDocId(docId);
+            boolean legacyDeleted = milvusVectorService.deleteByDocId(docId);
             milvusVectorService.deleteSparseByDocId(kbId, docId,
                     retrievalProfileRepository.findByKbIdOrderByVersionDesc(kbId).stream()
                             .map(profile -> profile.getVersion()).toList());
+            if (legacyDeleted) {
+                vectorCleanupTaskService.completePendingLegacyDocument(docId);
+            }
         } catch (Exception e) {
             log.warn("Failed to delete Milvus vectors for doc {}", docId, e);
         }
@@ -281,6 +295,7 @@ public class DocumentService {
         } catch (Exception e) {
             log.warn("Failed to delete object {} for doc {}", doc.getObjectKey(), docId, e);
         }
+        documentAssetService.deleteByDocument(docId);
         uploadQuotaService.releaseCommitted(doc.getQuotaReservationId(), "Document deleted");
         documentRepository.delete(doc);
         profileIndexStateService.bumpRevision(kb);

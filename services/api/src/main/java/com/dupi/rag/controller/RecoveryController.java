@@ -2,6 +2,7 @@ package com.dupi.rag.controller;
 
 import com.dupi.rag.config.SecurityContext;
 import com.dupi.rag.dto.recovery.*;
+import com.dupi.rag.service.RecoveryArchiveImportService;
 import com.dupi.rag.service.RecoveryArchiveService;
 import com.dupi.rag.service.RecoveryJobExecutor;
 import com.dupi.rag.service.RecoveryRestoreService;
@@ -9,6 +10,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import java.util.List;
@@ -21,6 +23,7 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class RecoveryController {
     private final RecoveryArchiveService archives;
+    private final RecoveryArchiveImportService archiveImports;
     private final RecoveryRestoreService restores;
     private final RecoveryJobExecutor executor;
 
@@ -34,6 +37,13 @@ public class RecoveryController {
     @GetMapping("/archives")
     public List<RecoveryArchiveResponse> listArchives(@PathVariable UUID kbId) {
         return archives.list(kbId).stream().map(RecoveryArchiveResponse::from).toList();
+    }
+
+    @PostMapping(value = "/archives/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<RecoveryArchiveResponse> importArchive(
+            @PathVariable UUID kbId, @RequestPart("file") MultipartFile file) {
+        var archive = archiveImports.importZip(kbId, file, SecurityContext.getPrincipal());
+        return ResponseEntity.status(HttpStatus.CREATED).body(RecoveryArchiveResponse.from(archive));
     }
 
     @GetMapping("/archives/{archiveId}")

@@ -10,12 +10,19 @@ import com.dupi.rag.dto.CreateKnowledgeBaseRequest;
 import com.dupi.rag.dto.KnowledgeBaseResponse;
 import com.dupi.rag.dto.RagEvalGateDecisionResponse;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.exception.RecoveryConflictException;
 import com.dupi.rag.exception.RetrievalProfileConflictException;
 import com.dupi.rag.repository.KnowledgeBaseRepository;
+import com.dupi.rag.repository.RecoveryArchiveRepository;
+import com.dupi.rag.repository.RecoveryRestoreJobRepository;
+import com.dupi.rag.domain.entity.RecoveryArchive;
+import com.dupi.rag.domain.entity.RecoveryRestoreJob;
+import com.dupi.rag.domain.enums.RecoveryRestoreStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.InOrder;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
@@ -45,6 +52,10 @@ class KnowledgeBaseServiceTest {
     RetrievalProfileGateService retrievalProfileGateService;
     @Mock
     KnowledgeBaseMaintenanceService maintenanceService;
+    @Mock
+    RecoveryArchiveRepository recoveryArchiveRepository;
+    @Mock
+    RecoveryRestoreJobRepository recoveryRestoreJobRepository;
 
     LlmProperties llmProperties;
     KnowledgeBaseService service;
@@ -62,7 +73,9 @@ class KnowledgeBaseServiceTest {
                 auditLogService,
                 profileIndexStateService,
                 retrievalProfileGateService,
-                maintenanceService
+                maintenanceService,
+                recoveryArchiveRepository,
+                recoveryRestoreJobRepository
         );
     }
 
@@ -270,12 +283,16 @@ class KnowledgeBaseServiceTest {
     void deleteRemovesVectorsBeforeDatabaseRow() {
         UUID id = UUID.randomUUID();
         when(repository.findByIdAndTenantId(id, "default")).thenReturn(Optional.of(KnowledgeBase.builder().id(id).build()));
+        when(milvusVectorService.deleteProfileByKbId(id)).thenReturn(true);
+        when(milvusVectorService.deleteByKbId(id)).thenReturn(true);
 
         service.delete(id);
 
         verify(vectorCleanupTaskService).enqueueProfileKnowledgeBase(id);
         verify(vectorCleanupTaskService).enqueueLegacyKnowledgeBase(id);
         verify(milvusVectorService).deleteByKbId(id);
+        verify(vectorCleanupTaskService).completePendingProfileKnowledgeBase(id);
+        verify(vectorCleanupTaskService).completePendingLegacyKnowledgeBase(id);
         verify(repository).deleteById(id);
         verify(auditLogService).recordSuccess(
                 eq("KNOWLEDGE_BASE_DELETE"),
@@ -289,12 +306,15 @@ class KnowledgeBaseServiceTest {
     void deleteStillRemovesDatabaseRowWhenVectorCleanupFails() {
         UUID id = UUID.randomUUID();
         when(repository.findByIdAndTenantId(id, "default")).thenReturn(Optional.of(KnowledgeBase.builder().id(id).build()));
+        when(milvusVectorService.deleteProfileByKbId(id)).thenReturn(true);
         doThrow(new IllegalStateException("milvus down")).when(milvusVectorService).deleteByKbId(id);
 
         service.delete(id);
 
         verify(vectorCleanupTaskService).enqueueProfileKnowledgeBase(id);
         verify(vectorCleanupTaskService).enqueueLegacyKnowledgeBase(id);
+        verify(vectorCleanupTaskService).completePendingProfileKnowledgeBase(id);
+        verify(vectorCleanupTaskService, never()).completePendingLegacyKnowledgeBase(id);
         verify(repository).deleteById(id);
         verify(auditLogService).recordSuccess(
                 eq("KNOWLEDGE_BASE_DELETE"),
@@ -302,5 +322,61 @@ class KnowledgeBaseServiceTest {
                 eq(id),
                 contains("compensation")
         );
+    }
+
+    @Test
+    void deleteRejectsKnowledgeBaseWithRecoveryArchives() {
+        UUID id = UUID.randomUUID();
+        when(repository.findByIdAndTenantId(id, "default"))
+                .thenReturn(Optional.of(KnowledgeBase.builder().id(id).build()));
+        when(recoveryArchiveRepository.findByTenantIdAndSourceKnowledgeBaseIdOrderByCreatedAtDesc("default", id))
+                .thenReturn(List.of(RecoveryArchive.builder().id(UUID.randomUUID()).build()));
+
+        assertThatThrownBy(() -> service.delete(id))
+                .isInstanceOf(RecoveryConflictException.class)
+                .hasMessageContaining("1 recovery archive");
+
+        verify(repository, never()).deleteById(any());
+        verifyNoInteractions(milvusVectorService);
+    }
+
+    @Test
+    void deleteDetachesCompletedRestoreTargetBeforeDeletingKnowledgeBase() {
+        UUID id = UUID.randomUUID();
+        RecoveryRestoreJob job = RecoveryRestoreJob.builder()
+                .id(UUID.randomUUID())
+                .targetKnowledgeBaseId(id)
+                .status(RecoveryRestoreStatus.COMPLETED)
+                .build();
+        when(repository.findByIdAndTenantId(id, "default"))
+                .thenReturn(Optional.of(KnowledgeBase.builder().id(id).build()));
+        when(recoveryRestoreJobRepository.findByTenantIdAndTargetKnowledgeBaseId("default", id))
+                .thenReturn(Optional.of(job));
+
+        service.delete(id);
+
+        assertThat(job.getTargetKnowledgeBaseId()).isNull();
+        InOrder order = inOrder(recoveryRestoreJobRepository, repository);
+        order.verify(recoveryRestoreJobRepository).saveAndFlush(job);
+        order.verify(repository).deleteById(id);
+    }
+
+    @Test
+    void deleteRejectsUnfinishedRestoreTarget() {
+        UUID id = UUID.randomUUID();
+        RecoveryRestoreJob job = RecoveryRestoreJob.builder()
+                .id(UUID.randomUUID())
+                .targetKnowledgeBaseId(id)
+                .status(RecoveryRestoreStatus.VALIDATING)
+                .build();
+        when(repository.findByIdAndTenantId(id, "default"))
+                .thenReturn(Optional.of(KnowledgeBase.builder().id(id).build()));
+        when(recoveryRestoreJobRepository.findByTenantIdAndTargetKnowledgeBaseId("default", id))
+                .thenReturn(Optional.of(job));
+
+        assertThatThrownBy(() -> service.delete(id))
+                .isInstanceOf(RecoveryConflictException.class)
+                .hasMessageContaining("VALIDATING");
+        verify(repository, never()).deleteById(any());
     }
 }

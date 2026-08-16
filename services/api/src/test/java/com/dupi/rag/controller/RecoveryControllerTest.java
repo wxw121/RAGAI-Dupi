@@ -6,6 +6,7 @@ import com.dupi.rag.domain.enums.RecoveryArchiveStatus;
 import com.dupi.rag.domain.enums.RecoveryRestoreStatus;
 import com.dupi.rag.dto.recovery.CreateRestoreRequest;
 import com.dupi.rag.service.RecoveryArchiveService;
+import com.dupi.rag.service.RecoveryArchiveImportService;
 import com.dupi.rag.service.RecoveryJobExecutor;
 import com.dupi.rag.service.RecoveryRestoreService;
 import org.junit.jupiter.api.Test;
@@ -17,14 +18,16 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
 import java.io.ByteArrayOutputStream;
+import org.springframework.mock.web.MockMultipartFile;
 
 class RecoveryControllerTest {
     @Test
     void createArchiveReturnsAcceptedAndSchedulesCapture() {
         RecoveryArchiveService archives = mock(RecoveryArchiveService.class);
+        RecoveryArchiveImportService archiveImports = mock(RecoveryArchiveImportService.class);
         RecoveryRestoreService restores = mock(RecoveryRestoreService.class);
         RecoveryJobExecutor executor = mock(RecoveryJobExecutor.class);
-        RecoveryController controller = new RecoveryController(archives, restores, executor);
+        RecoveryController controller = new RecoveryController(archives, archiveImports, restores, executor);
         UUID kbId = UUID.randomUUID();
         RecoveryArchive archive = RecoveryArchive.builder().id(UUID.randomUUID())
                 .sourceKnowledgeBaseId(kbId).status(RecoveryArchiveStatus.PREPARING).build();
@@ -40,9 +43,10 @@ class RecoveryControllerTest {
     @Test
     void listAndRetryArchiveExposeStableProgress() {
         RecoveryArchiveService archives = mock(RecoveryArchiveService.class);
+        RecoveryArchiveImportService archiveImports = mock(RecoveryArchiveImportService.class);
         RecoveryRestoreService restores = mock(RecoveryRestoreService.class);
         RecoveryJobExecutor executor = mock(RecoveryJobExecutor.class);
-        RecoveryController controller = new RecoveryController(archives, restores, executor);
+        RecoveryController controller = new RecoveryController(archives, archiveImports, restores, executor);
         UUID kbId = UUID.randomUUID();
         RecoveryArchive archive = RecoveryArchive.builder().id(UUID.randomUUID())
                 .sourceKnowledgeBaseId(kbId).status(RecoveryArchiveStatus.FAILED)
@@ -60,9 +64,10 @@ class RecoveryControllerTest {
     @Test
     void createRestoreReturnsAcceptedAndSchedulesSameTarget() {
         RecoveryArchiveService archives = mock(RecoveryArchiveService.class);
+        RecoveryArchiveImportService archiveImports = mock(RecoveryArchiveImportService.class);
         RecoveryRestoreService restores = mock(RecoveryRestoreService.class);
         RecoveryJobExecutor executor = mock(RecoveryJobExecutor.class);
-        RecoveryController controller = new RecoveryController(archives, restores, executor);
+        RecoveryController controller = new RecoveryController(archives, archiveImports, restores, executor);
         UUID kbId = UUID.randomUUID();
         UUID archiveId = UUID.randomUUID();
         UUID targetId = UUID.randomUUID();
@@ -80,9 +85,10 @@ class RecoveryControllerTest {
     @Test
     void detailsDownloadDeleteRestoreRetryAndAbandonDelegate() throws Exception {
         RecoveryArchiveService archives = mock(RecoveryArchiveService.class);
+        RecoveryArchiveImportService archiveImports = mock(RecoveryArchiveImportService.class);
         RecoveryRestoreService restores = mock(RecoveryRestoreService.class);
         RecoveryJobExecutor executor = mock(RecoveryJobExecutor.class);
-        RecoveryController controller = new RecoveryController(archives, restores, executor);
+        RecoveryController controller = new RecoveryController(archives, archiveImports, restores, executor);
         UUID kbId = UUID.randomUUID();
         RecoveryArchive archive = RecoveryArchive.builder().id(UUID.randomUUID())
                 .sourceKnowledgeBaseId(kbId).status(RecoveryArchiveStatus.COMPLETED).build();
@@ -113,9 +119,10 @@ class RecoveryControllerTest {
     @Test
     void restoreOperationsRemainScopedToArchivesOwnedByKnowledgeBase() {
         RecoveryArchiveService archives = mock(RecoveryArchiveService.class);
+        RecoveryArchiveImportService archiveImports = mock(RecoveryArchiveImportService.class);
         RecoveryRestoreService restores = mock(RecoveryRestoreService.class);
         RecoveryJobExecutor executor = mock(RecoveryJobExecutor.class);
-        RecoveryController controller = new RecoveryController(archives, restores, executor);
+        RecoveryController controller = new RecoveryController(archives, archiveImports, restores, executor);
         UUID kbId = UUID.randomUUID();
         RecoveryArchive owned = RecoveryArchive.builder().id(UUID.randomUUID())
                 .sourceKnowledgeBaseId(kbId).status(RecoveryArchiveStatus.COMPLETED).build();
@@ -128,5 +135,28 @@ class RecoveryControllerTest {
 
         assertThat(controller.listRestores(kbId)).extracting(item -> item.id())
                 .containsExactly(ownedJob.getId());
+    }
+
+    @Test
+    void importArchiveReturnsCreatedVerifiedArchive() {
+        RecoveryArchiveService archives = mock(RecoveryArchiveService.class);
+        RecoveryArchiveImportService archiveImports = mock(RecoveryArchiveImportService.class);
+        RecoveryRestoreService restores = mock(RecoveryRestoreService.class);
+        RecoveryJobExecutor executor = mock(RecoveryJobExecutor.class);
+        RecoveryController controller = new RecoveryController(archives, archiveImports, restores, executor);
+        UUID kbId = UUID.randomUUID();
+        RecoveryArchive imported = RecoveryArchive.builder().id(UUID.randomUUID())
+                .sourceKnowledgeBaseId(kbId).status(RecoveryArchiveStatus.COMPLETED)
+                .itemCount(8L).totalBytes(2048L).build();
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "recovery.zip", "application/zip", new byte[] {1, 2, 3});
+        when(archiveImports.importZip(kbId, file, null)).thenReturn(imported);
+
+        var response = controller.importArchive(kbId, file);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(response.getBody().id()).isEqualTo(imported.getId());
+        verify(archiveImports).importZip(kbId, file, null);
+        verifyNoInteractions(executor);
     }
 }

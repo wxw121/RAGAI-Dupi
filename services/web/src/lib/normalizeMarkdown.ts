@@ -28,6 +28,40 @@ const SECTION_TITLES = [
   '启动服务',
 ]
 
+function protectMarkdownImages(text: string): { text: string; restore: (value: string) => string } {
+  const images: string[] = []
+  const protectedText = text.replace(/!\[[^\]\n]*]\((?:<[^>\n]+>|[^)\n]+)\)/g, (image) => {
+    const token = `DUPIIMAGEPLACEHOLDER${images.length}END`
+    images.push(image)
+    return token
+  })
+  return {
+    text: protectedText,
+    restore: (value: string) => images.reduce(
+      (current, image, index) => current.replace(`DUPIIMAGEPLACEHOLDER${index}END`, image),
+      value,
+    ),
+  }
+}
+
+/** Keep already-valid fenced code blocks out of the heuristic repair pipeline. */
+function protectValidCodeFences(text: string): { text: string; restore: (value: string) => string } {
+  const fences: string[] = []
+  const protectedText = text.replace(/^```[^\n]*\n[\s\S]*?^```[ \t]*$/gm, (fence) => {
+    const token = `DUPICODEFENCEPLACEHOLDER${fences.length}END`
+    fences.push(fence)
+    return token
+  })
+
+  return {
+    text: protectedText,
+    restore: (value: string) => fences.reduce(
+      (current, fence, index) => current.replace(`DUPICODEFENCEPLACEHOLDER${index}END`, fence),
+      value,
+    ),
+  }
+}
+
 /** 拆开粘连的 shell/sql 命令，保证代码块中的命令逐行可读。 */
 function unmangleCommands(text: string): string {
   return text
@@ -123,8 +157,8 @@ function stripArtifacts(text: string): string {
 function splitGluedSectionTitles(text: string): string {
   let s = text
   for (const title of SECTION_TITLES) {
-    const re = new RegExp(`(^|[^#\\n])(${title})(?=[A-Za-z\\u4e00-\\u9fff|])`, 'g')
-    s = s.replace(re, `$1\n\n## ${title}\n\n`)
+    const re = new RegExp(`^([ \\t]*)(${title})(?=[A-Za-z\\u4e00-\\u9fff])`, 'gm')
+    s = s.replace(re, `$1## ${title}\n\n`)
   }
   return s
 }
@@ -331,17 +365,17 @@ function fixShortHeadings(text: string): string {
   return text
     .replace(/^#{1,6}\s*([\u4e00-\u9fffA-Za-z]{1,10}[:：])\s*$/gm, '**$1**')
     .replace(/^# ([^\n]+)$/gm, '### $1')
-    .replace(/\*\*([\u4e00-\u9fffA-Za-z]{2,20})\*\*(?=[\u4e00-\u9fff\w])/g, '## $1\n\n')
+    .replace(/^\*\*([\u4e00-\u9fff][\u4e00-\u9fffA-Za-z]{1,19})\*\*(?=[\u4e00-\u9fff])/gm, '## $1\n\n')
 }
 
 /** 修复“-**标题：”这类列表加粗粘连，以及孤立的 ** 标记。 */
 function fixListBoldMash(text: string): string {
   return text
-    .replace(/([：:])-\*\*([^：\n]+)：/g, '$1\n\n- **$2**：')
-    .replace(/^-\s+\*\*([^：:\n]{2,20})[：:]\s*/gm, '- **$1**：')
+    .replace(/([：:])-\*\*([^*：\n]+)：/g, '$1\n\n- **$2**：')
+    .replace(/^-\s+\*\*([^*：:\n]{2,20})[：:]\s*/gm, '- **$1**：')
     .replace(/^-\*\*([^*\n]+)\*\*：/gm, '- **$1**：')
-    .replace(/^-\*\*([^：\n]+)：/gm, '- **$1**：')
-    .replace(/([^\n])-\*\*([^：\n]+)：/g, '$1\n\n- **$2**：')
+    .replace(/^-\*\*([^*：\n]+)：/gm, '- **$1**：')
+    .replace(/([^\n])-\*\*([^*：\n]+)：/g, '$1\n\n- **$2**：')
 }
 
 function fixOrphanBold(text: string): string {
@@ -357,6 +391,11 @@ function fixOrphanBold(text: string): string {
       return line
     })
     .join('\n')
+}
+
+/** CommonMark cannot close bold markers inside an ASCII word, so bold the complete word. */
+function fixIntrawordAcronymBold(text: string): string {
+  return text.replace(/\*\*([A-Z]{1,4})\*\*([a-z]+)/g, '**$1$2**')
 }
 
 /**
@@ -432,7 +471,7 @@ function fixInlineCode(text: string): string {
 function fixExcessiveBold(text: string): string {
   return text
     .replace(/\*\*([^*\n]{40,})\*\*/g, '$1')
-    .replace(/\*\*([^*]+[。！？][^*]*)\*\*/g, '$1')
+    .replace(/\*\*([^*\n]+[。！？][^*\n]*)\*\*/g, '$1')
 }
 
 /** 在非代码围栏区域逐行闭合或移除不成对反引号。 */
@@ -536,9 +575,12 @@ function fixLooseCommandLines(text: string): string {
 export function normalizeMarkdown(text: string): string {
   if (!text) return text
 
-  let s = text.replace(/\r\n/g, '\n')
+  const protectedImages = protectMarkdownImages(text.replace(/\r\n/g, '\n'))
+  const protectedCodeFences = protectValidCodeFences(protectedImages.text)
+  let s = protectedCodeFences.text
 
   s = stripArtifacts(s)
+  s = fixIntrawordAcronymBold(s)
   s = fixSplitPythonVenvCommands(s)
   s = fixMalformedVenvAnswerLines(s)
   s = splitGluedSectionTitles(s)
@@ -592,5 +634,5 @@ export function normalizeMarkdown(text: string): string {
   s = s.replace(/^#\s+([^#\n].*)$/gm, '## $1')
   s = s.replace(/\n{3,}/g, '\n\n')
 
-  return s.trim()
+  return protectedImages.restore(protectedCodeFences.restore(s.trim()))
 }

@@ -27,6 +27,9 @@ public class VectorCleanupTask {
     @Column(name = "target_id", nullable = false)
     private UUID targetId;
 
+    @Column(name = "knowledge_base_id")
+    private UUID knowledgeBaseId;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     @Builder.Default

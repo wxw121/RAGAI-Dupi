@@ -94,6 +94,11 @@ export interface BatchDocumentUploadResponse {
   results: BatchDocumentUploadResult[]
 }
 
+export interface MarkdownPackageUploadResponse {
+  documents: Document[]
+  assetCount: number
+}
+
 export interface IngestJob {
   id: string
   executionId?: string | null
@@ -130,6 +135,7 @@ export interface VectorCleanupTask {
     | 'LEGACY_KNOWLEDGE_BASE'
     | 'LEGACY_DOCUMENT'
   targetId: string
+  knowledgeBaseId: string | null
   status: 'PENDING' | 'COMPLETED' | 'FAILED'
   attemptCount: number
   lastError: string | null
@@ -311,6 +317,8 @@ export interface RagEvalCase {
   expectedFileName?: string
   expectedFileNames?: string[]
   mustContainAny?: string[]
+  sourceValid?: boolean
+  missingExpectedFileNames?: string[]
   createdAt?: string
   updatedAt?: string
 }
@@ -350,6 +358,55 @@ export interface RagEvalResult {
   embeddingModel: string | null
   embeddingDimension: number | null
   topK: number | null
+}
+
+export interface RagEvalGenerationDraft {
+  caseKey: string
+  query: string
+  expectedFileName: string
+  mustContainAny: string[]
+  category: RagEvalCaseCategory
+  minHits: number
+  topK: number
+}
+
+export interface RagEvalGenerationDocumentPreview {
+  documentId: string
+  fileName: string
+  existingSingleSourceCount: number
+  deficit: number
+  covered: boolean
+  proposals: RagEvalGenerationDraft[]
+  error?: string | null
+}
+
+export interface RagEvalGenerationPreview {
+  documentFingerprint: string
+  caseFingerprint: string
+  retainedCases: RagEvalCase[]
+  replacedCases: RagEvalCase[]
+  documents: RagEvalGenerationDocumentPreview[]
+  confirmable: boolean
+}
+
+export interface RagEvalGenerationConfirmRequest {
+  documentFingerprint: string
+  caseFingerprint: string
+  replaceCaseIds: string[]
+  generatedCases: RagEvalGenerationDraft[]
+}
+
+export interface RagEvalAddGenerationPreviewRequest {
+  documentIds: string[]
+  casesPerDocument: number
+}
+
+export interface RagEvalAddGenerationConfirmRequest {
+  documentFingerprint: string
+  caseFingerprint: string
+  documentIds: string[]
+  casesPerDocument: number
+  generatedCases: RagEvalGenerationDraft[]
 }
 
 export interface RagEvalMetrics {

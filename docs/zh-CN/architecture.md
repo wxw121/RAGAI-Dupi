@@ -148,7 +148,7 @@ Worker 的 `embed_batch` 会按 `EMBEDDING_BATCH_SIZE`（默认 `32`）拆分 Em
 
 ```
 
-`/retrieve` 响应包含 `diagnostics`（检索模式、TopK、命中数、embedding 模型/维度、fallback 原因）。Chat HTTP 与 SSE 失败统一返回 `ApiErrorResponse`（`error`、`message`、`stage`、`suggestion`、`requestId`）；同步错误和流式入口都区分 retrieval/llm 阶段，前端按 retrieval/llm/auth/unknown 展示可执行建议并兼容旧纯文本错误事件。V1.2 的 `RAG 评估` 使用 PostgreSQL `rag_eval_cases`、`rag_eval_runs`、`rag_eval_run_results` 持久化用户用例和最近 10 次运行历史，空库自动写入内置用例，每库最多 100 条；知识库级悲观锁避免初始化与创建并发冲突。评估运行需要 `MAINTENANCE + KB_READ`，状态为 `RUNNING/COMPLETED/FAILED`，可选择 Rerank，并保存命中、文件、token、检索模式、embedding、失败原因及运行失败信息；脚本侧评估仍保留为独立 CI/运维入口。
+`/retrieve` 响应包含 `diagnostics`（检索模式、TopK、命中数、embedding 模型/维度、fallback 原因）。Chat HTTP 与 SSE 失败统一返回 `ApiErrorResponse`（`error`、`message`、`stage`、`suggestion`、`requestId`）；同步错误和流式入口都区分 retrieval/llm 阶段，前端按 retrieval/llm/auth/unknown 展示可执行建议并兼容旧纯文本错误事件。`RAG 评估` 使用 PostgreSQL `rag_eval_cases`、`rag_eval_runs`、`rag_eval_run_results` 持久化用户用例和最近 10 次运行历史；空用例集保持为空，用户需按知识库真实文档显式创建用例，每库最多 100 条。评估运行需要 `MAINTENANCE + KB_READ`，状态为 `RUNNING/COMPLETED/FAILED`，可选择 Rerank，并保存命中、文件、token、检索模式、embedding、失败原因及运行失败信息；脚本侧评估仍保留为独立 CI/运维入口。
 
 ### 混合检索与 Rerank
 

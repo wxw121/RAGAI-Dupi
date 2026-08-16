@@ -5,7 +5,7 @@ import { RetrievalProfilePanel } from './RetrievalProfilePanel'
 
 const api = vi.hoisted(() => ({
   listRetrievalProfiles: vi.fn(), createRetrievalProfile: vi.fn(),
-  activateRetrievalProfile: vi.fn(), rollbackRetrievalProfile: vi.fn(),
+  activateRetrievalProfile: vi.fn(), rollbackRetrievalProfile: vi.fn(), restoreDefaultRetrievalProfile: vi.fn(),
 }))
 vi.mock('@/api/knowledgeBase', () => api)
 vi.mock('@/components/Toast', () => ({ useToast: () => ({ showError: vi.fn(), showSuccess: vi.fn() }) }))
@@ -23,6 +23,15 @@ describe('RetrievalProfilePanel', () => {
     await act(async () => { root.render(<RetrievalProfilePanel kbId="kb-1" />); await Promise.resolve() })
     expect(container.textContent).toContain('v2 · current')
     expect(container.querySelector('[aria-label="回滚到 v1"]')).not.toBeNull()
+    expect(container.textContent).toContain('恢复默认检索方案')
+    await act(async () => {
+      (Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('恢复默认检索方案')) as HTMLButtonElement).click()
+    })
+    await act(async () => {
+      (document.body.querySelector('[aria-label="确认恢复默认检索方案"]') as HTMLButtonElement).click()
+      await Promise.resolve()
+    })
+    expect(api.restoreDefaultRetrievalProfile).toHaveBeenCalledWith('kb-1')
     act(() => root.unmount())
     container.remove()
   })

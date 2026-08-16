@@ -5,7 +5,7 @@ import { RecoveryPanel } from './RecoveryPanel'
 
 const api = vi.hoisted(() => ({
   abandonRestore: vi.fn(), createArchive: vi.fn(), createRestore: vi.fn(), deleteArchive: vi.fn(),
-  getArchiveDownloadUrl: vi.fn(), listArchives: vi.fn(), listRestores: vi.fn(),
+  getArchiveDownloadUrl: vi.fn(), importArchive: vi.fn(), listArchives: vi.fn(), listRestores: vi.fn(),
   retryArchive: vi.fn(), retryRestore: vi.fn(),
 }))
 vi.mock('@/api/recovery', () => api)
@@ -37,6 +37,7 @@ describe('RecoveryPanel', () => {
     api.getArchiveDownloadUrl.mockReturnValue('/download/archive-1')
     api.createArchive.mockResolvedValue({ ...completedArchive, id: 'archive-2', status: 'PREPARING' })
     api.createRestore.mockResolvedValue({ ...failedRestore, id: 'restore-2', status: 'VALIDATING' })
+    api.importArchive.mockResolvedValue({ ...completedArchive, id: 'archive-imported' })
     api.retryRestore.mockResolvedValue({ ...failedRestore, status: 'VALIDATING' })
     api.abandonRestore.mockResolvedValue(undefined)
   })
@@ -74,6 +75,33 @@ describe('RecoveryPanel', () => {
     await act(async () => { (container.querySelector('button[aria-label="Abandon restore"]') as HTMLButtonElement).click() })
     await act(async () => { (document.body.querySelector('button[aria-label="Confirm abandon"]') as HTMLButtonElement).click(); await Promise.resolve() })
     expect(api.abandonRestore).toHaveBeenCalledWith('kb-1', 'restore-1')
+    act(() => root.unmount())
+  })
+
+  it('allows an in-progress restore to be abandoned', async () => {
+    api.listRestores.mockResolvedValue([{ ...failedRestore, status: 'VALIDATING' }])
+    const { container, root } = await renderPanel()
+
+    expect(container.querySelector('button[aria-label="Retry restore"]')).toBeNull()
+    expect(container.querySelector('button[aria-label="Abandon restore"]')).not.toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('imports a Recovery ZIP and refreshes the archive list', async () => {
+    const { container, root } = await renderPanel()
+    const input = container.querySelector('input[aria-label="Recovery ZIP file"]') as HTMLInputElement
+    const file = new File(['zip-content'], 'recovery.zip', { type: 'application/zip' })
+    const listCallsBeforeImport = api.listArchives.mock.calls.length
+
+    await act(async () => {
+      Object.defineProperty(input, 'files', { configurable: true, value: [file] })
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(api.importArchive).toHaveBeenCalledWith('kb-1', file)
+    expect(api.listArchives.mock.calls.length).toBeGreaterThan(listCallsBeforeImport)
     act(() => root.unmount())
   })
 })

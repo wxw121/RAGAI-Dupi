@@ -22,6 +22,7 @@ interface UploadZoneProps {
   disabled?: boolean
   guardrails?: OpsGuardrails | null
   quota?: UploadQuota | null
+  onPackageUpload?: (file: File) => Promise<void>
 }
 
 interface UploadItem {
@@ -31,7 +32,7 @@ interface UploadItem {
   errorMessage?: string
 }
 
-export function UploadZone({ onUpload, disabled, guardrails, quota }: UploadZoneProps) {
+export function UploadZone({ onUpload, disabled, guardrails, quota, onPackageUpload }: UploadZoneProps) {
   const [uploading, setUploading] = useState(false)
   const [controller, setController] = useState<AbortController | null>(null)
   const [items, setItems] = useState<UploadItem[]>([])
@@ -40,6 +41,7 @@ export function UploadZone({ onUpload, disabled, guardrails, quota }: UploadZone
     total: number
     fileName: string
   } | null>(null)
+  const [packageUploading, setPackageUploading] = useState(false)
 
   const onDrop = useCallback(
     async (files: File[], retryBatchId?: string) => {
@@ -125,6 +127,32 @@ export function UploadZone({ onUpload, disabled, guardrails, quota }: UploadZone
       <p className="mt-1 text-xs text-muted-foreground">
         支持 PDF、DOCX、TXT、MD、Excel，可多选或拖拽多个文件
       </p>
+      {onPackageUpload && (
+        <label
+          className="mt-3 inline-flex cursor-pointer items-center rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium hover:bg-muted"
+          onClick={(event) => event.stopPropagation()}
+        >
+          {packageUploading ? '资源包上传中…' : '上传 Markdown ZIP 资源包'}
+          <input
+            type="file"
+            accept=".zip,application/zip"
+            aria-label="上传 Markdown ZIP 资源包"
+            className="hidden"
+            disabled={disabled || uploading || packageUploading}
+            onChange={async (event) => {
+              const file = event.target.files?.[0]
+              event.target.value = ''
+              if (!file) return
+              setPackageUploading(true)
+              try {
+                await onPackageUpload(file)
+              } finally {
+                setPackageUploading(false)
+              }
+            }}
+          />
+        </label>
+      )}
       {guardrails && (
         <p className="mt-2 text-xs text-muted-foreground">
           rate {guardrails.uploadRateLimit.requests}/{guardrails.uploadRateLimit.windowSeconds}s · queue{' '}

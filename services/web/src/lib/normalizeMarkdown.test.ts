@@ -33,6 +33,42 @@ npm run db:migrate
 npminstallnodesrc/index.js`
 
 describe('normalizeMarkdown', () => {
+  it('preserves relative Markdown image paths containing digits and hyphens', () => {
+    const image = '![异步编程四大核心](../image/python-asyncio/06-bento-grid-diagram-06.png)'
+
+    expect(normalizeMarkdown(image)).toBe(image)
+  })
+
+  it('extends intraword acronym bold markers to CommonMark-safe word boundaries', () => {
+    const input = [
+      '## REST 的核心思想',
+      '',
+      '**REST** = **RE**presentational **S**tate **T**ransfer（表述性状态转移）[4]',
+    ].join('\n')
+
+    expect(normalizeMarkdown(input)).toBe([
+      '## REST 的核心思想',
+      '',
+      '**REST** = **REpresentational** **State** **Transfer**（表述性状态转移）[4]',
+    ].join('\n'))
+  })
+
+  it('keeps later bold terms balanced after normalizing acronym expansions', () => {
+    const input = [
+      '**REST** = **RE**presentational **S**tate **T**ransfer（表述性状态转移）[4]',
+      '',
+      '核心思想：**把服务器上的一切都看作「资源」。用 URL 定位资源，用 HTTP 方法操作资源。每个资源有唯一地址，你通过这个地址访问和修改它的「表述」（representation）**[4]。',
+      '',
+      '- **representation**（表述）：资源当前呈现给客户端的样子。',
+    ].join('\n')
+
+    const out = normalizeMarkdown(input)
+
+    expect(out).toContain('**Transfer**（表述性状态转移）[4]')
+    expect(out).toContain('- **representation**（表述）：')
+    expect((out.match(/\*\*/g) || []).length % 2).toBe(0)
+  })
+
   it('repairs malformed architecture markdown and table artifacts', () => {
     const arch = normalizeMarkdown(architectureInput)
 
@@ -85,6 +121,15 @@ describe('normalizeMarkdown', () => {
     expect(out).not.toContain('**这是一个很长')
     expect(out).toContain('`inline`')
     expect(out).toContain('空')
+  })
+
+  it('does not turn section-title words inside a sentence into headings', () => {
+    const input = '2. **可读性**：URL 像目录结构一样直观，每段都是“东西”，易于理解和维护 [5]。'
+
+    const out = normalizeMarkdown(input)
+
+    expect(out).toContain('URL 像目录结构一样直观')
+    expect(out).not.toContain('## 目录结构')
   })
 
   it('repairs prose accidentally embedded in code fences and malformed emphasis', () => {
@@ -287,5 +332,35 @@ describe('normalizeMarkdown', () => {
     expect(out).not.toContain('执行创建命令后，需要激活该环境。完整的两步操作如下[2]：\n\n```bash\npython -m venv .venv\n```\n\nsource .venv/bin/activate')
     expect(out).not.toContain('1. 12')
     expect(out.match(/```/g)).toHaveLength(6)
+  })
+
+  it('preserves HTTP methods inside a valid text code fence', () => {
+    const input = [
+      '## 正确做法',
+      '',
+      '保持 URL 只含名词，动作交给 HTTP 方法。例如：',
+      '',
+      '```text',
+      'GET    /users          → 获取用户列表',
+      'POST   /users          → 创建用户',
+      'GET    /users/123      → 获取单个用户',
+      'PUT    /users/123      → 更新用户',
+      'DELETE /users/123      → 删除用户',
+      'GET    /users?name=xx  → 按条件查询用户',
+      '```',
+    ].join('\n')
+
+    const out = normalizeMarkdown(input)
+
+    expect(out).toContain([
+      '```text',
+      'GET    /users          → 获取用户列表',
+      'POST   /users          → 创建用户',
+      'GET    /users/123      → 获取单个用户',
+      'PUT    /users/123      → 更新用户',
+      'DELETE /users/123      → 删除用户',
+      'GET    /users?name=xx  → 按条件查询用户',
+      '```',
+    ].join('\n'))
   })
 })

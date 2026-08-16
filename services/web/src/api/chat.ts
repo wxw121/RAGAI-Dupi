@@ -1,4 +1,4 @@
-import { authHeaders } from './client'
+import { apiGet, authHeaders } from './client'
 import type { Citation, RetrievalDiagnostics, StructuredChatError } from '@/types'
 
 export interface ChatStreamCallbacks {
@@ -7,6 +7,10 @@ export interface ChatStreamCallbacks {
   onDone?: (sessionId: string) => void
   onError?: (message: string, error?: StructuredChatError) => void
   onAbort?: () => void
+}
+
+export function getCitationContent(kbId: string, chunkId: string): Promise<{ content: string }> {
+  return apiGet<{ content: string }>(`/api/v1/knowledge-bases/${kbId}/citations/${chunkId}`)
 }
 
 function fallbackErrorMessage(message: string | undefined | null, status?: number): string {

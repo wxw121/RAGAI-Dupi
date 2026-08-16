@@ -19,18 +19,26 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 @Component
 @RequiredArgsConstructor
 public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
     private static final int MAX_RECORD_BYTES = 256 * 1024 * 1024;
+    private static final int MAX_KNOWLEDGE_BASE_NAME_LENGTH = 255;
+    private static final DateTimeFormatter RESTORE_NAME_TIME = DateTimeFormatter
+            .ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
+            .withZone(ZoneOffset.UTC);
     private final RecoveryArchiveRepository archives;
     private final RecoveryArchiveItemRepository archiveItems;
     private final RecoveryRestoreItemRepository restoreItems;
     private final RecoveryRestoreJobRepository jobs;
     private final KnowledgeBaseRepository knowledgeBases;
     private final DocumentRepository documents;
+    private final DocumentAssetRepository documentAssets;
     private final ChunkRepository chunks;
     private final RagEvalCaseRepository evalCases;
     private final RagQualityPolicyRepository qualityPolicies;
@@ -57,6 +65,10 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
 
         KnowledgeBase sourceKb = readJson(archive, required(itemMap, "record:knowledge-base"), KnowledgeBase.class);
         List<Document> sourceDocuments = readNdjson(archive, required(itemMap, "record:documents"), Document.class);
+        RecoveryArchiveItem assetRecord = itemMap.get("record:document-assets");
+        List<DocumentAsset> sourceAssets = assetRecord == null
+                ? new ArrayList<>()
+                : readNdjson(archive, assetRecord, DocumentAsset.class);
         List<Chunk> sourceChunks = readNdjson(archive, required(itemMap, "record:chunks"), Chunk.class);
         List<RagEvalCase> sourceCases = readNdjson(archive, required(itemMap, "record:evaluation-cases"), RagEvalCase.class);
         RagQualityPolicy sourcePolicy = readJson(archive, required(itemMap, "record:quality-policy"), RagQualityPolicy.class);
@@ -65,12 +77,12 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
 
         job.setStatus(RecoveryRestoreStatus.RESTORING_OBJECTS);
         jobs.save(job);
-        restoreObjects(job, archive, itemMap, sourceDocuments);
+        restoreObjects(job, archive, itemMap, sourceDocuments, sourceAssets);
 
         job.setStatus(RecoveryRestoreStatus.RESTORING_RECORDS);
         jobs.save(job);
         restoreRecords(job, target, sourceKb, sourceDocuments, sourceChunks, sourceCases,
-                sourcePolicy, sourceProfiles);
+                sourcePolicy, sourceProfiles, sourceAssets);
 
         job.setStatus(RecoveryRestoreStatus.RESTORING_VECTORS);
         jobs.save(job);
@@ -79,7 +91,7 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
 
         job.setStatus(RecoveryRestoreStatus.VERIFYING);
         jobs.save(job);
-        verify(job, sourceDocuments.size(), sourceChunks.size(), itemMap, manifest);
+        verify(job, sourceDocuments.size(), sourceChunks.size(), sourceAssets.size(), itemMap, manifest);
         target.setLifecycleStatus(KnowledgeBaseLifecycleStatus.READY);
         knowledgeBases.save(target);
     }
@@ -89,8 +101,10 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
         UUID targetId = job.getTargetKnowledgeBaseId();
         if (targetId == null) return;
         List<Document> targetDocuments = documents.findByKbIdOrderByCreatedAtDesc(targetId);
+        List<DocumentAsset> targetAssets = documentAssets.findByKbId(targetId);
         targetDocuments.forEach(document -> uploadQuotaService.releaseCommitted(
                 document.getQuotaReservationId(), "Recovery restore abandoned"));
+        targetAssets.forEach(asset -> documentStorage.delete(asset.getObjectKey()));
         targetDocuments.forEach(document -> documentStorage.delete(document.getObjectKey()));
         List<RetrievalProfile> targetProfiles = profiles.findByKbIdOrderByVersionDesc(targetId);
         onlineVectors.deleteByKbId(targetId);
@@ -100,6 +114,7 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
         evalCases.deleteAll(evalCases.findByKbIdOrderByCreatedAtAsc(targetId));
         qualityPolicies.findByKbId(targetId).ifPresent(qualityPolicies::delete);
         profiles.deleteAll(targetProfiles);
+        documentAssets.deleteAll(targetAssets);
         documents.deleteAll(targetDocuments);
         knowledgeBases.deleteById(targetId);
     }
@@ -110,13 +125,27 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
     }
 
     private void restoreObjects(RecoveryRestoreJob job, RecoveryArchive archive,
-                                Map<String, RecoveryArchiveItem> itemMap, List<Document> sourceDocuments) {
+                                Map<String, RecoveryArchiveItem> itemMap, List<Document> sourceDocuments,
+                                List<DocumentAsset> sourceAssets) {
         for (Document source : sourceDocuments) {
             RecoveryArchiveItem item = required(itemMap, "object:" + source.getId());
             UUID targetDocumentId = remap(job.getId(), source.getId());
             String objectKey = job.getTenantId() + "/" + job.getTargetKnowledgeBaseId()
                     + "/" + targetDocumentId + "/" + safeFilename(source.getFileName());
             runItem(job, item, targetDocumentId.toString(), () -> {
+                try (InputStream input = storage.open(archive.getBucket(), item.getObjectKey())) {
+                    documentStorage.upload(objectKey, input, item.getByteSize(), source.getMimeType());
+                }
+                verifyRestoredObject(objectKey, item);
+            });
+        }
+        for (DocumentAsset source : sourceAssets) {
+            RecoveryArchiveItem item = required(itemMap, "asset:" + source.getId());
+            UUID targetAssetId = remap(job.getId(), source.getId());
+            UUID targetDocumentId = remap(job.getId(), source.getDocId());
+            String objectKey = assetObjectKey(job.getTargetKnowledgeBaseId(), targetDocumentId,
+                    targetAssetId, source.getFileName());
+            runItem(job, item, targetAssetId.toString(), () -> {
                 try (InputStream input = storage.open(archive.getBucket(), item.getObjectKey())) {
                     documentStorage.upload(objectKey, input, item.getByteSize(), source.getMimeType());
                 }
@@ -141,8 +170,8 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
     private void restoreRecords(RecoveryRestoreJob job, KnowledgeBase target, KnowledgeBase sourceKb,
                                 List<Document> sourceDocuments, List<Chunk> sourceChunks,
                                 List<RagEvalCase> sourceCases, RagQualityPolicy sourcePolicy,
-                                List<RetrievalProfile> sourceProfiles) {
-        target.setName(sourceKb.getName() + " (restored)");
+                                List<RetrievalProfile> sourceProfiles, List<DocumentAsset> sourceAssets) {
+        target.setName(restoredName(sourceKb.getName(), job));
         target.setDescription(sourceKb.getDescription());
         target.setChunkSize(sourceKb.getChunkSize());
         target.setChunkOverlap(sourceKb.getChunkOverlap());
@@ -165,6 +194,21 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
             source.setQuotaReservationId(null);
         }
         documents.saveAll(sourceDocuments);
+
+        for (DocumentAsset source : sourceAssets) {
+            UUID sourceAssetId = source.getId();
+            UUID sourceDocumentId = source.getDocId();
+            UUID targetAssetId = remap(job.getId(), sourceAssetId);
+            UUID targetDocumentId = remap(job.getId(), sourceDocumentId);
+            source.setId(targetAssetId);
+            source.setKbId(job.getTargetKnowledgeBaseId());
+            source.setDocId(targetDocumentId);
+            source.setObjectKey(assetObjectKey(job.getTargetKnowledgeBaseId(), targetDocumentId,
+                    targetAssetId, source.getFileName()));
+        }
+        if (!sourceAssets.isEmpty()) {
+            documentAssets.saveAll(sourceAssets);
+        }
         for (Document restored : sourceDocuments) {
             UploadQuotaReservation reservation = uploadQuotaService.createCommittedReservation(
                     job.getTenantId(),
@@ -267,10 +311,11 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
         }
     }
 
-    private void verify(RecoveryRestoreJob job, int documentCount, int chunkCount,
+    private void verify(RecoveryRestoreJob job, int documentCount, int chunkCount, int assetCount,
                         Map<String, RecoveryArchiveItem> itemMap, RecoveryManifest manifest) {
         if (documents.findByKbIdOrderByCreatedAtDesc(job.getTargetKnowledgeBaseId()).size() != documentCount
-                || chunks.countByKbId(job.getTargetKnowledgeBaseId()) != chunkCount) {
+                || chunks.countByKbId(job.getTargetKnowledgeBaseId()) != chunkCount
+                || documentAssets.findByKbId(job.getTargetKnowledgeBaseId()).size() != assetCount) {
             throw new IllegalStateException("Restored relational counts do not match archive");
         }
         List<VectorSnapshotRow> expectedDense = remapRows(job, readNdjson(
@@ -411,6 +456,26 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
     private String safeFilename(String filename) {
         String value = filename == null ? "document" : filename.replaceAll("[^A-Za-z0-9._-]", "_");
         return value.isBlank() ? "document" : value;
+    }
+
+    private String assetObjectKey(UUID knowledgeBaseId, UUID documentId, UUID assetId, String filename) {
+        return knowledgeBaseId + "/" + documentId + "/assets/" + assetId + "/" + safeFilename(filename);
+    }
+
+    private String restoredName(String sourceName, RecoveryRestoreJob job) {
+        Instant createdAt = job.getCreatedAt() == null ? Instant.now() : job.getCreatedAt();
+        return restoredName(sourceName, job.getArchiveId(), createdAt);
+    }
+
+    static String restoredName(String sourceName, UUID archiveId, Instant createdAt) {
+        String suffix = " (restored · Archive " + archiveId.toString().substring(0, 8) + " · "
+                + RESTORE_NAME_TIME.format(createdAt) + " UTC)";
+        String base = sourceName == null || sourceName.isBlank() ? "Knowledge base" : sourceName;
+        int maximumBaseLength = Math.max(0, MAX_KNOWLEDGE_BASE_NAME_LENGTH - suffix.length());
+        if (base.length() > maximumBaseLength) {
+            base = base.substring(0, maximumBaseLength);
+        }
+        return base + suffix;
     }
 
     @FunctionalInterface

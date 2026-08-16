@@ -5,11 +5,13 @@ import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.*;
 import com.dupi.rag.domain.enums.RecoveryArchiveStatus;
 import com.dupi.rag.domain.enums.RecoveryItemStatus;
+import com.dupi.rag.domain.enums.RecoveryRestoreStatus;
 import com.dupi.rag.dto.recovery.RecoveryManifest;
 import com.dupi.rag.dto.recovery.RecoveryManifestHeader;
 import com.dupi.rag.dto.recovery.RecoveryManifestItem;
 import com.dupi.rag.dto.recovery.VectorSnapshotPage;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.exception.RecoveryConflictException;
 import com.dupi.rag.repository.*;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -32,8 +34,10 @@ import java.io.OutputStream;
 public class RecoveryArchiveService {
     private final RecoveryArchiveRepository archives;
     private final RecoveryArchiveItemRepository items;
+    private final RecoveryRestoreJobRepository restoreJobs;
     private final KnowledgeBaseService knowledgeBases;
     private final DocumentRepository documents;
+    private final DocumentAssetRepository documentAssets;
     private final ChunkRepository chunks;
     private final RagEvalCaseRepository evalCases;
     private final RagQualityPolicyRepository qualityPolicies;
@@ -75,6 +79,7 @@ public class RecoveryArchiveService {
             archive = archive(archiveId);
             KnowledgeBase kb = knowledgeBases.findSystemOrThrow(archive.getSourceKnowledgeBaseId());
             List<Document> documentRows = sorted(documents.findByKbIdOrderByCreatedAtDesc(kb.getId()));
+            List<DocumentAsset> assetRows = sorted(documentAssets.findByKbId(kb.getId()));
             List<RetrievalProfile> profileRows = sorted(profiles.findByKbIdOrderByVersionDesc(kb.getId()));
 
             List<RecoveryManifestItem> evidence = new ArrayList<>();
@@ -82,6 +87,8 @@ public class RecoveryArchiveService {
                     "records/knowledge-base.json", json(kb)));
             evidence.add(writeBytes(archive, "record:documents", "RECORD",
                     "records/documents.ndjson", ndjson(documentRows)));
+            evidence.add(writeBytes(archive, "record:document-assets", "RECORD",
+                    "records/document-assets.ndjson", ndjson(assetRows)));
             evidence.add(writeBytes(archive, "record:chunks", "RECORD",
                     "records/chunks.ndjson", ndjson(sorted(chunks.findByKbIdOrderByChunkIndexAsc(kb.getId())))));
             evidence.add(writeBytes(archive, "record:evaluation-cases", "RECORD",
@@ -96,6 +103,13 @@ public class RecoveryArchiveService {
                     String relativeKey = "objects/" + document.getId() + "/" + safeFilename(document.getFileName());
                     evidence.add(write(archive, "object:" + document.getId(), "OBJECT",
                             document.getId().toString(), relativeKey, input));
+                }
+            }
+            for (DocumentAsset asset : assetRows) {
+                try (InputStream input = documentStorage.download(asset.getObjectKey())) {
+                    String relativeKey = "assets/" + asset.getId() + "/" + safeFilename(asset.getFileName());
+                    evidence.add(write(archive, "asset:" + asset.getId(), "OBJECT",
+                            asset.getId().toString(), relativeKey, input));
                 }
             }
 
@@ -196,6 +210,21 @@ public class RecoveryArchiveService {
         if (archive.getStatus() != RecoveryArchiveStatus.COMPLETED
                 && archive.getStatus() != RecoveryArchiveStatus.FAILED) {
             throw new IllegalArgumentException("Active recovery archives cannot be deleted");
+        }
+        List<RecoveryRestoreJob> relatedRestores = restoreJobs
+                .findByTenantIdAndArchiveIdOrderByCreatedAtDesc(archive.getTenantId(), archiveId);
+        List<RecoveryRestoreJob> unfinishedRestores = relatedRestores.stream()
+                .filter(job -> job.getStatus() != RecoveryRestoreStatus.COMPLETED)
+                .toList();
+        if (!unfinishedRestores.isEmpty()) {
+            throw new RecoveryConflictException(
+                    "Recovery archive cannot be deleted while " + unfinishedRestores.size()
+                            + " restore job(s) are unfinished.",
+                    "Abandon failed or active restore jobs first, then retry deleting the archive.");
+        }
+        if (!relatedRestores.isEmpty()) {
+            restoreJobs.deleteAll(relatedRestores);
+            restoreJobs.flush();
         }
         recoveryStorage.deleteArchive(archive.getTenantId(), archive.getId());
         archives.delete(archive);
@@ -363,6 +392,7 @@ public class RecoveryArchiveService {
 
     private UUID entityId(Object value) {
         if (value instanceof Document row) return row.getId();
+        if (value instanceof DocumentAsset row) return row.getId();
         if (value instanceof Chunk row) return row.getId();
         if (value instanceof RagEvalCase row) return row.getId();
         if (value instanceof RetrievalProfile row) return row.getId();

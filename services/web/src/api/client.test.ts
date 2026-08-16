@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  AUTH_EXPIRED_EVENT,
   apiDelete,
   apiGet,
   apiPatch,
@@ -148,6 +149,25 @@ describe('api client', () => {
       status: 500,
       message: 'Server Error',
     })
+  })
+
+  it('clears local auth state and announces expired sessions on 401 responses', async () => {
+    setAuthToken('stale-token')
+    const expired = vi.fn()
+    window.addEventListener(AUTH_EXPIRED_EVENT, expired)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(
+        { error: 'unauthorized', message: 'Unauthorized API request' },
+        { status: 401, statusText: 'Unauthorized' },
+      )),
+    )
+
+    await expect(apiGet('/protected')).rejects.toMatchObject({ status: 401 })
+
+    expect(getAuthToken()).toBeNull()
+    expect(expired).toHaveBeenCalledOnce()
+    window.removeEventListener(AUTH_EXPIRED_EVENT, expired)
   })
 
   it('covers POST, upload and generic fallback error branches', async () => {

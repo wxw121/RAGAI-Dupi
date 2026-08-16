@@ -12,7 +12,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -23,19 +23,15 @@ class RagEvalCaseCoordinatorTest {
     @Mock RagEvalCaseRepository caseRepository;
 
     @Test
-    void loadOrSeedLocksKnowledgeBaseAndCreatesBuiltInsOnlyWhenEmpty() {
+    void loadCasesKeepsAnEmptyEvaluationSetEmpty() {
         UUID kbId = UUID.randomUUID();
         when(caseRepository.findByKbIdOrderByCreatedAtAsc(kbId)).thenReturn(List.of());
-        when(caseRepository.saveAll(any())).thenAnswer(invocation -> invocation.getArgument(0));
 
-        List<RagEvalCase> cases = coordinator().loadOrSeed(kbId);
+        List<RagEvalCase> cases = coordinator().loadCases(kbId);
 
-        verify(knowledgeBaseService).findForUpdateOrThrow(kbId);
-        assertThat(cases).extracting(RagEvalCase::getCaseKey).containsExactly(
-                "formats-supported",
-                "core-capabilities",
-                "chunk-strategies"
-        );
+        verify(knowledgeBaseService).findOrThrow(kbId);
+        assertThat(cases).isEmpty();
+        verify(caseRepository, never()).saveAll(org.mockito.ArgumentMatchers.any());
     }
 
     @Test

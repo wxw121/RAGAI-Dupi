@@ -7,10 +7,10 @@ const api = vi.hoisted(() => ({
   getKnowledgeBase: vi.fn(),
   listIngestJobs: vi.fn(),
   listOpsMetadata: vi.fn(),
-  listVectorCleanupTasks: vi.fn(),
+  listKnowledgeBaseVectorCleanupTasks: vi.fn(),
   reindexKnowledgeBase: vi.fn(),
   retryIngestJob: vi.fn(),
-  retryVectorCleanupTask: vi.fn(),
+  retryKnowledgeBaseVectorCleanupTask: vi.fn(),
   updateKnowledgeBaseRetrievalProfile: vi.fn(),
 }))
 
@@ -22,10 +22,15 @@ const documentApi = vi.hoisted(() => ({
   uploadDocuments: vi.fn(),
 }))
 
+const chatSessionApi = vi.hoisted(() => ({
+  listChatSessions: vi.fn(),
+}))
+
 const toast = vi.hoisted(() => ({ showError: vi.fn(), showSuccess: vi.fn() }))
 
 vi.mock('@/api/knowledgeBase', () => api)
 vi.mock('@/api/documents', () => documentApi)
+vi.mock('@/api/chatSessions', () => chatSessionApi)
 vi.mock('@/components/AppLayout', () => ({ AppLayout: ({ children }: { children: React.ReactNode }) => children }))
 vi.mock('@/components/ChatPanel', () => ({ ChatPanel: () => null }))
 vi.mock('@/components/DocTable', () => ({ DocTable: () => null }))
@@ -70,8 +75,9 @@ describe('KbDetailPage', () => {
     api.getKnowledgeBase.mockResolvedValue(knowledgeBase)
     api.listIngestJobs.mockResolvedValue([])
     api.listOpsMetadata.mockResolvedValue({ guardrails: null })
-    api.listVectorCleanupTasks.mockResolvedValue([])
+    api.listKnowledgeBaseVectorCleanupTasks.mockResolvedValue([])
     documentApi.listDocuments.mockResolvedValue([])
+    chatSessionApi.listChatSessions.mockResolvedValue([])
     api.updateKnowledgeBaseRetrievalProfile.mockResolvedValue({
       ...knowledgeBase,
       retrievalProfile: 'PARENT_CHILD',
@@ -109,9 +115,46 @@ describe('KbDetailPage', () => {
     })
 
     expect(api.updateKnowledgeBaseRetrievalProfile).toHaveBeenCalledWith('kb-1', 'PARENT_CHILD')
+    expect(api.listKnowledgeBaseVectorCleanupTasks).toHaveBeenCalledWith('kb-1')
     expect(profileSelect?.value).toBe('PARENT_CHILD')
     expect(api.listIngestJobs).toHaveBeenCalledTimes(2)
     expect(documentApi.listDocuments).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows the number of chat sessions in the chat tab badge', async () => {
+    api.getKnowledgeBase.mockResolvedValue({
+      id: 'kb-1',
+      name: 'Session count KB',
+      retrievalProfile: 'CLASSIC',
+      embeddingConfigCurrent: true,
+    })
+    api.listIngestJobs.mockResolvedValue([])
+    api.listOpsMetadata.mockResolvedValue({ guardrails: null })
+    api.listKnowledgeBaseVectorCleanupTasks.mockResolvedValue([])
+    documentApi.listDocuments.mockResolvedValue(Array.from({ length: 5 }, (_, index) => ({
+      id: `doc-${index}`,
+      status: 'COMPLETED',
+    })))
+    chatSessionApi.listChatSessions.mockResolvedValue([
+      { id: 'session-1' },
+      { id: 'session-2' },
+      { id: 'session-3' },
+    ])
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(<KbDetailPage />)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    const tabBadges = Array.from(container.querySelectorAll('button span.rounded-full'))
+      .map((badge) => badge.textContent?.trim())
+    expect(tabBadges).toEqual(['5', '3'])
+    expect(chatSessionApi.listChatSessions).toHaveBeenCalledWith('kb-1')
   })
 })
 

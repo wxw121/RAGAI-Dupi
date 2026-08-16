@@ -116,8 +116,9 @@ public class RecoveryRestoreService {
         if (job.getStatus() == RecoveryRestoreStatus.COMPLETED) {
             throw new IllegalArgumentException("Completed restore jobs cannot be abandoned");
         }
-        writer.abandon(job);
         jobs.delete(job);
+        jobs.flush();
+        writer.abandon(job);
         auditLogService.recordSuccess("RECOVERY_RESTORE_ABANDON", "RECOVERY_RESTORE", jobId,
                 "Abandoned recovery restore " + jobId);
     }

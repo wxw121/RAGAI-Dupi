@@ -7,6 +7,7 @@ import com.dupi.rag.service.IngestJobService;
 import com.dupi.rag.service.KnowledgeBaseExportService;
 import com.dupi.rag.service.KnowledgeBaseService;
 import com.dupi.rag.service.RagEvalService;
+import com.dupi.rag.service.RagEvalCaseGenerationService;
 import com.dupi.rag.service.RetrievalService;
 import com.dupi.rag.service.RetrievalProfileService;
 import com.dupi.rag.service.SparseMigrationService;
@@ -34,6 +35,7 @@ public class KnowledgeBaseController {
     private final KnowledgeBaseExportService knowledgeBaseExportService;
     private final RetrievalProfileService retrievalProfileService;
     private final SparseMigrationService sparseMigrationService;
+    private final RagEvalCaseGenerationService ragEvalCaseGenerationService;
 
     @PostMapping
     public KnowledgeBaseResponse create(@Valid @RequestBody CreateKnowledgeBaseRequest request) {
@@ -76,6 +78,11 @@ public class KnowledgeBaseController {
     @PostMapping("/{kbId}/retrieve")
     public RetrieveResponse retrieve(@PathVariable UUID kbId, @Valid @RequestBody RetrieveRequest request) {
         return retrievalService.retrieve(kbId, request);
+    }
+
+    @GetMapping("/{kbId}/citations/{chunkId}")
+    public Map<String, String> getCitationContent(@PathVariable UUID kbId, @PathVariable UUID chunkId) {
+        return Map.of("content", retrievalService.getChunkContent(kbId, chunkId));
     }
 
     @PostMapping(value = "/{kbId}/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -184,6 +191,35 @@ public class KnowledgeBaseController {
         ragEvalService.deleteCase(kbId, caseId);
     }
 
+    @PostMapping("/{kbId}/rag-eval/cases/generation-preview")
+    public RagEvalGenerationPreviewResponse previewRagEvalCaseGeneration(@PathVariable UUID kbId) {
+        return ragEvalCaseGenerationService.preview(kbId);
+    }
+
+    @PostMapping("/{kbId}/rag-eval/cases/generation-confirm")
+    public java.util.List<RagEvalCaseResponse> confirmRagEvalCaseGeneration(
+            @PathVariable UUID kbId,
+            @Valid @RequestBody RagEvalGenerationConfirmRequest request
+    ) {
+        return ragEvalCaseGenerationService.confirm(kbId, request);
+    }
+
+    @PostMapping("/{kbId}/rag-eval/cases/add-generation-preview")
+    public RagEvalGenerationPreviewResponse previewAddRagEvalCases(
+            @PathVariable UUID kbId,
+            @Valid @RequestBody com.dupi.rag.dto.RagEvalAddGenerationPreviewRequest request
+    ) {
+        return ragEvalCaseGenerationService.previewAdd(kbId, request);
+    }
+
+    @PostMapping("/{kbId}/rag-eval/cases/add-generation-confirm")
+    public java.util.List<RagEvalCaseResponse> confirmAddRagEvalCases(
+            @PathVariable UUID kbId,
+            @Valid @RequestBody com.dupi.rag.dto.RagEvalAddGenerationConfirmRequest request
+    ) {
+        return ragEvalCaseGenerationService.confirmAdd(kbId, request);
+    }
+
     @GetMapping("/{kbId}/rag-eval/runs")
     public java.util.List<RagEvalRunResponse> listRagEvalRuns(@PathVariable UUID kbId) {
         return ragEvalService.listRuns(kbId);
@@ -247,6 +283,12 @@ public class KnowledgeBaseController {
             @PathVariable UUID profileId
     ) {
         return retrievalProfileService.rollback(kbId, profileId);
+    }
+
+    @PostMapping("/{kbId}/retrieval-profiles/default")
+    public Map<String, String> restoreDefaultRetrievalProfile(@PathVariable UUID kbId) {
+        retrievalProfileService.restoreDefault(kbId);
+        return Map.of("status", "default_retrieval_restored");
     }
 
     @GetMapping("/{kbId}/sparse-migrations")

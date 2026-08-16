@@ -378,6 +378,7 @@ public class IngestJobService {
     }
 
     @Scheduled(cron = "${dupi.ingest.recovery-cron:0 */2 * * * *}")
+    @Transactional
     public void recoverQueuedJobsOnSchedule() {
         int recovered = recoverQueuedJobs();
         if (recovered > 0) {

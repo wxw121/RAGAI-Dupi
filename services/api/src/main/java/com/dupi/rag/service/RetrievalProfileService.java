@@ -7,6 +7,7 @@ import com.dupi.rag.domain.enums.RagQualityGateStatus;
 import com.dupi.rag.dto.RetrievalProfileRequest;
 import com.dupi.rag.dto.RetrievalProfileResponse;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.repository.RagQualityPolicyRepository;
 import com.dupi.rag.repository.RagEvalRunRepository;
 import com.dupi.rag.repository.RetrievalProfileRepository;
 import lombok.RequiredArgsConstructor;
@@ -21,6 +22,7 @@ import java.util.UUID;
 public class RetrievalProfileService {
     private final RetrievalProfileRepository profileRepository;
     private final RagEvalRunRepository runRepository;
+    private final RagQualityPolicyRepository qualityPolicyRepository;
     private final KnowledgeBaseService knowledgeBaseService;
     private final AuditLogService auditLogService;
     private final KnowledgeBaseMaintenanceService maintenanceService;
@@ -70,10 +72,30 @@ public class RetrievalProfileService {
         return changeActiveProfile(kbId, profileId, true);
     }
 
+    @Transactional
+    public void restoreDefault(UUID kbId) {
+        maintenanceService.assertMutationAllowed(kbId);
+        KnowledgeBase kb = knowledgeBaseService.findForUpdateOrThrow(kbId);
+        UUID previousProfileId = kb.getActiveRetrievalProfileId();
+        if (previousProfileId == null) {
+            return;
+        }
+        kb.setActiveRetrievalProfileId(null);
+        auditLogService.recordSuccessInCurrentTransaction(
+                "RETRIEVAL_PROFILE_RESTORE_DEFAULT", "KNOWLEDGE_BASE", kbId,
+                "Restored default retrieval strategy from profile " + previousProfileId);
+    }
+
     private RetrievalProfileResponse changeActiveProfile(UUID kbId, UUID profileId, boolean rollback) {
         RetrievalProfile profile = find(kbId, profileId);
+        boolean allowsUnbaselinedActivation = qualityPolicyRepository.findByKbId(kbId)
+                .map(policy -> !Boolean.TRUE.equals(policy.getBlockWhenUnbaselined()))
+                .orElse(false);
         boolean hasPassingSnapshot = runRepository.findByKbIdAndStatusAndGateStatus(
                         kbId, RagEvalRunStatus.COMPLETED, RagQualityGateStatus.PASS).stream()
+                .anyMatch(run -> profile.snapshot().equals(run.getProfileSnapshot()))
+                || allowsUnbaselinedActivation && runRepository.findByKbIdAndStatusAndGateStatus(
+                        kbId, RagEvalRunStatus.COMPLETED, RagQualityGateStatus.UNBASELINED).stream()
                 .anyMatch(run -> profile.snapshot().equals(run.getProfileSnapshot()));
         if (!hasPassingSnapshot) {
             throw new IllegalArgumentException("Retrieval profile requires a matching passing quality gate");

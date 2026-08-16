@@ -5,6 +5,7 @@ import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.config.RagProperties;
 import com.dupi.rag.domain.entity.Chunk;
 import com.dupi.rag.domain.entity.Document;
+import com.dupi.rag.domain.entity.DocumentAsset;
 import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.entity.SparseMigration;
 import com.dupi.rag.domain.enums.RetrievalMode;
@@ -15,6 +16,7 @@ import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.exception.RetrievalProfileConflictException;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
+import com.dupi.rag.repository.DocumentAssetRepository;
 import com.dupi.rag.repository.SparseMigrationRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -28,6 +30,7 @@ import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientRequestException;
 
+import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.time.Instant;
 import java.util.List;
@@ -52,6 +55,8 @@ class RetrievalServiceTest {
     @Mock ProfileIndexStateService profileIndexStateService;
     @Mock RetrievalProfileService retrievalProfileService;
     @Mock SparseMigrationRepository sparseMigrationRepository;
+    @Mock MinioStorageService minioStorageService;
+    @Mock DocumentAssetRepository documentAssetRepository;
 
     RetrievalService service(RagProperties properties) {
         return service(properties, WebClient.builder());
@@ -69,8 +74,102 @@ class RetrievalServiceTest {
                 profileIndexStateService,
                 new WeightedRrfFusion(),
                 retrievalProfileService,
-                sparseMigrationRepository
+                sparseMigrationRepository,
+                minioStorageService,
+                documentAssetRepository
         );
+    }
+
+    @Test
+    void getChunkContentReturnsOnlyChunksOwnedByTheKnowledgeBase() {
+        UUID kbId = UUID.randomUUID();
+        UUID chunkId = UUID.randomUUID();
+        when(chunkRepository.findById(chunkId)).thenReturn(java.util.Optional.of(
+                Chunk.builder().id(chunkId).kbId(kbId).content("完整引用原文").build()));
+
+        assertThat(service(new RagProperties()).getChunkContent(kbId, chunkId)).isEqualTo("完整引用原文");
+        verify(knowledgeBaseService).findOrThrow(kbId);
+
+        UUID otherKbId = UUID.randomUUID();
+        assertThatThrownBy(() -> service(new RagProperties()).getChunkContent(otherKbId, chunkId))
+                .isInstanceOf(com.dupi.rag.exception.ResourceNotFoundException.class);
+    }
+
+    @Test
+    void getChunkContentExpandsTheMatchingMarkdownSectionFromTheOriginalDocument() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID chunkId = UUID.randomUUID();
+        Chunk headingOnlyChunk = Chunk.builder()
+                .id(chunkId)
+                .kbId(kbId)
+                .docId(docId)
+                .content("## 5. Best practices\n")
+                .metadata(Map.of("heading", "5. Best practices", "chunk_role", "original"))
+                .build();
+        Document document = Document.builder()
+                .id(docId)
+                .kbId(kbId)
+                .fileName("guide.md")
+                .mimeType("text/markdown")
+                .objectKey("kb/guide.md")
+                .build();
+        String source = """
+                # Guide
+
+                ## 5. Best practices
+
+                Section introduction.
+
+                ### 5.1 Always use a virtual environment
+
+                Do not pollute the system environment.
+
+                ```bash
+                # This hash inside a code fence is not a section
+                python -m venv .venv
+                ```
+
+                ## 6. Troubleshooting
+
+                Content from the next section.
+                """;
+        when(chunkRepository.findById(chunkId)).thenReturn(Optional.of(headingOnlyChunk));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(document));
+        when(minioStorageService.download("kb/guide.md"))
+                .thenReturn(new ByteArrayInputStream(source.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+
+        String content = service(new RagProperties()).getChunkContent(kbId, chunkId);
+
+        assertThat(content)
+                .startsWith("## 5. Best practices")
+                .contains("### 5.1 Always use a virtual environment", "# This hash inside a code fence is not a section")
+                .doesNotContain("## 6. Troubleshooting", "Content from the next section");
+    }
+
+    @Test
+    void getChunkContentRewritesOnlyRegisteredRelativeImages() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID chunkId = UUID.randomUUID();
+        String reference = "../image/python-asyncio/06-bento-grid-diagram-06.png";
+        Chunk chunk = Chunk.builder()
+                .id(chunkId)
+                .kbId(kbId)
+                .docId(docId)
+                .content("![diagram](" + reference + ")\n\n![missing](../image/missing.png)")
+                .build();
+        when(chunkRepository.findById(chunkId)).thenReturn(Optional.of(chunk));
+        when(documentAssetRepository.findByDocIdOrderByCreatedAtAsc(docId)).thenReturn(List.of(
+                DocumentAsset.builder().docId(docId).kbId(kbId).relativePath(reference).build()
+        ));
+
+        String content = service(new RagProperties()).getChunkContent(kbId, chunkId);
+
+        assertThat(content)
+                .contains("/api/v1/knowledge-bases/" + kbId + "/documents/" + docId + "/assets?path=")
+                .contains("![missing](../image/missing.png)")
+                .doesNotContain("![diagram](" + reference + ")");
     }
 
     @Test

@@ -13,11 +13,13 @@ import {
   createAccount,
   retrieveKnowledgeBase,
   listVectorCleanupTasks,
+  listKnowledgeBaseVectorCleanupTasks,
   reindexKnowledgeBase,
   rotateAccountToken,
   retryIngestJob,
   cancelIngestJob,
   retryVectorCleanupTask,
+  retryKnowledgeBaseVectorCleanupTask,
   updateAccount,
   disableAccount,
   enableAccount,
@@ -32,6 +34,10 @@ import {
   importKnowledgeBase,
   notifyAuditAlerts,
   updateKnowledgeBaseRetrievalProfile,
+  previewRagEvalCaseGeneration,
+  confirmRagEvalCaseGeneration,
+  previewAddRagEvalCases,
+  confirmAddRagEvalCases,
 } from './knowledgeBase'
 import { deleteDocument, getDocumentIndexDetail, getIngestJob, listDocuments, uploadDocument, uploadDocuments } from './documents'
 import {
@@ -182,6 +188,40 @@ describe('resource API wrappers', () => {
       '/api/v1/knowledge-bases/kb1/retrieval-profile',
       { retrievalProfile: 'PARENT_CHILD' },
     )
+  })
+
+  it('previews and confirms AI-generated evaluation cases', async () => {
+    const preview = { documentFingerprint: 'docs', caseFingerprint: 'cases', documents: [], retainedCases: [], replacedCases: [], confirmable: true }
+    const request = { documentFingerprint: 'docs', caseFingerprint: 'cases', replaceCaseIds: [], generatedCases: [] }
+    apiClient.apiPost.mockResolvedValueOnce(preview).mockResolvedValueOnce([{ id: 'generated' }])
+
+    await expect(previewRagEvalCaseGeneration('kb1')).resolves.toEqual(preview)
+    await expect(confirmRagEvalCaseGeneration('kb1', request)).resolves.toEqual([{ id: 'generated' }])
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(1, '/api/v1/knowledge-bases/kb1/rag-eval/cases/generation-preview')
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(2, '/api/v1/knowledge-bases/kb1/rag-eval/cases/generation-confirm', request)
+  })
+
+  it('previews and confirms appended AI evaluation cases', async () => {
+    const preview = { documentFingerprint: 'docs', caseFingerprint: 'cases', documents: [], retainedCases: [], replacedCases: [], confirmable: true }
+    const previewRequest = { documentIds: ['doc-1'], casesPerDocument: 2 }
+    const confirmRequest = { ...previewRequest, documentFingerprint: 'docs', caseFingerprint: 'cases', generatedCases: [] }
+    apiClient.apiPost.mockResolvedValueOnce(preview).mockResolvedValueOnce([{ id: 'appended' }])
+
+    await expect(previewAddRagEvalCases('kb1', previewRequest)).resolves.toEqual(preview)
+    await expect(confirmAddRagEvalCases('kb1', confirmRequest)).resolves.toEqual([{ id: 'appended' }])
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(1, '/api/v1/knowledge-bases/kb1/rag-eval/cases/add-generation-preview', previewRequest)
+    expect(apiClient.apiPost).toHaveBeenNthCalledWith(2, '/api/v1/knowledge-bases/kb1/rag-eval/cases/add-generation-confirm', confirmRequest)
+  })
+
+  it('uses knowledge-base-scoped vector cleanup paths', async () => {
+    apiClient.apiGet.mockResolvedValue([{ id: 'cleanup1' }])
+    apiClient.apiPost.mockResolvedValue({ id: 'cleanup1' })
+
+    await expect(listKnowledgeBaseVectorCleanupTasks('kb1')).resolves.toEqual([{ id: 'cleanup1' }])
+    await expect(retryKnowledgeBaseVectorCleanupTask('kb1', 'cleanup1')).resolves.toEqual({ id: 'cleanup1' })
+
+    expect(apiClient.apiGet).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb1/vector-cleanup-tasks')
+    expect(apiClient.apiPost).toHaveBeenCalledWith('/api/v1/knowledge-bases/kb1/vector-cleanup-tasks/cleanup1/retry')
   })
 
   it('builds document API paths', async () => {

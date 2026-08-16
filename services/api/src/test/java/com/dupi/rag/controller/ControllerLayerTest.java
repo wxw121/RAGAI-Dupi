@@ -105,7 +105,10 @@ class ControllerLayerTest {
         DocumentService documentService = mock(DocumentService.class);
         IngestJobService ingestJobService = mock(IngestJobService.class);
         DocumentIndexInspectionService documentIndexInspectionService = mock(DocumentIndexInspectionService.class);
-        DocumentController controller = new DocumentController(documentService, ingestJobService, documentIndexInspectionService);
+        MarkdownPackageService markdownPackageService = mock(MarkdownPackageService.class);
+        DocumentAssetService documentAssetService = mock(DocumentAssetService.class);
+        DocumentController controller = new DocumentController(documentService, ingestJobService,
+                documentIndexInspectionService, markdownPackageService, documentAssetService);
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         MockMultipartFile file = new MockMultipartFile("file", "a.txt", "text/plain", "x".getBytes());
@@ -206,15 +209,17 @@ class ControllerLayerTest {
         IngestJobService ingestJobService = mock(IngestJobService.class);
         ChatSessionService chatSessionService = mock(ChatSessionService.class);
         RagEvalService ragEvalService = mock(RagEvalService.class);
+        RagEvalCaseGenerationService ragEvalCaseGenerationService = mock(RagEvalCaseGenerationService.class);
         KnowledgeBaseExportService knowledgeBaseExportService = mock(KnowledgeBaseExportService.class);
         RetrievalProfileService retrievalProfileService = mock(RetrievalProfileService.class);
         SparseMigrationService sparseMigrationService = mock(SparseMigrationService.class);
         KnowledgeBaseController controller = new KnowledgeBaseController(kbService, retrievalService, chatService,
                 ingestJobService, chatSessionService, ragEvalService, knowledgeBaseExportService,
-                retrievalProfileService, sparseMigrationService);
+                retrievalProfileService, sparseMigrationService, ragEvalCaseGenerationService);
         UUID kbId = UUID.randomUUID();
         UUID sessionId = UUID.randomUUID();
         UUID secondSessionId = UUID.randomUUID();
+        UUID citationChunkId = UUID.randomUUID();
         CreateKnowledgeBaseRequest create = new CreateKnowledgeBaseRequest();
         RetrieveRequest retrieve = new RetrieveRequest();
         retrieve.setQuery("q");
@@ -251,6 +256,19 @@ class ControllerLayerTest {
                 .caseKey("case")
                 .query("q")
                 .build();
+        RagEvalGenerationPreviewResponse generationPreview = RagEvalGenerationPreviewResponse.builder()
+                .documentFingerprint("documents").caseFingerprint("cases").confirmable(true).build();
+        RagEvalGenerationConfirmRequest generationConfirm = new RagEvalGenerationConfirmRequest();
+        generationConfirm.setDocumentFingerprint("documents");
+        generationConfirm.setCaseFingerprint("cases");
+        RagEvalAddGenerationPreviewRequest addGenerationPreview = new RagEvalAddGenerationPreviewRequest();
+        addGenerationPreview.setDocumentIds(List.of(UUID.randomUUID()));
+        addGenerationPreview.setCasesPerDocument(2);
+        RagEvalAddGenerationConfirmRequest addGenerationConfirm = new RagEvalAddGenerationConfirmRequest();
+        addGenerationConfirm.setDocumentFingerprint("documents");
+        addGenerationConfirm.setCaseFingerprint("cases");
+        addGenerationConfirm.setDocumentIds(addGenerationPreview.getDocumentIds());
+        addGenerationConfirm.setCasesPerDocument(2);
         RagQualityPolicyRequest qualityPolicyRequest = new RagQualityPolicyRequest();
         qualityPolicyRequest.setMinimumPassRate(80);
         qualityPolicyRequest.setMaximumPassRateDrop(5);
@@ -299,6 +317,7 @@ class ControllerLayerTest {
         when(kbService.list()).thenReturn(List.of(kbResponse));
         when(kbService.get(kbId)).thenReturn(kbResponse);
         when(retrievalService.retrieve(kbId, retrieve)).thenReturn(retrieveResponse);
+        when(retrievalService.getChunkContent(kbId, citationChunkId)).thenReturn("完整引用原文");
         when(chatService.chatStream(kbId, streamChat)).thenReturn(Flux.just(ServerSentEvent.<String>builder().event("done").data("{}").build()));
         when(chatService.chat(kbId, syncChat)).thenReturn("answer");
         when(ingestJobService.listByKb(kbId)).thenReturn(List.of(jobResponse));
@@ -313,6 +332,10 @@ class ControllerLayerTest {
         when(ragEvalService.createCase(eq(kbId), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.updateCase(eq(kbId), eq(ragEvalCase.getId()), any(RagEvalCaseRequest.class))).thenReturn(ragEvalCase);
         when(ragEvalService.listRuns(kbId)).thenReturn(List.of(ragEvalRun));
+        when(ragEvalCaseGenerationService.preview(kbId)).thenReturn(generationPreview);
+        when(ragEvalCaseGenerationService.confirm(kbId, generationConfirm)).thenReturn(List.of(ragEvalCase));
+        when(ragEvalCaseGenerationService.previewAdd(kbId, addGenerationPreview)).thenReturn(generationPreview);
+        when(ragEvalCaseGenerationService.confirmAdd(kbId, addGenerationConfirm)).thenReturn(List.of(ragEvalCase));
         when(ragEvalService.run(eq(kbId), any(RagEvalRunRequest.class))).thenReturn(ragEvalRun);
         when(ragEvalService.getPolicy(kbId)).thenReturn(qualityPolicy);
         when(ragEvalService.updatePolicy(kbId, qualityPolicyRequest)).thenReturn(qualityPolicy);
@@ -339,6 +362,7 @@ class ControllerLayerTest {
         assertThat(controller.get(kbId)).isSameAs(kbResponse);
         controller.delete(kbId);
         assertThat(controller.retrieve(kbId, retrieve)).isSameAs(retrieveResponse);
+        assertThat(controller.getCitationContent(kbId, citationChunkId)).containsEntry("content", "完整引用原文");
         assertThat(controller.chatStream(kbId, streamChat).collectList().block()).hasSize(1);
         assertThat(controller.chatStream(kbId, syncChat).collectList().block()).extracting(ServerSentEvent::event).containsExactly("token", "done");
         assertThat(controller.cancelChat(Map.of("sessionId", "s1"))).containsEntry("status", "cancel_requested");
@@ -362,6 +386,10 @@ class ControllerLayerTest {
         assertThat(controller.createRagEvalCase(kbId, ragEvalRequest)).isSameAs(ragEvalCase);
         assertThat(controller.updateRagEvalCase(kbId, ragEvalCase.getId(), ragEvalRequest)).isSameAs(ragEvalCase);
         controller.deleteRagEvalCase(kbId, ragEvalCase.getId());
+        assertThat(controller.previewRagEvalCaseGeneration(kbId)).isSameAs(generationPreview);
+        assertThat(controller.confirmRagEvalCaseGeneration(kbId, generationConfirm)).containsExactly(ragEvalCase);
+        assertThat(controller.previewAddRagEvalCases(kbId, addGenerationPreview)).isSameAs(generationPreview);
+        assertThat(controller.confirmAddRagEvalCases(kbId, addGenerationConfirm)).containsExactly(ragEvalCase);
         assertThat(controller.listRagEvalRuns(kbId)).containsExactly(ragEvalRun);
         RagEvalRunRequest ragEvalRunRequest = new RagEvalRunRequest();
         ragEvalRunRequest.setUseRerank(true);
@@ -375,6 +403,7 @@ class ControllerLayerTest {
         assertThat(controller.createRetrievalProfile(kbId, profileRequest)).isSameAs(profileResponse);
         assertThat(controller.activateRetrievalProfile(kbId, profileResponse.getId())).isSameAs(profileResponse);
         assertThat(controller.rollbackRetrievalProfile(kbId, profileResponse.getId())).isSameAs(profileResponse);
+        assertThat(controller.restoreDefaultRetrievalProfile(kbId)).containsEntry("status", "default_retrieval_restored");
         assertThat(controller.listSparseMigrations(kbId)).containsExactly(migrationResponse);
         assertThat(controller.startSparseMigration(kbId, profileResponse.getId())).isSameAs(migrationResponse);
         assertThat(controller.backfillSparseMigration(kbId, migrationResponse.getId())).isSameAs(migrationResponse);
@@ -391,6 +420,7 @@ class ControllerLayerTest {
         verify(chatSessionService).delete(kbId, sessionId);
         verify(chatSessionService).batchDelete(kbId, List.of(sessionId, secondSessionId));
         verify(ragEvalService).deleteCase(kbId, ragEvalCase.getId());
+        verify(retrievalProfileService).restoreDefault(kbId);
     }
 
     @Test
@@ -569,7 +599,7 @@ class ControllerLayerTest {
         assertThat(controller.generatePasswordHash(Map.of("password", "secret"))).containsEntry("passwordHash", "pbkdf2$hash");
         OpsMetadataResponse metadata = controller.metadata();
         assertThat(metadata.getPermissions()).contains("KB_READ", "ACCOUNT_PASSWORD_RESET", "OPS_ALERT_NOTIFY");
-        assertThat(metadata.getAuditActions()).contains("ACCOUNT_DELETE_E2E");
+        assertThat(metadata.getAuditActions()).contains("ACCOUNT_DELETE_E2E", "DOCUMENT_UPLOAD", "CHAT_QUERY");
         assertThat(metadata.getGuardrails().getUploadRateLimit().isEnabled()).isTrue();
         assertThat(metadata.getGuardrails().getUploadRateLimit().getRequests()).isEqualTo(11);
         assertThat(metadata.getGuardrails().getUploadRateLimit().getWindowSeconds()).isEqualTo(45);

@@ -53,6 +53,7 @@ class DocumentServiceTest {
     @Mock KnowledgeBaseMaintenanceService maintenanceService;
     @Mock UploadQuotaService uploadQuotaService;
     @Mock ProfileIndexStateService profileIndexStateService;
+    @Mock DocumentAssetService documentAssetService;
 
     DocumentService service() {
         return new DocumentService(
@@ -70,7 +71,8 @@ class DocumentServiceTest {
                 retrievalProfileRepository,
                 maintenanceService,
                 uploadQuotaService,
-                profileIndexStateService
+                profileIndexStateService,
+                documentAssetService
         );
     }
 
@@ -168,6 +170,8 @@ class DocumentServiceTest {
         verify(uploadQuotaService).commit(any(UploadQuotaReservation.class), any(Document.class));
         verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
         verify(documentRepository, atLeast(2)).save(any(Document.class));
+        verify(auditLogService).recordSuccess(
+                "DOCUMENT_UPLOAD", "DOCUMENT", response.getId(), "Uploaded document a.md");
         var publishOrder = inOrder(ingestOutboxService, uploadQuotaService, documentRepository);
         publishOrder.verify(ingestOutboxService)
                 .record(any(IngestJob.class), eq(kb), contains("a.md"), eq("a.md"), eq("text/markdown"));
@@ -504,6 +508,8 @@ class DocumentServiceTest {
                 RetrievalProfile.builder().kbId(kbId).version(3).build(),
                 RetrievalProfile.builder().kbId(kbId).version(1).build()
         ));
+        when(milvusVectorService.deleteProfileByDocId(docId)).thenReturn(true);
+        when(milvusVectorService.deleteByDocId(docId)).thenReturn(true);
 
         service().delete(kbId, docId);
 
@@ -513,6 +519,8 @@ class DocumentServiceTest {
         verify(vectorCleanupTaskService).enqueueLegacyDocument(docId);
         verify(milvusVectorService).deleteProfileByDocId(docId);
         verify(milvusVectorService).deleteByDocId(docId);
+        verify(vectorCleanupTaskService).completePendingProfileDocument(docId);
+        verify(vectorCleanupTaskService).completePendingLegacyDocument(docId);
         verify(milvusVectorService).deleteSparseByDocId(kbId, docId, List.of(3, 1));
         verify(minioStorageService).delete(doc.getObjectKey());
         verify(uploadQuotaService).releaseCommitted(quotaReservationId, "Document deleted");

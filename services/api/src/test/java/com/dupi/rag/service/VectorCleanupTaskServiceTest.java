@@ -39,6 +39,8 @@ class VectorCleanupTaskServiceTest {
     @Test
     void enqueueDocumentCreatesProfileAndLegacyTasksOnlyWhenMissing() {
         UUID docId = UUID.randomUUID();
+        UUID kbId = UUID.randomUUID();
+        when(repository.resolveKnowledgeBaseIdForDocumentTarget(docId)).thenReturn(Optional.of(kbId));
         when(repository.findByTargetTypeAndTargetIdAndStatus(
                 any(VectorCleanupTargetType.class),
                 eq(docId),
@@ -56,19 +58,23 @@ class VectorCleanupTaskServiceTest {
                 );
         assertThat(captor.getAllValues()).allSatisfy(task -> {
             assertThat(task.getTargetId()).isEqualTo(docId);
+            assertThat(task.getKnowledgeBaseId()).isEqualTo(kbId);
             assertThat(task.getStatus()).isEqualTo(VectorCleanupStatus.PENDING);
         });
 
         reset(repository);
+        when(repository.resolveKnowledgeBaseIdForDocumentTarget(docId)).thenReturn(Optional.of(kbId));
+        VectorCleanupTask existing = VectorCleanupTask.builder().targetId(docId).build();
         when(repository.findByTargetTypeAndTargetIdAndStatus(
                 any(VectorCleanupTargetType.class),
                 eq(docId),
                 eq(VectorCleanupStatus.PENDING)
-        )).thenReturn(Optional.of(VectorCleanupTask.builder().targetId(docId).build()));
+        )).thenReturn(Optional.of(existing));
 
         service().enqueueDocument(docId);
 
-        verify(repository, never()).save(any());
+        verify(repository).save(existing);
+        assertThat(existing.getKnowledgeBaseId()).isEqualTo(kbId);
     }
 
     @Test
@@ -84,6 +90,7 @@ class VectorCleanupTaskServiceTest {
 
         verify(repository, times(2)).save(argThat(task ->
                 task.getTargetId().equals(kbId)
+                        && task.getKnowledgeBaseId().equals(kbId)
                         && task.getStatus() == VectorCleanupStatus.PENDING));
     }
 
@@ -91,7 +98,7 @@ class VectorCleanupTaskServiceTest {
     void processPendingTasksCompletesSuccessfulDocumentCleanup() {
         UUID docId = UUID.randomUUID();
         VectorCleanupTask task = task(VectorCleanupTargetType.PROFILE_DOCUMENT, docId);
-        when(repository.findTop50ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
+        when(repository.findTop5ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
                 eq(VectorCleanupStatus.PENDING),
                 any(Instant.class)
         )).thenReturn(List.of(task));
@@ -108,7 +115,7 @@ class VectorCleanupTaskServiceTest {
         UUID kbId = UUID.randomUUID();
         VectorCleanupTask task = task(VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE, kbId);
         Instant before = Instant.now();
-        when(repository.findTop50ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
+        when(repository.findTop5ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
                 eq(VectorCleanupStatus.PENDING),
                 any(Instant.class)
         )).thenReturn(List.of(task));
@@ -145,7 +152,7 @@ class VectorCleanupTaskServiceTest {
         UUID kbId = UUID.randomUUID();
         VectorCleanupTask task = task(VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE, kbId);
         Instant before = task.getNextAttemptAt();
-        when(repository.findTop50ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
+        when(repository.findTop5ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
                 eq(VectorCleanupStatus.PENDING),
                 any(Instant.class)
         )).thenReturn(List.of(task));
@@ -172,6 +179,20 @@ class VectorCleanupTaskServiceTest {
 
         assertThat(responses).extracting("id").containsExactly(failed.getId(), pending.getId());
         assertThat(responses).extracting("status").containsExactly(VectorCleanupStatus.FAILED, VectorCleanupStatus.PENDING);
+    }
+
+    @Test
+    void listOpenTasksForKnowledgeBaseUsesExplicitOwnership() {
+        UUID kbId = UUID.randomUUID();
+        VectorCleanupTask task = task(VectorCleanupTargetType.PROFILE_DOCUMENT, UUID.randomUUID());
+        task.setKnowledgeBaseId(kbId);
+        when(repository.findTop50ByKnowledgeBaseIdAndStatusInOrderByUpdatedAtDesc(
+                kbId, List.of(VectorCleanupStatus.PENDING, VectorCleanupStatus.FAILED)
+        )).thenReturn(List.of(task));
+
+        var responses = service().listOpenTasks(kbId);
+
+        assertThat(responses).singleElement().extracting("knowledgeBaseId").isEqualTo(kbId);
     }
 
     @Test

@@ -57,6 +57,7 @@ vi.mock('@/api/chatSessions', () => ({
 
 vi.mock('@/api/chat', () => ({
   cancelChat: vi.fn(),
+  getCitationContent: vi.fn().mockResolvedValue({ content: '完整引用原文内容' }),
   streamChat: vi.fn(async (_kbId, _query, callbacks) => {
     callbacks.onRetrieval?.(
       [
@@ -119,5 +120,21 @@ describe('ChatPanel', () => {
     expect(citationRegion).not.toBeNull()
     expect(composer).not.toBeNull()
     expect(composer!.contains(citationRegion)).toBe(false)
+
+    const citationButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="查看引用原文：python-virtual-env-tutorial.md"]',
+    )
+    expect(citationButton?.textContent).toContain('查看完整原文')
+
+    act(() => {
+      citationButton?.click()
+    })
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(container.textContent).toContain('引用原文 · python-virtual-env-tutorial.md')
+    expect(container.textContent).toContain('完整引用原文内容')
   })
 })

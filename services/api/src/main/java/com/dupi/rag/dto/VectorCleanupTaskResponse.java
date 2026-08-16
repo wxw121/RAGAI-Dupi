@@ -20,6 +20,7 @@ public class VectorCleanupTaskResponse {
     private UUID id;
     private VectorCleanupTargetType targetType;
     private UUID targetId;
+    private UUID knowledgeBaseId;
     private VectorCleanupStatus status;
     private Integer attemptCount;
     private String lastError;

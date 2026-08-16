@@ -25,6 +25,8 @@ public class RagEvalCaseResponse {
     private String expectedFileName;
     private List<String> expectedFileNames;
     private List<String> mustContainAny;
+    private boolean sourceValid;
+    private List<String> missingExpectedFileNames;
     private Instant createdAt;
     private Instant updatedAt;
 }

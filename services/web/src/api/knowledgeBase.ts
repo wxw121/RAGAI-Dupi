@@ -16,6 +16,10 @@ import type {
   PasswordResetRequest,
   RagEvalCase,
   RagEvalCaseRequest,
+  RagEvalAddGenerationConfirmRequest,
+  RagEvalAddGenerationPreviewRequest,
+  RagEvalGenerationConfirmRequest,
+  RagEvalGenerationPreview,
   RagEvalRun,
   RagEvalRunRequest,
   RagQualityPolicy,
@@ -142,6 +146,10 @@ export function rollbackRetrievalProfile(kbId: string, profileId: string): Promi
   return apiPost<RetrievalProfile>(`${BASE}/${kbId}/retrieval-profiles/${profileId}/rollback`)
 }
 
+export function restoreDefaultRetrievalProfile(kbId: string): Promise<{ status: string }> {
+  return apiPost<{ status: string }>(`${BASE}/${kbId}/retrieval-profiles/default`)
+}
+
 export function listSparseMigrations(kbId: string): Promise<SparseMigration[]> {
   return apiGet<SparseMigration[]>(`${BASE}/${kbId}/sparse-migrations`)
 }
@@ -174,8 +182,41 @@ export function listVectorCleanupTasks(): Promise<VectorCleanupTask[]> {
   return apiGet<VectorCleanupTask[]>(`${OPS_BASE}/vector-cleanup-tasks`)
 }
 
+export function previewRagEvalCaseGeneration(kbId: string): Promise<RagEvalGenerationPreview> {
+  return apiPost<RagEvalGenerationPreview>(`${BASE}/${kbId}/rag-eval/cases/generation-preview`)
+}
+
+export function confirmRagEvalCaseGeneration(
+  kbId: string,
+  request: RagEvalGenerationConfirmRequest,
+): Promise<RagEvalCase[]> {
+  return apiPost<RagEvalCase[]>(`${BASE}/${kbId}/rag-eval/cases/generation-confirm`, request)
+}
+
+export function previewAddRagEvalCases(
+  kbId: string,
+  request: RagEvalAddGenerationPreviewRequest,
+): Promise<RagEvalGenerationPreview> {
+  return apiPost<RagEvalGenerationPreview>(`${BASE}/${kbId}/rag-eval/cases/add-generation-preview`, request)
+}
+
+export function confirmAddRagEvalCases(
+  kbId: string,
+  request: RagEvalAddGenerationConfirmRequest,
+): Promise<RagEvalCase[]> {
+  return apiPost<RagEvalCase[]>(`${BASE}/${kbId}/rag-eval/cases/add-generation-confirm`, request)
+}
+
+export function listKnowledgeBaseVectorCleanupTasks(kbId: string): Promise<VectorCleanupTask[]> {
+  return apiGet<VectorCleanupTask[]>(`${BASE}/${kbId}/vector-cleanup-tasks`)
+}
+
 export function retryVectorCleanupTask(taskId: string): Promise<VectorCleanupTask> {
   return apiPost<VectorCleanupTask>(`${OPS_BASE}/vector-cleanup-tasks/${taskId}/retry`)
+}
+
+export function retryKnowledgeBaseVectorCleanupTask(kbId: string, taskId: string): Promise<VectorCleanupTask> {
+  return apiPost<VectorCleanupTask>(`${BASE}/${kbId}/vector-cleanup-tasks/${taskId}/retry`)
 }
 
 export function listAuditLogs(query: AuditLogQuery = {}): Promise<AuditLog[]> {

@@ -5,13 +5,17 @@ import com.dupi.rag.config.LlmProperties;
 import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.enums.RagEvalGateStatus;
+import com.dupi.rag.domain.enums.RecoveryRestoreStatus;
 import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.CreateKnowledgeBaseRequest;
 import com.dupi.rag.dto.KnowledgeBaseResponse;
 import com.dupi.rag.dto.RagEvalGateDecisionResponse;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.exception.RecoveryConflictException;
 import com.dupi.rag.exception.RetrievalProfileConflictException;
 import com.dupi.rag.repository.KnowledgeBaseRepository;
+import com.dupi.rag.repository.RecoveryArchiveRepository;
+import com.dupi.rag.repository.RecoveryRestoreJobRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -35,6 +39,8 @@ public class KnowledgeBaseService {
     private final ProfileIndexStateService profileIndexStateService;
     private final RetrievalProfileGateService retrievalProfileGateService;
     private final KnowledgeBaseMaintenanceService maintenanceService;
+    private final RecoveryArchiveRepository recoveryArchiveRepository;
+    private final RecoveryRestoreJobRepository recoveryRestoreJobRepository;
 
     @Transactional
     public KnowledgeBaseResponse create(CreateKnowledgeBaseRequest request) {
@@ -100,17 +106,46 @@ public class KnowledgeBaseService {
     @Transactional
     public void delete(UUID id) {
         findOrThrow(id);
+        String tenantId = TenantContext.getTenantId();
+        var archives = recoveryArchiveRepository
+                .findByTenantIdAndSourceKnowledgeBaseIdOrderByCreatedAtDesc(tenantId, id);
+        if (!archives.isEmpty()) {
+            throw new RecoveryConflictException(
+                    "Knowledge base cannot be deleted while " + archives.size()
+                            + " recovery archive(s) still exist.",
+                    "Delete the recovery archives from the Recovery tab, then retry deleting the knowledge base.");
+        }
+
+        recoveryRestoreJobRepository.findByTenantIdAndTargetKnowledgeBaseId(tenantId, id)
+                .ifPresent(job -> {
+                    if (job.getStatus() != RecoveryRestoreStatus.COMPLETED) {
+                        throw new RecoveryConflictException(
+                                "Knowledge base is the target of recovery restore " + job.getId()
+                                        + " in status " + job.getStatus() + ".",
+                                "Abandon the recovery restore from its source knowledge base, then retry.");
+                    }
+                    job.setTargetKnowledgeBaseId(null);
+                    recoveryRestoreJobRepository.saveAndFlush(job);
+                });
         vectorCleanupTaskService.enqueueProfileKnowledgeBase(id);
         vectorCleanupTaskService.enqueueLegacyKnowledgeBase(id);
         boolean compensationRequired = false;
         try {
-            milvusVectorService.deleteProfileByKbId(id);
+            if (milvusVectorService.deleteProfileByKbId(id)) {
+                vectorCleanupTaskService.completePendingProfileKnowledgeBase(id);
+            } else {
+                compensationRequired = true;
+            }
         } catch (Exception e) {
             compensationRequired = true;
             log.warn("Failed to delete profile Milvus vectors for knowledge base {}", id, e);
         }
         try {
-            milvusVectorService.deleteByKbId(id);
+            if (milvusVectorService.deleteByKbId(id)) {
+                vectorCleanupTaskService.completePendingLegacyKnowledgeBase(id);
+            } else {
+                compensationRequired = true;
+            }
         } catch (Exception e) {
             compensationRequired = true;
             log.warn("Failed to delete Milvus vectors for knowledge base {}", id, e);

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { checkHealth } from '@/api/client'
 import { cn } from '@/lib/utils'
-import { ClipboardList, Database, Home, LogOut, Shield, Users } from 'lucide-react'
+import { ClipboardList, Database, Home, LogOut, Shield, Trash2, Users } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 export function AppLayout({ children, onLogout }: { children: React.ReactNode; onLogout?: () => void }) {
@@ -43,6 +43,13 @@ export function AppLayout({ children, onLogout }: { children: React.ReactNode; o
             >
               <ClipboardList className="h-4 w-4" />
               审计日志
+            </Link>
+            <Link
+              to="/ops/vector-cleanup-tasks"
+              className="flex h-10 items-center gap-2 rounded-xl px-3 text-sm text-foreground hover:bg-muted"
+            >
+              <Trash2 className="h-4 w-4" />
+              向量清理
             </Link>
             <Link
               to="/ops/accounts"

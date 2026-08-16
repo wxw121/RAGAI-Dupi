@@ -24,6 +24,7 @@ import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.dto.RetrieveResponse;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.exception.RagEvalCaseConflictException;
 import com.dupi.rag.repository.RagEvalCaseRepository;
 import com.dupi.rag.repository.RagEvalRunRepository;
 import com.dupi.rag.repository.RagEvalRunResultRepository;
@@ -61,11 +62,14 @@ public class RagEvalService {
     private final KnowledgeBaseMaintenanceService maintenanceService;
     private final ProfileIndexStateService profileIndexStateService;
     private final RetrievalProfileGateService retrievalProfileGateService;
+    private final RagEvalCaseValidationService caseValidationService;
 
     @Transactional
     public List<RagEvalCaseResponse> listCases(UUID kbId) {
-        return caseCoordinator.loadOrSeed(kbId).stream()
-                .map(this::toCaseResponse)
+        List<RagEvalCase> cases = caseCoordinator.loadCases(kbId);
+        RagEvalCaseValidationService.ValidationReport validation = caseValidationService.validate(kbId, cases);
+        return cases.stream()
+                .map(evalCase -> toCaseResponse(evalCase, validation.byCaseId().get(evalCase.getId())))
                 .toList();
     }
 
@@ -109,6 +113,10 @@ public class RagEvalService {
     public RagEvalRunResponse run(UUID kbId, RagEvalRunRequest request) {
         RagEvalRunRequest effective = request == null ? new RagEvalRunRequest() : request;
         boolean useRerank = Boolean.TRUE.equals(effective.getUseRerank());
+        if (effective.getProfileId() != null || effective.getRetrievalMode() != null) {
+            return run(kbId, useRerank, effective.getProfileId(), effective.getRetrievalMode(),
+                    effective.getTopKOverride(), blankToNull(effective.getExperimentLabel()));
+        }
         return run(kbId, useRerank, effective.getProfiles(),
                 effective.getTopKOverride(), blankToNull(effective.getExperimentLabel()));
     }
@@ -133,7 +141,8 @@ public class RagEvalService {
             String experimentLabel
     ) {
         maintenanceService.assertMutationAllowed(kbId);
-        List<RagEvalCase> cases = caseCoordinator.loadOrSeed(kbId);
+        List<RagEvalCase> cases = caseCoordinator.loadCases(kbId);
+        assertSourcesValid(kbId, cases);
         List<com.dupi.rag.domain.enums.RetrievalProfile> profiles = normalizeProfiles(requestedProfiles);
         long runRevision = profileIndexStateService.currentRevision(kbId);
         RagEvalRun run = RagEvalRun.builder()
@@ -194,7 +203,8 @@ public class RagEvalService {
         if (profileId != null && retrievalMode == RetrievalMode.VECTOR) {
             throw new IllegalArgumentException("VECTOR evaluation cannot use a retrieval profile");
         }
-        List<RagEvalCase> cases = caseCoordinator.loadOrSeed(kbId);
+        List<RagEvalCase> cases = caseCoordinator.loadCases(kbId);
+        assertSourcesValid(kbId, cases);
         RetrievalProfile profile = profileId == null ? null : retrievalProfileService.find(kbId, profileId);
         boolean effectiveRerank = profile == null ? useRerank : Boolean.TRUE.equals(profile.getRerankEnabled());
         RagQualityPolicy policy = getOrCreatePolicy(kbId);
@@ -1270,6 +1280,13 @@ public class RagEvalService {
     }
 
     private RagEvalCaseResponse toCaseResponse(RagEvalCase evalCase) {
+        return toCaseResponse(evalCase, null);
+    }
+
+    private RagEvalCaseResponse toCaseResponse(
+            RagEvalCase evalCase,
+            RagEvalCaseValidationService.CaseValidity validity
+    ) {
         return RagEvalCaseResponse.builder()
                 .id(evalCase.getId())
                 .kbId(evalCase.getKbId())
@@ -1281,9 +1298,25 @@ public class RagEvalService {
                 .expectedFileName(evalCase.getExpectedFileName())
                 .expectedFileNames(evalCase.getExpectedFileNames())
                 .mustContainAny(evalCase.getMustContainAny())
+                .sourceValid(validity == null || validity.sourceValid())
+                .missingExpectedFileNames(validity == null ? List.of() : validity.missingExpectedFileNames())
                 .createdAt(evalCase.getCreatedAt())
                 .updatedAt(evalCase.getUpdatedAt())
                 .build();
+    }
+
+    private void assertSourcesValid(UUID kbId, List<RagEvalCase> cases) {
+        RagEvalCaseValidationService.ValidationReport validation = caseValidationService.validate(kbId, cases);
+        if (!validation.hasInvalidCases()) {
+            return;
+        }
+        List<String> details = validation.invalidCases().stream()
+                .map(evalCase -> {
+                    RagEvalCaseValidationService.CaseValidity validity = validation.byCaseId().get(evalCase.getId());
+                    return evalCase.getCaseKey() + ": " + String.join(", ", validity.missingExpectedFileNames());
+                })
+                .toList();
+        throw RagEvalCaseConflictException.invalidSources(details);
     }
 
     private RagEvalRunResponse toRunResponse(RagEvalRun run, List<RagEvalRunResult> results) {

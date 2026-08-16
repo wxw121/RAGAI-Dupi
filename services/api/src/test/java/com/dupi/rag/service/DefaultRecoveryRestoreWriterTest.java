@@ -42,11 +42,15 @@ class DefaultRecoveryRestoreWriterTest {
         fixture.writer.restore(fixture.job);
 
         assertThat(fixture.target.getLifecycleStatus()).isEqualTo(KnowledgeBaseLifecycleStatus.READY);
-        assertThat(fixture.target.getName()).isEqualTo("Source KB (restored)");
+        assertThat(fixture.target.getName())
+                .isEqualTo("Source KB (restored · Archive "
+                        + fixture.job.getArchiveId().toString().substring(0, 8)
+                        + " · 2026-07-15 12:34:56.789 UTC)");
         assertThat(fixture.target.isProfileIndexActivated()).isTrue();
         assertThat(fixture.target.getRetrievalProfile()).isEqualTo(com.dupi.rag.domain.enums.RetrievalProfile.COMBINED);
         assertThat(fixture.target.getIndexRevision()).isEqualTo(9L);
         verify(fixture.documentStorage).upload(contains(fixture.target.getId().toString()), any(), eq(5L), eq("text/markdown"));
+        verify(fixture.documentStorage).upload(contains("/assets/"), any(), eq(5L), eq("image/png"));
         verify(fixture.documents, atLeastOnce()).saveAll(argThat(values -> values.iterator().next().getKbId().equals(fixture.target.getId())));
         verify(fixture.uploadQuotaService).createCommittedReservation(
                 eq("tenant-a"), eq("admin"), eq(fixture.target.getId()),
@@ -69,6 +73,27 @@ class DefaultRecoveryRestoreWriterTest {
             return restored.getMetadata().get("source_chunk_id").equals(restored.getId().toString());
         }));
         verify(fixture.jobs, atLeast(4)).save(fixture.job);
+    }
+
+    @Test
+    void restoredNameIncludesArchiveAndRestoreTimeAndHonorsDatabaseLimit() {
+        UUID archiveId = UUID.randomUUID();
+        String name = DefaultRecoveryRestoreWriter.restoredName(
+                "知".repeat(300), archiveId, Instant.parse("2026-07-15T12:34:56.789Z"));
+
+        assertThat(name).hasSize(255)
+                .endsWith("(restored · Archive " + archiveId.toString().substring(0, 8)
+                        + " · 2026-07-15 12:34:56.789 UTC)");
+    }
+
+    @Test
+    void restoreRemainsCompatibleWithArchivesCreatedBeforeAssetCapture() {
+        Fixture fixture = fixture(false);
+
+        fixture.writer.restore(fixture.job);
+
+        assertThat(fixture.target.getLifecycleStatus()).isEqualTo(KnowledgeBaseLifecycleStatus.READY);
+        verify(fixture.documentAssets, never()).saveAll(anyList());
     }
 
     @Test
@@ -149,12 +174,17 @@ class DefaultRecoveryRestoreWriterTest {
     }
 
     private Fixture fixture() {
+        return fixture(true);
+    }
+
+    private Fixture fixture(boolean includeAssets) {
         RecoveryArchiveRepository archives = mock(RecoveryArchiveRepository.class);
         RecoveryArchiveItemRepository archiveItems = mock(RecoveryArchiveItemRepository.class);
         RecoveryRestoreItemRepository restoreItems = mock(RecoveryRestoreItemRepository.class);
         RecoveryRestoreJobRepository jobs = mock(RecoveryRestoreJobRepository.class);
         KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
         DocumentRepository documents = mock(DocumentRepository.class);
+        DocumentAssetRepository documentAssets = mock(DocumentAssetRepository.class);
         ChunkRepository chunks = mock(ChunkRepository.class);
         RagEvalCaseRepository evalCases = mock(RagEvalCaseRepository.class);
         RagQualityPolicyRepository policies = mock(RagQualityPolicyRepository.class);
@@ -174,6 +204,7 @@ class DefaultRecoveryRestoreWriterTest {
         UUID jobId = UUID.randomUUID();
         UUID sourceDocId = UUID.randomUUID();
         UUID sourceChunkId = UUID.randomUUID();
+        UUID sourceAssetId = UUID.randomUUID();
         KnowledgeBase sourceKb = KnowledgeBase.builder().id(sourceKbId).tenantId("tenant-a").name("Source KB")
                 .embeddingModel("embedding-2").embeddingDimension(2).retrievalMode(RetrievalMode.VECTOR)
                 .retrievalProfile(com.dupi.rag.domain.enums.RetrievalProfile.COMBINED)
@@ -186,6 +217,9 @@ class DefaultRecoveryRestoreWriterTest {
                 .objectKey("source/guide.md").mimeType("text/markdown").fileSize(5L)
                 .quotaReservationId(UUID.randomUUID())
                 .status(DocumentStatus.COMPLETED).indexSchemaVersion(2).build();
+        DocumentAsset sourceAsset = DocumentAsset.builder().id(sourceAssetId).kbId(sourceKbId).docId(sourceDocId)
+                .relativePath("../image/diagram.png").objectKey("source/assets/diagram.png")
+                .mimeType("image/png").fileName("diagram.png").fileSize(5L).build();
         UploadQuotaReservation restoredReservation = UploadQuotaReservation.builder()
                 .id(UUID.randomUUID())
                 .tenantId("tenant-a")
@@ -215,7 +249,8 @@ class DefaultRecoveryRestoreWriterTest {
                 .sourceKnowledgeBaseId(sourceKbId).status(RecoveryArchiveStatus.COMPLETED)
                 .bucket("dupi-recovery").objectPrefix("archives/tenant-a/a/").createdBy("admin").build();
         RecoveryRestoreJob job = RecoveryRestoreJob.builder().id(jobId).archiveId(archiveId).tenantId("tenant-a")
-                .targetKnowledgeBaseId(targetKbId).status(RecoveryRestoreStatus.VALIDATING).createdBy("admin").build();
+                .targetKnowledgeBaseId(targetKbId).status(RecoveryRestoreStatus.VALIDATING).createdBy("admin")
+                .createdAt(Instant.parse("2026-07-15T12:34:56.789Z")).build();
         MilvusRecoverySchema denseSchema = new MilvusRecoverySchema("COSINE", 2, Map.of());
         RecoveryManifest manifest = manifests.seal(new RecoveryManifestHeader(1, archiveId, "tenant-a", sourceKbId,
                 sourceKb.getUpdatedAt(), "embedding-2", 2,
@@ -228,11 +263,17 @@ class DefaultRecoveryRestoreWriterTest {
         add(itemRows, payloads, archiveId, "manifest", "manifest.json", manifests.serialize(manifest), null);
         add(itemRows, payloads, archiveId, "record:knowledge-base", "records/kb.json", json(mapper, sourceKb), null);
         add(itemRows, payloads, archiveId, "record:documents", "records/docs.ndjson", ndjson(mapper, sourceDocument), null);
+        if (includeAssets) {
+            add(itemRows, payloads, archiveId, "record:document-assets", "records/assets.ndjson", ndjson(mapper, sourceAsset), null);
+        }
         add(itemRows, payloads, archiveId, "record:chunks", "records/chunks.ndjson", ndjson(mapper, sourceChunk), null);
         add(itemRows, payloads, archiveId, "record:evaluation-cases", "records/cases.ndjson", ndjson(mapper, sourceCase), null);
         add(itemRows, payloads, archiveId, "record:quality-policy", "records/policy.json", json(mapper, sourcePolicy), null);
         add(itemRows, payloads, archiveId, "record:retrieval-profiles", "records/profiles.ndjson", ndjson(mapper, sourceProfile), null);
         add(itemRows, payloads, archiveId, "object:" + sourceDocId, "objects/guide.md", "guide".getBytes(), sourceDocId.toString());
+        if (includeAssets) {
+            add(itemRows, payloads, archiveId, "asset:" + sourceAssetId, "assets/diagram.png", "image".getBytes(), sourceAssetId.toString());
+        }
         add(itemRows, payloads, archiveId, "vector:dense", "vectors/dense.ndjson", ndjson(mapper, sourceVector), null);
         add(itemRows, payloads, archiveId, "vector:profile", "vectors/profile.ndjson", ndjson(mapper, sourceVector), null);
         add(itemRows, payloads, archiveId, "vector:sparse", "vectors/sparse.ndjson", ndjson(mapper, sourceVector), null);
@@ -244,11 +285,16 @@ class DefaultRecoveryRestoreWriterTest {
                 .thenAnswer(invocation -> payloads.get(invocation.getArgument(1)));
         when(storage.open(eq("dupi-recovery"), anyString()))
                 .thenAnswer(invocation -> new ByteArrayInputStream(payloads.get(invocation.getArgument(1))));
-        when(documentStorage.download(anyString()))
-                .thenReturn(new ByteArrayInputStream("guide".getBytes(StandardCharsets.UTF_8)));
+        when(documentStorage.download(anyString())).thenAnswer(invocation -> {
+            String objectKey = invocation.getArgument(0);
+            String content = objectKey.contains("/assets/") ? "image" : "guide";
+            return new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8));
+        });
         when(restoreItems.findByRestoreJobIdAndArchiveItemId(any(), any())).thenReturn(Optional.empty());
         when(restoreItems.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(documents.findByKbIdOrderByCreatedAtDesc(targetKbId)).thenReturn(List.of(sourceDocument));
+        when(documentAssets.findByKbId(targetKbId))
+                .thenReturn(includeAssets ? List.of(sourceAsset) : List.of());
         when(chunks.countByKbId(targetKbId)).thenReturn(1L);
         when(recoveryVectors.denseCollection()).thenReturn("chunks");
         when(recoveryVectors.profileCollection()).thenReturn("profiles-target");
@@ -270,10 +316,10 @@ class DefaultRecoveryRestoreWriterTest {
                 .thenReturn(restoredReservation);
 
         DefaultRecoveryRestoreWriter writer = new DefaultRecoveryRestoreWriter(
-                archives, archiveItems, restoreItems, jobs, knowledgeBases, documents, chunks, evalCases,
+                archives, archiveItems, restoreItems, jobs, knowledgeBases, documents, documentAssets, chunks, evalCases,
                 policies, profiles, storage, documentStorage, recoveryVectors, onlineVectors, provisioner,
                 manifests, uploadQuotaService, mapper);
-        return new Fixture(writer, job, target, jobs, knowledgeBases, documents, chunks, profiles,
+        return new Fixture(writer, job, target, jobs, knowledgeBases, documents, documentAssets, chunks, profiles,
                 documentStorage, recoveryVectors, onlineVectors, provisioner, uploadQuotaService);
     }
 
@@ -301,7 +347,8 @@ class DefaultRecoveryRestoreWriterTest {
 
     private record Fixture(DefaultRecoveryRestoreWriter writer, RecoveryRestoreJob job, KnowledgeBase target,
                             RecoveryRestoreJobRepository jobs, KnowledgeBaseRepository knowledgeBases,
-                            DocumentRepository documents, ChunkRepository chunks, RetrievalProfileRepository profiles,
+                            DocumentRepository documents, DocumentAssetRepository documentAssets,
+                            ChunkRepository chunks, RetrievalProfileRepository profiles,
                             MinioStorageService documentStorage, MilvusRecoveryService recoveryVectors,
                             MilvusVectorService onlineVectors, SparseRecoveryProvisioner provisioner,
                             UploadQuotaService uploadQuotaService) { }

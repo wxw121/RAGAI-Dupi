@@ -8,6 +8,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 import java.util.Map;
 
@@ -47,6 +48,15 @@ public class GlobalExceptionHandler {
                 "Run a current RAG evaluation and only activate profiles with a passed gate."));
     }
 
+    @ExceptionHandler(RagEvalCaseConflictException.class)
+    public ResponseEntity<ApiErrorResponse> handleRagEvalCaseConflict(RagEvalCaseConflictException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(error(
+                ex.getErrorCode(),
+                ex.getMessage(),
+                "rag_eval_cases",
+                "Edit, delete, or regenerate invalid evaluation cases, then retry."));
+    }
+
     @ExceptionHandler(ChatPipelineException.class)
     public ResponseEntity<ApiErrorResponse> handleChatPipeline(ChatPipelineException ex) {
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error(
@@ -65,6 +75,15 @@ public class GlobalExceptionHandler {
                 "Wait for the active recovery archive to finish, then retry the mutation."));
     }
 
+    @ExceptionHandler(RecoveryConflictException.class)
+    public ResponseEntity<ApiErrorResponse> handleRecoveryConflict(RecoveryConflictException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(error(
+                "recovery_conflict",
+                ex.getMessage(),
+                "recovery",
+                ex.getSuggestion()));
+    }
+
     @ExceptionHandler(UploadIdempotencyConflictException.class)
     public ResponseEntity<ApiErrorResponse> handleUploadIdempotencyConflict(UploadIdempotencyConflictException ex) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(error(
@@ -81,6 +100,15 @@ public class GlobalExceptionHandler {
                 ex.getMessage(),
                 "upload",
                 "Choose a smaller file or increase the configured upload quota."));
+    }
+
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<ApiErrorResponse> handleMultipartTooLarge(MaxUploadSizeExceededException ex) {
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(error(
+                "multipart_payload_too_large",
+                "Uploaded file exceeds the server multipart size limit",
+                "upload",
+                "Choose a smaller file or increase the configured multipart and proxy limits."));
     }
 
     @ExceptionHandler(UploadQuotaExceededException.class)

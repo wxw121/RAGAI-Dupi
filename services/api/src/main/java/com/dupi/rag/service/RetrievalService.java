@@ -13,7 +13,9 @@ import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.dto.RetrieveResponse;
 import com.dupi.rag.exception.RetrievalProfileConflictException;
+import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.ChunkRepository;
+import com.dupi.rag.repository.DocumentAssetRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.SparseMigrationRepository;
 import lombok.RequiredArgsConstructor;
@@ -23,6 +25,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClientRequestException;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -42,6 +48,11 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class RetrievalService {
 
+    private static final int MAX_CITATION_SOURCE_BYTES = 5 * 1024 * 1024;
+    private static final Pattern MARKDOWN_HEADING_PATTERN = Pattern.compile(
+            "^(#{1,6})[ \\t]+(.+?)[ \\t]*#*[ \\t]*$");
+    private static final Pattern MARKDOWN_IMAGE_REFERENCE = Pattern.compile(
+            "(!\\[[^]\\n]*]\\()(?:<([^>\\n]+)>|([^\\s)\\n]+))");
     private static final Pattern QUERY_SPLIT_PATTERN = Pattern.compile("[\\s\\p{Punct}，。！？；：、（）【】《》]+");
     private static final int MIN_CJK_KEYWORD_LENGTH = 2;
     private static final Set<String> WEAK_QUESTION_TERMS = Set.of(
@@ -65,9 +76,125 @@ public class RetrievalService {
     private final WeightedRrfFusion weightedRrfFusion;
     private final RetrievalProfileService retrievalProfileService;
     private final SparseMigrationRepository sparseMigrationRepository;
+    private final MinioStorageService minioStorageService;
+    private final DocumentAssetRepository documentAssetRepository;
 
     @Value("${dupi.worker.base-url:http://worker:8000}")
     private String workerBaseUrl;
+
+    public String getChunkContent(UUID kbId, UUID chunkId) {
+        knowledgeBaseService.findOrThrow(kbId);
+        Chunk chunk = chunkRepository.findById(chunkId)
+                .filter(candidate -> kbId.equals(candidate.getKbId()))
+                .orElseThrow(() -> new ResourceNotFoundException("Citation chunk not found"));
+        String content = citationSectionFromSource(chunk).orElse(chunk.getContent());
+        return rewriteDocumentImageReferences(chunk, content);
+    }
+
+    private String rewriteDocumentImageReferences(Chunk chunk, String markdown) {
+        Map<String, com.dupi.rag.domain.entity.DocumentAsset> assets = documentAssetRepository
+                .findByDocIdOrderByCreatedAtAsc(chunk.getDocId()).stream()
+                .collect(Collectors.toMap(
+                        com.dupi.rag.domain.entity.DocumentAsset::getRelativePath,
+                        asset -> asset,
+                        (first, ignored) -> first,
+                        LinkedHashMap::new
+                ));
+        if (assets.isEmpty()) {
+            return markdown;
+        }
+        var matcher = MARKDOWN_IMAGE_REFERENCE.matcher(markdown);
+        StringBuffer rewritten = new StringBuffer();
+        while (matcher.find()) {
+            String reference = matcher.group(2) != null ? matcher.group(2) : matcher.group(3);
+            if (!assets.containsKey(reference)) {
+                matcher.appendReplacement(rewritten, java.util.regex.Matcher.quoteReplacement(matcher.group()));
+                continue;
+            }
+            String url = "/api/v1/knowledge-bases/" + chunk.getKbId()
+                    + "/documents/" + chunk.getDocId()
+                    + "/assets?path=" + URLEncoder.encode(reference, StandardCharsets.UTF_8);
+            matcher.appendReplacement(rewritten,
+                    java.util.regex.Matcher.quoteReplacement(matcher.group(1) + url));
+        }
+        matcher.appendTail(rewritten);
+        return rewritten.toString();
+    }
+
+    private java.util.Optional<String> citationSectionFromSource(Chunk chunk) {
+        Object headingValue = chunk.getMetadata() == null ? null : chunk.getMetadata().get("heading");
+        String heading = headingValue == null || String.valueOf(headingValue).isBlank()
+                ? null
+                : String.valueOf(headingValue);
+        if (heading == null) {
+            return java.util.Optional.empty();
+        }
+        Document document = documentRepository.findById(chunk.getDocId())
+                .filter(candidate -> Objects.equals(candidate.getKbId(), chunk.getKbId()))
+                .orElse(null);
+        if (document == null || !isMarkdown(document)) {
+            return java.util.Optional.empty();
+        }
+
+        try (InputStream input = minioStorageService.download(document.getObjectKey())) {
+            byte[] bytes = input.readNBytes(MAX_CITATION_SOURCE_BYTES + 1);
+            if (bytes.length > MAX_CITATION_SOURCE_BYTES) {
+                log.warn("Citation source {} exceeds the {} byte preview limit",
+                        document.getId(), MAX_CITATION_SOURCE_BYTES);
+                return java.util.Optional.empty();
+            }
+            return findMarkdownSection(new String(bytes, StandardCharsets.UTF_8), heading);
+        } catch (IOException | RuntimeException ex) {
+            log.warn("Unable to read citation source {}; returning the retrieved chunk",
+                    document.getId(), ex);
+            return java.util.Optional.empty();
+        }
+    }
+
+    private boolean isMarkdown(Document document) {
+        String mimeType = document.getMimeType() == null ? "" : document.getMimeType().toLowerCase(Locale.ROOT);
+        String fileName = document.getFileName() == null ? "" : document.getFileName().toLowerCase(Locale.ROOT);
+        return mimeType.contains("markdown") || fileName.endsWith(".md") || fileName.endsWith(".markdown");
+    }
+
+    private java.util.Optional<String> findMarkdownSection(String markdown, String targetHeading) {
+        String normalized = markdown.replace("\r\n", "\n").replace('\r', '\n');
+        String[] lines = normalized.split("\n", -1);
+        int offset = 0;
+        int sectionStart = -1;
+        int sectionLevel = -1;
+        boolean fenced = false;
+        char fenceCharacter = 0;
+
+        for (String line : lines) {
+            String trimmed = line.stripLeading();
+            if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+                char currentFence = trimmed.charAt(0);
+                if (!fenced) {
+                    fenced = true;
+                    fenceCharacter = currentFence;
+                } else if (currentFence == fenceCharacter) {
+                    fenced = false;
+                }
+            } else if (!fenced) {
+                var matcher = MARKDOWN_HEADING_PATTERN.matcher(line);
+                if (matcher.matches()) {
+                    int level = matcher.group(1).length();
+                    String heading = matcher.group(2).trim();
+                    if (sectionStart < 0 && heading.equals(targetHeading.trim())) {
+                        sectionStart = offset;
+                        sectionLevel = level;
+                    } else if (sectionStart >= 0 && level <= sectionLevel) {
+                        return java.util.Optional.of(normalized.substring(sectionStart, offset).trim());
+                    }
+                }
+            }
+            offset += line.length() + 1;
+        }
+        return sectionStart < 0
+                ? java.util.Optional.empty()
+                : java.util.Optional.of(normalized.substring(sectionStart).trim());
+    }
 
     public RetrieveResponse retrieve(UUID kbId, RetrieveRequest request) {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
