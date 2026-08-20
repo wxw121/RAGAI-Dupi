@@ -20,4 +20,6 @@ public interface IngestFailureNotificationRepository extends JpaRepository<Inges
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     List<IngestFailureNotification> findTop50ByDeliveryStatusInAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
             List<IngestFailureNotificationStatus> statuses, Instant now);
+
+    void deleteByKbId(UUID kbId);
 }

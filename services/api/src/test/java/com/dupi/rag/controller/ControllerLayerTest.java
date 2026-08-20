@@ -342,6 +342,10 @@ class ControllerLayerTest {
         when(kbService.create(create)).thenReturn(kbResponse);
         when(kbService.list()).thenReturn(List.of(kbResponse));
         when(kbService.get(kbId)).thenReturn(kbResponse);
+        OperationJobResponse deleteOperation = OperationJobResponse.builder().id(UUID.randomUUID())
+                .operationType(com.dupi.rag.domain.enums.OperationType.KNOWLEDGE_BASE_DELETE)
+                .aggregateId(kbId).build();
+        when(kbService.submitDelete(kbId)).thenReturn(deleteOperation);
         when(retrievalService.retrieve(kbId, retrieve)).thenReturn(retrieveResponse);
         when(retrievalService.getChunkContent(kbId, citationChunkId)).thenReturn("完整引用原文");
         when(chatService.chatStream(kbId, streamChat)).thenReturn(Flux.just(ServerSentEvent.<String>builder().event("done").data("{}").build()));
@@ -386,7 +390,8 @@ class ControllerLayerTest {
         assertThat(controller.create(create)).isSameAs(kbResponse);
         assertThat(controller.list()).containsExactly(kbResponse);
         assertThat(controller.get(kbId)).isSameAs(kbResponse);
-        controller.delete(kbId);
+        assertThat(controller.delete(kbId).getBody()).isSameAs(deleteOperation);
+        assertThat(controller.delete(kbId).getStatusCode().value()).isEqualTo(202);
         assertThat(controller.retrieve(kbId, retrieve)).isSameAs(retrieveResponse);
         assertThat(controller.getCitationContent(kbId, citationChunkId)).containsEntry("content", "完整引用原文");
         assertThat(controller.chatStream(kbId, streamChat).collectList().block()).hasSize(1);
@@ -440,7 +445,7 @@ class ControllerLayerTest {
         assertThat(controller.completeSparseMigration(kbId, migrationResponse.getId())).isSameAs(migrationResponse);
         assertThat(controller.setLegacySparseFallback(kbId, migrationResponse.getId(), true)).isSameAs(migrationResponse);
 
-        verify(kbService).delete(kbId);
+        verify(kbService, times(2)).submitDelete(kbId);
         verify(chatService).cancel("s1");
         verify(chatService, never()).cancel(null);
         verify(chatSessionService).delete(kbId, sessionId);

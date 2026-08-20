@@ -6,9 +6,12 @@ import com.dupi.rag.domain.entity.RecoveryArchiveItem;
 import com.dupi.rag.domain.enums.OperationPhase;
 import com.dupi.rag.domain.enums.RecoveryArchiveStatus;
 import com.dupi.rag.domain.enums.RecoveryItemStatus;
+import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus;
 import com.dupi.rag.dto.recovery.RecoveryManifest;
 import com.dupi.rag.repository.RecoveryArchiveItemRepository;
 import com.dupi.rag.repository.RecoveryArchiveRepository;
+import com.dupi.rag.repository.KnowledgeBaseRepository;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
@@ -26,9 +29,10 @@ class RecoveryArchiveImportPersistenceServiceTest {
     private final RecoveryArchiveRepository archives = mock(RecoveryArchiveRepository.class);
     private final RecoveryArchiveItemRepository items = mock(RecoveryArchiveItemRepository.class);
     private final OperationDomainGuard guard = mock(OperationDomainGuard.class);
+    private final KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
     private final RecoveryProperties properties = properties();
     private final RecoveryArchiveImportPersistenceService persistence =
-            new RecoveryArchiveImportPersistenceService(archives, items, properties, guard);
+            new RecoveryArchiveImportPersistenceService(archives, items, properties, guard, knowledgeBases);
 
     @Test
     void persistFencesBeforeWritingAndRejectsStaleContextWithoutMetadataWrites() {
@@ -50,6 +54,9 @@ class RecoveryArchiveImportPersistenceServiceTest {
         RecoveryArchiveImportPlan plan = plan();
         RecoveryManifest manifest = manifest(plan, context.jobId());
         when(archives.findById(context.jobId())).thenReturn(Optional.empty());
+        when(knowledgeBases.findByIdForUpdate(plan.knowledgeBaseId())).thenReturn(Optional.of(
+                KnowledgeBase.builder().id(plan.knowledgeBaseId()).tenantId(plan.tenantId())
+                        .lifecycleStatus(KnowledgeBaseLifecycleStatus.READY).build()));
 
         persistence.persist(context, plan, manifest, storedManifest(context.jobId(), manifest));
 
@@ -57,6 +64,25 @@ class RecoveryArchiveImportPersistenceServiceTest {
         order.verify(guard).assertActive(context);
         order.verify(archives).saveAndFlush(any(RecoveryArchive.class));
         order.verify(items).saveAllAndFlush(any());
+    }
+
+    @Test
+    void newArchiveMetadataCannotRacePastKnowledgeBaseDeletion() {
+        OperationExecutionContext context = context();
+        RecoveryArchiveImportPlan plan = plan();
+        RecoveryManifest manifest = manifest(plan, context.jobId());
+        when(archives.findById(context.jobId())).thenReturn(Optional.empty());
+        when(knowledgeBases.findByIdForUpdate(plan.knowledgeBaseId())).thenReturn(Optional.of(
+                KnowledgeBase.builder().id(plan.knowledgeBaseId()).tenantId(plan.tenantId())
+                        .lifecycleStatus(KnowledgeBaseLifecycleStatus.DELETING).build()));
+
+        assertThatThrownBy(() -> persistence.persist(context, plan, manifest,
+                storedManifest(context.jobId(), manifest)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not available for Recovery import");
+
+        verify(archives, never()).saveAndFlush(any());
+        verifyNoInteractions(items);
     }
 
     @Test

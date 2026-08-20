@@ -351,6 +351,30 @@ class MilvusVectorServiceTest {
     }
 
     @Test
+    void sparseCleanupTreatsAnAlreadyAbsentCollectionAsCompleted() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        when(client.hasCollection(any())).thenReturn(R.success(false));
+
+        service(client).deleteSparseByKbIdForCleanup(UUID.randomUUID(), List.of(7));
+
+        verify(client).hasCollection(any());
+        verify(client, never()).delete(any(DeleteParam.class));
+    }
+
+    @Test
+    void sparseCleanupPropagatesCollectionDiscoveryFailureForWorkflowRetry() {
+        MilvusServiceClient client = mock(MilvusServiceClient.class);
+        when(client.hasCollection(any())).thenReturn(R.failed(R.Status.Unknown, "milvus unavailable"));
+
+        assertThatThrownBy(() -> service(client)
+                .deleteSparseByKbIdForCleanup(UUID.randomUUID(), List.of(7)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("sparse collection")
+                .hasMessageContaining("milvus unavailable");
+        verify(client, never()).delete(any(DeleteParam.class));
+    }
+
+    @Test
     void cleanupDeleteThrowsWhenMilvusDeleteFails() {
         MilvusServiceClient client = mock(MilvusServiceClient.class);
         when(client.delete(any(DeleteParam.class)))

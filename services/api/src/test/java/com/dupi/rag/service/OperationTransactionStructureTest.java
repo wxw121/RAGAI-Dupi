@@ -75,6 +75,8 @@ class OperationTransactionStructureTest {
         OperationJobRepository jobs = mock(OperationJobRepository.class);
         RecoveryArchiveRepository archives = mock(RecoveryArchiveRepository.class);
         RecoveryArchiveItemRepository items = mock(RecoveryArchiveItemRepository.class);
+        com.dupi.rag.repository.KnowledgeBaseRepository knowledgeBases =
+                mock(com.dupi.rag.repository.KnowledgeBaseRepository.class);
         TrackingTransactionManager transactions = new TrackingTransactionManager();
         OperationJob job = currentJob();
         when(jobs.findByIdForUpdate(job.getId())).thenReturn(Optional.of(job));
@@ -93,6 +95,7 @@ class OperationTransactionStructureTest {
             spring.registerBean(OperationJobRepository.class, () -> jobs);
             spring.registerBean(RecoveryArchiveRepository.class, () -> archives);
             spring.registerBean(RecoveryArchiveItemRepository.class, () -> items);
+            spring.registerBean(com.dupi.rag.repository.KnowledgeBaseRepository.class, () -> knowledgeBases);
             spring.registerBean(RecoveryProperties.class, () -> { RecoveryProperties value = new RecoveryProperties(); value.setBucket("dupi-recovery"); return value; });
             spring.registerBean("transactionManager", PlatformTransactionManager.class, () -> transactions);
             spring.register(MetadataTransactionConfig.class);
@@ -136,8 +139,9 @@ class OperationTransactionStructureTest {
         @Bean
         RecoveryArchiveImportPersistenceService recoveryArchiveImportPersistenceService(
                 RecoveryArchiveRepository archives, RecoveryArchiveItemRepository items,
-                RecoveryProperties properties, OperationDomainGuard guard) {
-            return new RecoveryArchiveImportPersistenceService(archives, items, properties, guard);
+                RecoveryProperties properties, OperationDomainGuard guard,
+                com.dupi.rag.repository.KnowledgeBaseRepository knowledgeBases) {
+            return new RecoveryArchiveImportPersistenceService(archives, items, properties, guard, knowledgeBases);
         }
     }
 

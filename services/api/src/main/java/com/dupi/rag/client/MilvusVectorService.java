@@ -390,6 +390,28 @@ public class MilvusVectorService {
         }
     }
 
+    /** Missing sparse collections are an idempotent cleanup success; discovery failures remain retryable. */
+    public void deleteSparseByKbIdForCleanup(
+            UUID kbId, java.util.Collection<Integer> profileVersions) {
+        for (Integer version : profileVersions) {
+            String collection = sparseCollection(kbId, version);
+            R<Boolean> exists = client.hasCollection(HasCollectionParam.newBuilder()
+                    .withCollectionName(collection).build());
+            if (exists == null || exists.getStatus() != R.Status.Success.getCode()) {
+                throw new IllegalStateException("Milvus sparse collection lookup failed: "
+                        + (exists != null ? exists.getMessage() : "empty response"));
+            }
+            if (!Boolean.TRUE.equals(exists.getData())) {
+                continue;
+            }
+            DeleteParam param = DeleteParam.newBuilder()
+                    .withCollectionName(collection)
+                    .withExpr("kb_id == \"" + kbId + "\"")
+                    .build();
+            deleteStrict(param);
+        }
+    }
+
     private String sparseCollection(UUID kbId, Integer version) {
         return properties.getCollection() + "_sparse_" + kbId.toString().replace("-", "").toLowerCase()
                 + "_v" + version;

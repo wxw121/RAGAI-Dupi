@@ -14,5 +14,7 @@ public interface DocumentAssetRepository extends JpaRepository<DocumentAsset, UU
 
     List<DocumentAsset> findByKbId(UUID kbId);
 
+    List<DocumentAsset> findByKbIdOrderByIdAsc(UUID kbId);
+
     void deleteByDocId(UUID docId);
 }

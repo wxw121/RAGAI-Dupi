@@ -14,6 +14,7 @@ import com.dupi.rag.service.SparseMigrationService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
@@ -61,8 +62,8 @@ public class KnowledgeBaseController {
     }
 
     @DeleteMapping("/{kbId}")
-    public void delete(@PathVariable UUID kbId) {
-        knowledgeBaseService.delete(kbId);
+    public ResponseEntity<OperationJobResponse> delete(@PathVariable UUID kbId) {
+        return ResponseEntity.accepted().body(knowledgeBaseService.submitDelete(kbId));
     }
 
     @GetMapping("/{kbId}/export")

@@ -12,6 +12,7 @@ import com.dupi.rag.domain.enums.IngestOutboxStatus;
 import com.dupi.rag.domain.enums.IngestStage;
 import com.dupi.rag.domain.enums.OperationStatus;
 import com.dupi.rag.domain.enums.OperationStepStatus;
+import com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus;
 import com.dupi.rag.repository.DocumentAssetRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
@@ -47,6 +48,14 @@ class MarkdownImportPersistenceService {
     @Transactional
     void prepare(OperationExecutionContext context, MarkdownImportPlan plan, String stepKey) {
         OperationJob operation = guard.assertActive(context);
+        var knowledgeBase = knowledgeBases.findByIdForUpdate(plan.knowledgeBaseId())
+                .orElseThrow(() -> new MarkdownImportInvariantException(
+                        "Markdown knowledge base is not available for import"));
+        if (!operation.getTenantId().equals(knowledgeBase.getTenantId())
+                || knowledgeBase.getLifecycleStatus() != KnowledgeBaseLifecycleStatus.READY) {
+            throw new MarkdownImportInvariantException(
+                    "Markdown knowledge base is not available for import");
+        }
         List<Document> existing = documents.findByImportJobIdOrderByCreatedAtAsc(context.jobId());
         if (!existing.isEmpty()) {
             verifyPrepared(plan, existing, operation);

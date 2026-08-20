@@ -38,4 +38,6 @@ public interface VectorCleanupTaskRepository extends JpaRepository<VectorCleanup
             where d.id = :docId
             """)
     Optional<UUID> resolveKnowledgeBaseIdForDocumentTarget(UUID docId);
+
+    void deleteByKnowledgeBaseId(UUID knowledgeBaseId);
 }

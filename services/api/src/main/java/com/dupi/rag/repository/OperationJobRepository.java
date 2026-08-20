@@ -2,6 +2,7 @@ package com.dupi.rag.repository;
 
 import com.dupi.rag.domain.entity.OperationJob;
 import com.dupi.rag.domain.enums.OperationType;
+import com.dupi.rag.domain.enums.OperationStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.jpa.repository.Lock;
@@ -19,6 +20,13 @@ public interface OperationJobRepository extends JpaRepository<OperationJob, UUID
             String tenantId,
             OperationType operationType,
             String idempotencyKey
+    );
+
+    boolean existsByTenantIdAndAggregateTypeAndAggregateIdAndStatusIn(
+            String tenantId,
+            String aggregateType,
+            UUID aggregateId,
+            List<OperationStatus> statuses
     );
 
     @Query("""

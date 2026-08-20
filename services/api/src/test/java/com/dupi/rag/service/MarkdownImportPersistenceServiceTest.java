@@ -17,6 +17,7 @@ import com.dupi.rag.repository.OperationJobRepository;
 import com.dupi.rag.repository.OperationStepRepository;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
+import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockMultipartFile;
 
 import java.io.ByteArrayOutputStream;
@@ -34,6 +35,40 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 class MarkdownImportPersistenceServiceTest {
+
+    @Test
+    void prepareRejectsDeletingKnowledgeBaseBeforeCreatingImportRowsOrQuota() throws Exception {
+        UUID jobId = UUID.randomUUID();
+        UUID kbId = UUID.randomUUID();
+        MarkdownImportPlan plan = new MarkdownPackageParser().parse(jobId, kbId,
+                zip("guide.md", "hello").getInputStream());
+        OperationExecutionContext context = new OperationExecutionContext(jobId, UUID.randomUUID(), 1, 0,
+                OperationPhase.FORWARD, "tenant-a", "alice");
+        OperationJob operation = OperationJob.builder().id(jobId).tenantId("tenant-a").createdBy("alice").build();
+        OperationDomainGuard guard = mock(OperationDomainGuard.class);
+        OperationJobRepository jobs = mock(OperationJobRepository.class);
+        OperationStepRepository steps = mock(OperationStepRepository.class);
+        DocumentRepository documents = mock(DocumentRepository.class);
+        DocumentAssetRepository assets = mock(DocumentAssetRepository.class);
+        IngestJobRepository ingest = mock(IngestJobRepository.class);
+        IngestOutboxEventRepository outbox = mock(IngestOutboxEventRepository.class);
+        UploadQuotaService quotas = mock(UploadQuotaService.class);
+        KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
+        when(guard.assertActive(context)).thenReturn(operation);
+        when(knowledgeBases.findByIdForUpdate(kbId)).thenReturn(Optional.of(
+                com.dupi.rag.domain.entity.KnowledgeBase.builder().id(kbId).tenantId("tenant-a")
+                        .lifecycleStatus(com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus.DELETING).build()));
+        MarkdownImportPersistenceService persistence = new MarkdownImportPersistenceService(
+                guard, jobs, steps, documents, assets, ingest, outbox, quotas, knowledgeBases);
+
+        assertThatThrownBy(() -> persistence.prepare(context, plan, "prepare"))
+                .isInstanceOf(MarkdownImportInvariantException.class)
+                .hasMessageContaining("not available");
+
+        verifyNoInteractions(quotas);
+        verify(documents, never()).save(any());
+        verify(assets, never()).save(any());
+    }
 
     @TestFactory
     Stream<DynamicTest> publishRejectsEveryMutatedImmutableDocumentField() throws Exception {

@@ -25,4 +25,6 @@ public interface DocumentRepository extends JpaRepository<Document, UUID> {
     List<Document> findTop1001ByKbIdOrderByCreatedAtDesc(@Param("kbId") UUID kbId);
 
     List<Document> findByImportJobIdOrderByCreatedAtAsc(UUID importJobId);
+
+    List<Document> findByKbIdOrderByIdAsc(UUID kbId);
 }

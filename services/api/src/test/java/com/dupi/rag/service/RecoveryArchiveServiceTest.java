@@ -74,7 +74,7 @@ class RecoveryArchiveServiceTest {
     void createBindsTenantSourceRevisionAndStablePrefix() {
         UUID kbId = UUID.randomUUID();
         KnowledgeBase kb = knowledgeBase(kbId, Instant.parse("2026-07-15T12:00:00Z"));
-        when(knowledgeBases.findOrThrow(kbId)).thenReturn(kb);
+        when(knowledgeBases.findForUpdateOrThrow(kbId)).thenReturn(kb);
         when(archives.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
 
         RecoveryArchive archive = service.create(kbId, null);
@@ -85,6 +85,7 @@ class RecoveryArchiveServiceTest {
         assertThat(archive.getCreatedBy()).isEqualTo("system");
         assertThat(archive.getObjectPrefix()).isEqualTo(
                 "archives/tenant-a/" + archive.getId() + "/");
+        verify(knowledgeBases).findForUpdateOrThrow(kbId);
     }
 
     @Test

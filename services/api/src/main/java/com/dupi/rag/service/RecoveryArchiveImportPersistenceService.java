@@ -9,6 +9,8 @@ import com.dupi.rag.dto.recovery.RecoveryManifest;
 import com.dupi.rag.dto.recovery.RecoveryManifestItem;
 import com.dupi.rag.repository.RecoveryArchiveItemRepository;
 import com.dupi.rag.repository.RecoveryArchiveRepository;
+import com.dupi.rag.repository.KnowledgeBaseRepository;
+import com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -28,6 +30,7 @@ class RecoveryArchiveImportPersistenceService {
     private final RecoveryArchiveItemRepository items;
     private final RecoveryProperties properties;
     private final OperationDomainGuard guard;
+    private final KnowledgeBaseRepository knowledgeBases;
 
     @Transactional
     public void persist(OperationExecutionContext context, RecoveryArchiveImportPlan plan,
@@ -39,6 +42,13 @@ class RecoveryArchiveImportPersistenceService {
             requireArchiveMatch(existing.get(), archiveId, plan, manifest);
             requireItemsMatch(archiveId, manifest, storedManifest);
             return;
+        }
+        var knowledgeBase = knowledgeBases.findByIdForUpdate(plan.knowledgeBaseId())
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Knowledge base is not available for Recovery import"));
+        if (!Objects.equals(knowledgeBase.getTenantId(), plan.tenantId())
+                || knowledgeBase.getLifecycleStatus() != KnowledgeBaseLifecycleStatus.READY) {
+            throw new IllegalArgumentException("Knowledge base is not available for Recovery import");
         }
         RecoveryArchive archive = RecoveryArchive.builder().id(archiveId).tenantId(plan.tenantId())
                 .sourceKnowledgeBaseId(plan.knowledgeBaseId()).status(RecoveryArchiveStatus.COMPLETED)

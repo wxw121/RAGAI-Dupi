@@ -53,7 +53,7 @@ public class RecoveryArchiveService {
 
     @Transactional
     public RecoveryArchive create(UUID knowledgeBaseId, String actor) {
-        KnowledgeBase kb = knowledgeBases.findOrThrow(knowledgeBaseId);
+        KnowledgeBase kb = knowledgeBases.findForUpdateOrThrow(knowledgeBaseId);
         UUID archiveId = UUID.randomUUID();
         RecoveryArchive archive = RecoveryArchive.builder()
                 .id(archiveId)

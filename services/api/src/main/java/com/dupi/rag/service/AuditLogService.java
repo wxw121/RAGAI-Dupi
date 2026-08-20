@@ -119,8 +119,16 @@ public class AuditLogService {
     public void recordSuccessInCurrentTransaction(
             String action, String targetType, UUID targetId, String message
     ) {
+        recordSuccessInCurrentTransactionForTenant(
+                TenantContext.getTenantId(), action, targetType, targetId, message);
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void recordSuccessInCurrentTransactionForTenant(
+            String tenantId, String action, String targetType, UUID targetId, String message
+    ) {
         repository.save(AuditLog.builder()
-                .tenantId(TenantContext.getTenantId())
+                .tenantId(tenantId)
                 .action(action)
                 .targetType(targetType)
                 .targetId(targetId)
