@@ -15,15 +15,16 @@ import java.util.Map;
 final class MarkdownImageReferenceExtractor {
 
     List<String> extract(String markdown) {
-        Map<String, String> definitions = definitions(markdown);
+        String visible = withoutCode(markdown);
+        Map<String, String> definitions = definitions(visible);
         LinkedHashSet<String> targets = new LinkedHashSet<>();
-        for (int index = 0; index + 1 < markdown.length(); index++) {
-            if (markdown.charAt(index) != '!' || markdown.charAt(index + 1) != '[' || escaped(markdown, index)) continue;
-            Bracket alt = bracket(markdown, index + 1);
+        for (int index = 0; index + 1 < visible.length(); index++) {
+            if (visible.charAt(index) != '!' || visible.charAt(index + 1) != '[' || escaped(visible, index)) continue;
+            Bracket alt = bracket(visible, index + 1);
             if (alt == null) continue;
             int next = alt.end() + 1;
-            if (next < markdown.length() && markdown.charAt(next) == '(') {
-                Destination inline = inlineDestination(markdown, next);
+            if (next < visible.length() && visible.charAt(next) == '(') {
+                Destination inline = inlineDestination(visible, next);
                 if (inline != null) {
                     add(targets, inline.value());
                     index = inline.end();
@@ -31,8 +32,8 @@ final class MarkdownImageReferenceExtractor {
                 continue;
             }
             String label = alt.value();
-            if (next < markdown.length() && markdown.charAt(next) == '[') {
-                Bracket reference = bracket(markdown, next);
+            if (next < visible.length() && visible.charAt(next) == '[') {
+                Bracket reference = bracket(visible, next);
                 if (reference == null) continue;
                 if (!reference.value().isBlank()) label = reference.value();
                 index = reference.end();
@@ -47,8 +48,7 @@ final class MarkdownImageReferenceExtractor {
     private Map<String, String> definitions(String markdown) {
         Map<String, String> definitions = new LinkedHashMap<>();
         for (String line : markdown.split("\\R", -1)) {
-            int start = 0;
-            while (start < line.length() && start < 3 && line.charAt(start) == ' ') start++;
+            int start = contentStart(line);
             if (start >= line.length() || line.charAt(start) != '[') continue;
             Bracket label = bracket(line, start);
             if (label == null || label.end() + 1 >= line.length() || line.charAt(label.end() + 1) != ':') continue;
@@ -58,6 +58,140 @@ final class MarkdownImageReferenceExtractor {
             }
         }
         return definitions;
+    }
+
+    private String withoutCode(String markdown) {
+        char[] visible = markdown.toCharArray();
+        maskFencedBlocks(markdown, visible);
+        maskCodeSpans(visible);
+        return new String(visible);
+    }
+
+    private void maskFencedBlocks(String markdown, char[] visible) {
+        Fence open = null;
+        for (int lineStart = 0; lineStart < markdown.length();) {
+            int lineBreak = markdown.indexOf('\n', lineStart);
+            int nextLine = lineBreak < 0 ? markdown.length() : lineBreak + 1;
+            int lineEnd = lineBreak < 0 ? markdown.length() : lineBreak;
+            if (lineEnd > lineStart && markdown.charAt(lineEnd - 1) == '\r') lineEnd--;
+            String line = markdown.substring(lineStart, lineEnd);
+            Fence candidate = fence(line, open);
+            if (open != null) {
+                mask(visible, lineStart, lineEnd);
+                if (candidate != null) open = null;
+            } else if (candidate != null) {
+                mask(visible, lineStart, lineEnd);
+                open = candidate;
+            }
+            lineStart = nextLine;
+        }
+    }
+
+    private Fence fence(String line, Fence open) {
+        int start = contentStart(line);
+        if (start >= line.length()) return null;
+        char marker = line.charAt(start);
+        if (marker != '`' && marker != '~') return null;
+        int end = start;
+        while (end < line.length() && line.charAt(end) == marker) end++;
+        int length = end - start;
+        if (length < 3) return null;
+        String remainder = line.substring(end);
+        if (open == null) {
+            if (marker == '`' && remainder.indexOf('`') >= 0) return null;
+            return new Fence(marker, length);
+        }
+        return marker == open.marker() && length >= open.length() && remainder.isBlank() ? open : null;
+    }
+
+    private void maskCodeSpans(char[] visible) {
+        for (int index = 0; index < visible.length;) {
+            if (visible[index] != '`' || escaped(visible, index)) {
+                index++;
+                continue;
+            }
+            int openingLength = runLength(visible, index, '`');
+            int closing = findClosingRun(visible, index + openingLength, openingLength);
+            if (closing < 0) {
+                index += openingLength;
+                continue;
+            }
+            mask(visible, index, closing + openingLength);
+            index = closing + openingLength;
+        }
+    }
+
+    private int findClosingRun(char[] value, int offset, int expectedLength) {
+        for (int cursor = offset; cursor < value.length;) {
+            if (value[cursor] != '`' || escaped(value, cursor)) {
+                cursor++;
+                continue;
+            }
+            int length = runLength(value, cursor, '`');
+            if (length == expectedLength) return cursor;
+            cursor += length;
+        }
+        return -1;
+    }
+
+    private int runLength(char[] value, int offset, char marker) {
+        int end = offset;
+        while (end < value.length && value[end] == marker) end++;
+        return end - offset;
+    }
+
+    private void mask(char[] value, int start, int end) {
+        for (int index = start; index < end; index++) {
+            if (value[index] != '\r' && value[index] != '\n') value[index] = ' ';
+        }
+    }
+
+    private int contentStart(String line) {
+        int cursor = skipUpToThreeSpaces(line, 0);
+        boolean consumedContainer;
+        do {
+            consumedContainer = false;
+            if (cursor < line.length() && line.charAt(cursor) == '>') {
+                cursor++;
+                if (cursor < line.length() && (line.charAt(cursor) == ' ' || line.charAt(cursor) == '\t')) cursor++;
+                cursor = skipUpToThreeSpaces(line, cursor);
+                consumedContainer = true;
+            }
+            int listEnd = listMarkerEnd(line, cursor);
+            if (listEnd >= 0) {
+                cursor = skipUpToThreeSpaces(line, listEnd);
+                consumedContainer = true;
+            }
+        } while (consumedContainer);
+        return cursor;
+    }
+
+    private int skipUpToThreeSpaces(String line, int offset) {
+        int cursor = offset;
+        int spaces = 0;
+        while (cursor < line.length() && spaces < 3 && line.charAt(cursor) == ' ') {
+            cursor++;
+            spaces++;
+        }
+        return cursor;
+    }
+
+    private int listMarkerEnd(String line, int offset) {
+        if (offset >= line.length()) return -1;
+        int markerEnd = offset;
+        char first = line.charAt(offset);
+        if (first == '-' || first == '+' || first == '*') {
+            markerEnd++;
+        } else if (Character.isDigit(first)) {
+            while (markerEnd < line.length() && markerEnd - offset < 9
+                    && Character.isDigit(line.charAt(markerEnd))) markerEnd++;
+            if (markerEnd >= line.length() || (line.charAt(markerEnd) != '.' && line.charAt(markerEnd) != ')')) return -1;
+            markerEnd++;
+        } else {
+            return -1;
+        }
+        if (markerEnd >= line.length() || (line.charAt(markerEnd) != ' ' && line.charAt(markerEnd) != '\t')) return -1;
+        return markerEnd + 1;
     }
 
     private Destination inlineDestination(String text, int openingParenthesis) {
@@ -179,6 +313,12 @@ final class MarkdownImageReferenceExtractor {
         return slashes % 2 == 1;
     }
 
+    private boolean escaped(char[] text, int offset) {
+        int slashes = 0;
+        for (int cursor = offset - 1; cursor >= 0 && text[cursor] == '\\'; cursor--) slashes++;
+        return slashes % 2 == 1;
+    }
+
     private String normalizeLabel(String label) {
         return label.trim().replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
     }
@@ -189,4 +329,5 @@ final class MarkdownImageReferenceExtractor {
 
     private record Bracket(String value, int end) { }
     private record Destination(String value, int end) { }
+    private record Fence(char marker, int length) { }
 }

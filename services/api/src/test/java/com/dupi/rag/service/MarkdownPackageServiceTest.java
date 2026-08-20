@@ -60,6 +60,59 @@ class MarkdownPackageServiceTest {
     }
 
     @Test
+    void fencedReferenceDefinitionsDoNotResolveOutsideImageExamples() throws Exception {
+        MarkdownImportPlan plan = new MarkdownPackageParser().parse(UUID.randomUUID(), UUID.randomUUID(), zip(
+                "guide.md", "![demo]\n\n```text\n[demo]: images/missing.png\n```")
+                .getInputStream());
+
+        assertThat(plan.documents().get(0).assets()).isEmpty();
+    }
+
+    @Test
+    void fencedImageTokensDoNotUseOutsideDefinitions() throws Exception {
+        MarkdownImportPlan plan = new MarkdownPackageParser().parse(UUID.randomUUID(), UUID.randomUUID(), zip(
+                "guide.md", "```markdown\n![demo][brand]\n![inline](images/missing-inline.png)\n```\n\n"
+                        + "[brand]: images/missing-reference.png")
+                .getInputStream());
+
+        assertThat(plan.documents().get(0).assets()).isEmpty();
+    }
+
+    @Test
+    void inlineCodeImageExamplesDoNotCreateDependencies() throws Exception {
+        MarkdownImportPlan plan = new MarkdownPackageParser().parse(UUID.randomUUID(), UUID.randomUUID(), zip(
+                "guide.md", "Use `![inline](images/missing-inline.png)` or "
+                        + "``![demo][brand]``.\n\n[brand]: images/missing-reference.png")
+                .getInputStream());
+
+        assertThat(plan.documents().get(0).assets()).isEmpty();
+    }
+
+    @Test
+    void escapedBackticksDoNotHideGenuineImages() throws Exception {
+        MarkdownImportPlan plan = new MarkdownPackageParser().parse(UUID.randomUUID(), UUID.randomUUID(), zip(
+                "guide.md", "\\`before ![logo](images/logo.png) \\`after",
+                "images/logo.png", "logo").getInputStream());
+
+        assertThat(plan.documents().get(0).assets())
+                .extracting(MarkdownImportPlan.Asset::sourcePath)
+                .containsExactly("images/logo.png");
+    }
+
+    @Test
+    void genuineContainerReferencesAndBalancedTargetsRemainPlanned() throws Exception {
+        MarkdownImportPlan plan = new MarkdownPackageParser().parse(UUID.randomUUID(), UUID.randomUUID(), zip(
+                "guide.md", "> ![logo][brand]\n>\n> [brand]: images/logo.png\n\n"
+                        + "- ![balanced](images/chart_(final).png)",
+                "images/logo.png", "logo",
+                "images/chart_(final).png", "chart").getInputStream());
+
+        assertThat(plan.documents().get(0).assets())
+                .extracting(MarkdownImportPlan.Asset::sourcePath)
+                .containsExactly("images/logo.png", "images/chart_(final).png");
+    }
+
+    @Test
     void validPackageCreatesOneImmutableIntakeAfterFullValidation() throws Exception {
         MarkdownPackageParser parser = new MarkdownPackageParser();
         MarkdownImportIntakeService intake = mock(MarkdownImportIntakeService.class);
