@@ -69,6 +69,7 @@ class RecoveryArchiveImportWorkflowTest {
                 .thenReturn("recovery-staging/" + plan.zipSha256() + "/" + jobId + ".zip");
         when(storage.finalKey(eq("tenant-a"), eq(jobId), anyString()))
                 .thenAnswer(call -> "archives/tenant-a/" + jobId + "/" + call.getArgument(2));
+        when(storage.inspectVersion(any())).thenReturn(matchingStage());
         statefulSteps();
         workflow = new RecoveryArchiveImportWorkflow(jobs, stepRepository, operations, claims,
                 storage, manifests, persistence);
@@ -76,7 +77,7 @@ class RecoveryArchiveImportWorkflowTest {
 
     @Test
     void temporaryStorageFailureRequestsRetryAndKeepsPromotionReplayable() throws Exception {
-        when(storage.inspect(any())).thenReturn(matchingStage(), inspection(RecoveryStorageOutcome.ABSENT));
+        when(storage.inspect(any(), any())).thenReturn(inspection(RecoveryStorageOutcome.ABSENT));
         when(storage.open("bucket", stageEvidence.objectKey()))
                 .thenReturn(new ByteArrayInputStream(zip(Map.of("records/one.json", "one".getBytes()))));
         when(storage.putFinal(eq("tenant-a"), eq(jobId), eq("records/one.json"), any()))
@@ -92,8 +93,8 @@ class RecoveryArchiveImportWorkflowTest {
     void runningPromotionWithAbsentObjectReuploadsSameDeterministicKey() throws Exception {
         String promotion = "promote-" + sha("records/one.json".getBytes());
         stepState.put(promotion, step(promotion, OperationStepStatus.RUNNING));
-        when(storage.inspect(any())).thenReturn(matchingStage(), inspection(RecoveryStorageOutcome.ABSENT),
-                inspection(RecoveryStorageOutcome.MATCHING), matchingStage(),
+        when(storage.inspect(any(), any())).thenReturn(inspection(RecoveryStorageOutcome.ABSENT),
+                inspection(RecoveryStorageOutcome.MATCHING),
                 inspection(RecoveryStorageOutcome.CONFLICT));
         when(storage.open("bucket", stageEvidence.objectKey()))
                 .thenReturn(new ByteArrayInputStream(zip(Map.of("records/one.json", "one".getBytes()))));
@@ -108,7 +109,7 @@ class RecoveryArchiveImportWorkflowTest {
 
     @Test
     void permanentObjectConflictRequestsCompensationWithoutOverwriting() {
-        when(storage.inspect(any())).thenReturn(matchingStage(), inspection(RecoveryStorageOutcome.CONFLICT));
+        when(storage.inspect(any(), any())).thenReturn(inspection(RecoveryStorageOutcome.CONFLICT));
 
         assertThatThrownBy(() -> workflow.executeForward(forward)).isInstanceOf(CompensateOperationException.class);
         verify(storage, never()).open(anyString(), anyString());
@@ -145,11 +146,8 @@ class RecoveryArchiveImportWorkflowTest {
             return forward;
         });
         Map<String, Integer> inspections = new java.util.concurrent.ConcurrentHashMap<>();
-        when(storage.inspect(any())).thenAnswer(call -> {
+        when(storage.inspect(any(), any())).thenAnswer(call -> {
             StoredRecoveryObject expected = call.getArgument(0);
-            if (expected.objectKey().startsWith("recovery-staging/")) {
-                return new RecoveryStorageInspection(RecoveryStorageOutcome.MATCHING, stageEvidence);
-            }
             if (expected.objectKey().endsWith("manifest.json")) return inspection(RecoveryStorageOutcome.CONFLICT);
             int attempt = inspections.merge(expected.objectKey(), 1, Integer::sum);
             return inspection(attempt == 1 ? RecoveryStorageOutcome.ABSENT : RecoveryStorageOutcome.MATCHING);
@@ -202,7 +200,7 @@ class RecoveryArchiveImportWorkflowTest {
     void realRunnerMovesTemporaryStorageFailureToRetryWaitAndConflictToCompensation() throws Exception {
         OperationJob firstJob = claimedJob(OperationPhase.FORWARD);
         when(claims.claimNext()).thenReturn(OperationClaimResult.claimed(firstJob));
-        when(storage.inspect(any())).thenReturn(matchingStage(), inspection(RecoveryStorageOutcome.ABSENT));
+        when(storage.inspect(any(), any())).thenReturn(inspection(RecoveryStorageOutcome.ABSENT));
         when(storage.open("bucket", stageEvidence.objectKey()))
                 .thenReturn(new ByteArrayInputStream(zip(Map.of("records/one.json", "one".getBytes()))));
         when(storage.putFinal(eq("tenant-a"), eq(jobId), eq("records/one.json"), any()))
@@ -222,7 +220,8 @@ class RecoveryArchiveImportWorkflowTest {
         when(storage.bucket()).thenReturn("bucket");
         when(storage.finalKey(eq("tenant-a"), eq(jobId), anyString()))
                 .thenAnswer(call -> "archives/tenant-a/" + jobId + "/" + call.getArgument(2));
-        when(storage.inspect(any())).thenReturn(matchingStage(), inspection(RecoveryStorageOutcome.CONFLICT));
+        when(storage.inspectVersion(any())).thenReturn(matchingStage());
+        when(storage.inspect(any(), any())).thenReturn(inspection(RecoveryStorageOutcome.CONFLICT));
         doAnswer(call -> { conflictJob.setPhase(OperationPhase.COMPENSATION); conflictJob.setStatus(OperationStatus.COMPENSATING); return null; })
                 .when(claims).beginCompensation(any(), anyString());
 
@@ -230,6 +229,28 @@ class RecoveryArchiveImportWorkflowTest {
         assertThat(conflictJob.getPhase()).isEqualTo(OperationPhase.COMPENSATION);
         assertThat(conflictJob.getStatus()).isEqualTo(OperationStatus.COMPENSATING);
         verify(claims, never()).complete(any());
+    }
+
+    @Test
+    void realRunnerMovesStalePublishedStageVersionDirectlyToCompensation() {
+        OperationJob staleJob = claimedJob(OperationPhase.FORWARD);
+        when(claims.claimNext()).thenReturn(OperationClaimResult.claimed(staleJob));
+        when(storage.inspectVersion(stageEvidence)).thenReturn(new RecoveryStorageInspection(
+                RecoveryStorageOutcome.STALE_VERSION,
+                new StoredRecoveryObject(stageEvidence.bucket(), stageEvidence.objectKey(),
+                        stageEvidence.byteSize(), stageEvidence.sha256(), "newer-version")));
+        doAnswer(call -> {
+            staleJob.setPhase(OperationPhase.COMPENSATION);
+            staleJob.setStatus(OperationStatus.COMPENSATING);
+            return null;
+        }).when(claims).beginCompensation(any(), anyString());
+
+        new OperationJobRunner(claims, List.of(workflow)).runOne();
+
+        assertThat(staleJob.getPhase()).isEqualTo(OperationPhase.COMPENSATION);
+        assertThat(staleJob.getStatus()).isEqualTo(OperationStatus.COMPENSATING);
+        verify(claims, never()).scheduleRetry(any(), anyString());
+        verify(storage, never()).open(anyString(), anyString());
     }
 
     private void statefulSteps() {

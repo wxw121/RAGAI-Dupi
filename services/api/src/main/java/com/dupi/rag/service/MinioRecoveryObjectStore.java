@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 @Component
 @RequiredArgsConstructor
@@ -62,6 +63,26 @@ public class MinioRecoveryObjectStore implements RecoveryObjectStore {
     }
 
     @Override
+    public RecoveryObjectWriteResult putIfAbsent(String bucket, String key, InputStream input) throws Exception {
+        ensureBucket(bucket);
+        try {
+            ObjectWriteResponse response = minioClient.putObject(PutObjectArgs.builder()
+                    .bucket(bucket)
+                    .object(key)
+                    .stream(input, -1, MIN_PART_SIZE)
+                    .contentType("application/octet-stream")
+                    .extraHeaders(Map.of("If-None-Match", "*"))
+                    .build());
+            String version = response.versionId();
+            if (version == null || version.isBlank()) version = response.etag();
+            return RecoveryObjectWriteResult.created(version);
+        } catch (ErrorResponseException exception) {
+            if (isPreconditionFailed(exception)) return RecoveryObjectWriteResult.lostRace();
+            throw exception;
+        }
+    }
+
+    @Override
     public String version(String bucket, String key) throws Exception {
         try {
             StatObjectResponse response = minioClient.statObject(
@@ -77,5 +98,11 @@ public class MinioRecoveryObjectStore implements RecoveryObjectStore {
     private boolean isMissing(ErrorResponseException exception) {
         String code = exception.errorResponse() == null ? null : exception.errorResponse().code();
         return "NoSuchKey".equals(code) || "NoSuchObject".equals(code) || "NotFound".equals(code);
+    }
+
+    private boolean isPreconditionFailed(ErrorResponseException exception) {
+        String code = exception.errorResponse() == null ? null : exception.errorResponse().code();
+        return "PreconditionFailed".equals(code)
+                || exception.response() != null && exception.response().code() == 412;
     }
 }

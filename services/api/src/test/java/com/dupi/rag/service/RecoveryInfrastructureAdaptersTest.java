@@ -12,6 +12,14 @@ import io.milvus.param.dml.QueryParam;
 import io.milvus.param.dml.UpsertParam;
 import io.minio.GetObjectResponse;
 import io.minio.MinioClient;
+import io.minio.ObjectWriteResponse;
+import io.minio.PutObjectArgs;
+import io.minio.errors.ErrorResponseException;
+import io.minio.messages.ErrorResponse;
+import okhttp3.Headers;
+import okhttp3.Protocol;
+import okhttp3.Request;
+import okhttp3.Response;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
@@ -32,6 +40,41 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 class RecoveryInfrastructureAdaptersTest {
+    @Test
+    void minioConditionalCreateSendsPreconditionAndTranslatesOnlyLostRaces() throws Exception {
+        MinioClient client = mock(MinioClient.class);
+        ObjectWriteResponse written = new ObjectWriteResponse(
+                Headers.of(), "recovery", null, "stage", "etag-7", "version-7");
+        when(client.bucketExists(any())).thenReturn(true);
+        when(client.putObject(any())).thenReturn(written);
+        MinioRecoveryObjectStore store = new MinioRecoveryObjectStore(client);
+
+        assertThat(store.putIfAbsent("recovery", "stage", new ByteArrayInputStream(new byte[]{1})))
+                .isEqualTo(RecoveryObjectWriteResult.created("version-7"));
+        ArgumentCaptor<PutObjectArgs> args = ArgumentCaptor.forClass(PutObjectArgs.class);
+        verify(client).putObject(args.capture());
+        assertThat(args.getValue().extraHeaders().get("If-None-Match")).containsExactly("*");
+
+        ErrorResponseException lostRace = error("PreconditionFailed", 412);
+        doThrow(lostRace).when(client).putObject(any());
+        assertThat(store.putIfAbsent("recovery", "stage", new ByteArrayInputStream(new byte[]{1})))
+                .isEqualTo(RecoveryObjectWriteResult.lostRace());
+
+        ErrorResponseException outage = error("AccessDenied", 403);
+        doThrow(outage).when(client).putObject(any());
+        assertThatThrownBy(() -> store.putIfAbsent(
+                "recovery", "stage", new ByteArrayInputStream(new byte[]{1})))
+                .isSameAs(outage);
+    }
+
+    private static ErrorResponseException error(String code, int status) {
+        ErrorResponse error = new ErrorResponse(code, code, "recovery", "stage", "/stage", "request", "host");
+        Response response = new Response.Builder()
+                .request(new Request.Builder().url("http://localhost/stage").build())
+                .protocol(Protocol.HTTP_1_1).code(status).message(code).build();
+        return new ErrorResponseException(error, response, null);
+    }
+
     @Test
     void minioAdapterEnsuresBucketAndDelegatesObjectOperations() throws Exception {
         MinioClient client = mock(MinioClient.class);

@@ -230,10 +230,10 @@ public class RecoveryArchiveImportWorkflow implements OperationWorkflow {
 
     private RecoveryStorageOutcome inspect(OperationExecutionContext context, StoredRecoveryObject expected) {
         renew(context);
-        RecoveryStorageOutcome outcome = storage.inspect(expected).outcome();
+        RecoveryStorageOutcome outcome = storage.inspect(expected, () -> renew(context)).outcome();
         renew(context);
         if (outcome == RecoveryStorageOutcome.STALE_VERSION) {
-            throw new RetryableOperationException("Recovery staging object version changed");
+            throw new RecoveryStorageConflictException("Recovery object version changed from its durable evidence");
         }
         return outcome;
     }
@@ -247,12 +247,15 @@ public class RecoveryArchiveImportWorkflow implements OperationWorkflow {
     }
 
     private void requireMatchingStage(OperationExecutionContext context, StoredRecoveryObject evidence) {
-        RecoveryStorageOutcome outcome = inspect(context, evidence);
+        renew(context);
+        RecoveryStorageOutcome outcome = storage.inspectVersion(evidence).outcome();
+        renew(context);
         if (outcome == RecoveryStorageOutcome.ABSENT) {
             throw new RetryableOperationException("Recovery staging object is temporarily absent");
         }
-        if (outcome == RecoveryStorageOutcome.CONFLICT) {
-            throw new RecoveryStorageConflictException("Recovery staging object differs from its published plan");
+        if (outcome == RecoveryStorageOutcome.CONFLICT || outcome == RecoveryStorageOutcome.STALE_VERSION) {
+            throw new RecoveryStorageConflictException(
+                    "Recovery staging object differs from its published immutable evidence");
         }
     }
 

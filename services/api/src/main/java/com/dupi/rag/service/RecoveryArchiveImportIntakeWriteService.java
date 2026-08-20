@@ -106,10 +106,17 @@ class RecoveryArchiveImportIntakeWriteService {
     }
 
     @Transactional
-    void reopenCleanedIntake(UUID jobId, RecoveryArchiveImportPlan plan, String stagingKey) {
+    RecoveryIntakeReopenOutcome reopenCleanedIntake(
+            UUID jobId, RecoveryArchiveImportPlan plan, String stagingKey) {
         OperationJob job = locked(jobId);
         validatePlan(job, plan);
         OperationStep stage = requiredStage(jobId);
+        if (job.getPhase() == OperationPhase.FORWARD && job.getStatus() == OperationStatus.PREPARED
+                && !Boolean.TRUE.equals(job.getRunnable())
+                && stage.getStatus() == OperationStepStatus.PENDING
+                && stagingKey.equals(stage.getResourceRef())) {
+            return RecoveryIntakeReopenOutcome.JOINED;
+        }
         if (job.getPhase() != OperationPhase.COMPENSATION || job.getStatus() != OperationStatus.COMPLETED
                 || stage.getStatus() != OperationStepStatus.COMPENSATED) {
             throw new OperationConflictException("Recovery import cleanup has not completed");
@@ -147,6 +154,7 @@ class RecoveryArchiveImportIntakeWriteService {
             }
         }
         jobs.saveAndFlush(job);
+        return RecoveryIntakeReopenOutcome.REOPENED;
     }
 
     void validatePlan(OperationJob job, RecoveryArchiveImportPlan plan) {

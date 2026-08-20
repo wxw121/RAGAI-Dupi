@@ -7,10 +7,16 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.LinkedHashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.ZipInputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -18,6 +24,59 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
 class RecoveryStorageServiceTest {
+
+    @Test
+    void independentInstancesAtomicallyConvergeOnOneImmutableStagingVersion() throws Exception {
+        RacingRecoveryObjectStore objectStore = new RacingRecoveryObjectStore();
+        RecoveryStorageService firstStorage = service(objectStore);
+        RecoveryStorageService secondStorage = service(objectStore);
+        byte[] bytes = "payload".getBytes(StandardCharsets.UTF_8);
+        StoredRecoveryObject expected = new StoredRecoveryObject("dupi-recovery",
+                "recovery-staging/hash/job.zip", bytes.length,
+                "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5");
+
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var first = pool.submit(() -> firstStorage.putStaging(expected, new ByteArrayInputStream(bytes)));
+            var second = pool.submit(() -> secondStorage.putStaging(expected, new ByteArrayInputStream(bytes)));
+            StoredRecoveryObject firstEvidence = first.get(10, TimeUnit.SECONDS);
+            StoredRecoveryObject secondEvidence = second.get(10, TimeUnit.SECONDS);
+            assertThat(firstEvidence).isEqualTo(secondEvidence);
+            assertThat(firstEvidence.versionToken()).isEqualTo("version-1");
+            assertThat(objectStore.createdVersions).hasValue(1);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void fullObjectInspectionRenewsWhileTheUnderlyingStreamIsStillBeingRead() throws Exception {
+        InMemoryRecoveryObjectStore objectStore = new InMemoryRecoveryObjectStore();
+        byte[] bytes = new byte[192 * 1024];
+        objectStore.objects.put("large", bytes);
+        objectStore.readChunkSize = 4096;
+        RecoveryStorageService storage = service(objectStore);
+        StoredRecoveryObject expected = new StoredRecoveryObject("dupi-recovery", "large", bytes.length,
+                HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)), "version-1");
+        AtomicInteger renewals = new AtomicInteger();
+
+        assertThat(storage.inspect(expected, renewals::incrementAndGet).outcome())
+                .isEqualTo(RecoveryStorageOutcome.MATCHING);
+        assertThat(renewals.get()).isGreaterThanOrEqualTo(3);
+        assertThat(objectStore.getCalls).hasValue(1);
+    }
+
+    @Test
+    void versionOnlyInspectionDoesNotOpenOrHashTheStagedObject() {
+        InMemoryRecoveryObjectStore objectStore = new InMemoryRecoveryObjectStore();
+        objectStore.objects.put("stage", "payload".getBytes(StandardCharsets.UTF_8));
+        RecoveryStorageService storage = service(objectStore);
+        StoredRecoveryObject expected = new StoredRecoveryObject("dupi-recovery", "stage", 7,
+                "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5", "version-1");
+
+        assertThat(storage.inspectVersion(expected).outcome()).isEqualTo(RecoveryStorageOutcome.MATCHING);
+        assertThat(objectStore.getCalls).hasValue(0);
+    }
 
     @Test
     void putStreamsBytesAndReturnsDigestEvidence() {
@@ -225,10 +284,12 @@ class RecoveryStorageServiceTest {
         return new RecoveryStorageService(properties, objectStore);
     }
 
-    private static final class InMemoryRecoveryObjectStore implements RecoveryObjectStore {
+    private static class InMemoryRecoveryObjectStore implements RecoveryObjectStore {
         private final Map<String, byte[]> objects = new LinkedHashMap<>();
         private Exception deleteFailure;
         private String version = "version-1";
+        private int readChunkSize = Integer.MAX_VALUE;
+        private final AtomicInteger getCalls = new AtomicInteger();
 
         @Override
         public void put(String bucket, String key, InputStream input) throws Exception {
@@ -238,10 +299,22 @@ class RecoveryStorageServiceTest {
         }
 
         @Override
+        public RecoveryObjectWriteResult putIfAbsent(String bucket, String key, InputStream input) throws Exception {
+            if (objects.containsKey(key)) return RecoveryObjectWriteResult.lostRace();
+            put(bucket, key, input);
+            return RecoveryObjectWriteResult.created(version);
+        }
+
+        @Override
         public InputStream get(String bucket, String key) throws Exception {
             byte[] value = objects.get(key);
             if (value == null) throw new RecoveryObjectNotFoundException(bucket, key);
-            return new ByteArrayInputStream(value);
+            getCalls.incrementAndGet();
+            return new ByteArrayInputStream(value) {
+                @Override public synchronized int read(byte[] bytes, int offset, int length) {
+                    return super.read(bytes, offset, Math.min(length, readChunkSize));
+                }
+            };
         }
 
         @Override
@@ -260,5 +333,35 @@ class RecoveryStorageServiceTest {
             if (!objects.containsKey(key)) throw new RecoveryObjectNotFoundException(bucket, key);
             return version;
         }
+    }
+
+    private static final class RacingRecoveryObjectStore implements RecoveryObjectStore {
+        private final CyclicBarrier initialStats = new CyclicBarrier(2);
+        private final AtomicInteger stats = new AtomicInteger();
+        private final AtomicInteger createdVersions = new AtomicInteger();
+        private volatile byte[] value;
+
+        @Override public void put(String bucket, String key, InputStream input) {
+            throw new AssertionError("staging must never use unconditional put");
+        }
+        @Override public synchronized RecoveryObjectWriteResult putIfAbsent(
+                String bucket, String key, InputStream input) throws Exception {
+            if (value != null) return RecoveryObjectWriteResult.lostRace();
+            value = input.readAllBytes();
+            return RecoveryObjectWriteResult.created("version-" + createdVersions.incrementAndGet());
+        }
+        @Override public String version(String bucket, String key) throws Exception {
+            if (stats.incrementAndGet() <= 2) {
+                initialStats.await(5, TimeUnit.SECONDS);
+                throw new RecoveryObjectNotFoundException(bucket, key);
+            }
+            if (value == null) throw new RecoveryObjectNotFoundException(bucket, key);
+            return "version-1";
+        }
+        @Override public InputStream get(String bucket, String key) {
+            return new ByteArrayInputStream(value);
+        }
+        @Override public List<String> list(String bucket, String prefix) { return List.of(); }
+        @Override public void delete(String bucket, String key) { value = null; }
     }
 }

@@ -23,6 +23,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -115,8 +116,9 @@ class RecoveryArchiveImportIntakeServiceTest {
         when(steps.findByJobIdOrderBySequenceNumberAsc(job.getId())).thenReturn(List.of(stage, cleanup));
         when(jobs.saveAndFlush(job)).thenReturn(job);
 
-        writes.reopenCleanedIntake(job.getId(), plan,
-                "recovery-staging/" + plan.zipSha256() + "/" + job.getId() + ".zip");
+        assertThat(writes.reopenCleanedIntake(job.getId(), plan,
+                "recovery-staging/" + plan.zipSha256() + "/" + job.getId() + ".zip"))
+                .isEqualTo(RecoveryIntakeReopenOutcome.REOPENED);
 
         assertThat(job.getPhase()).isEqualTo(OperationPhase.FORWARD);
         assertThat(job.getStatus()).isEqualTo(OperationStatus.PREPARED);
@@ -126,6 +128,67 @@ class RecoveryArchiveImportIntakeServiceTest {
         assertThat(stage.getStatus()).isEqualTo(OperationStepStatus.PENDING);
         assertThat(cleanup.getStatus()).isEqualTo(OperationStepStatus.PENDING);
         assertThat(cleanup.getRetryEpoch()).isEqualTo(5L);
+    }
+
+    @Test
+    void concurrentCompletedCompensationReopenJoinsOneNewEpoch() throws Exception {
+        RecoveryArchiveImportPlan plan = plan("tenant-a", UUID.randomUUID(), "f".repeat(64));
+        OperationJob job = job("tenant-a", plan.knowledgeBaseId(), plan);
+        job.setPhase(OperationPhase.COMPENSATION);
+        job.setStatus(OperationStatus.COMPLETED);
+        job.setRunnable(true);
+        job.setRetryEpoch(4L);
+        job.setCompletedAt(Instant.now());
+        String stagingKey = "recovery-staging/" + plan.zipSha256() + "/" + job.getId() + ".zip";
+        when(storage.stagingKey(job.getId(), plan.zipSha256())).thenReturn(stagingKey);
+        OperationStep stage = stage(job.getId(), OperationStepStatus.COMPENSATED, "old-stage");
+        stage.setRetryEpoch(4L);
+        when(jobs.findByIdForUpdate(job.getId())).thenReturn(Optional.of(job));
+        when(steps.findByJobIdAndStepKey(job.getId(), "stage-zip")).thenReturn(Optional.of(stage));
+        when(steps.findByJobIdOrderBySequenceNumberAsc(job.getId())).thenReturn(List.of(stage));
+        when(jobs.saveAndFlush(job)).thenReturn(job);
+        CyclicBarrier bothObservedTerminal = new CyclicBarrier(2);
+        ReentrantLock simulatedDatabaseRowLock = new ReentrantLock();
+        java.util.concurrent.ConcurrentLinkedQueue<RecoveryIntakeReopenOutcome> outcomes =
+                new java.util.concurrent.ConcurrentLinkedQueue<>();
+        when(jobs.findByTenantIdAndOperationTypeAndIdempotencyKey(
+                "tenant-a", OperationType.RECOVERY_ARCHIVE_IMPORT, "race-key")).thenAnswer(call -> {
+            bothObservedTerminal.await(5, TimeUnit.SECONDS);
+            return Optional.of(job);
+        });
+        when(jobs.findById(job.getId())).thenReturn(Optional.of(job));
+        RecoveryArchiveImportIntakeWriteService rowLockedWrites =
+                new RecoveryArchiveImportIntakeWriteService(jobs, steps) {
+                    @Override RecoveryIntakeReopenOutcome reopenCleanedIntake(
+                            UUID id, RecoveryArchiveImportPlan requested, String key) {
+                        simulatedDatabaseRowLock.lock();
+                        try {
+                            RecoveryIntakeReopenOutcome outcome = super.reopenCleanedIntake(id, requested, key);
+                            outcomes.add(outcome);
+                            return outcome;
+                        } finally {
+                            simulatedDatabaseRowLock.unlock();
+                        }
+                    }
+                };
+        RecoveryArchiveImportIntakeService concurrentService =
+                new RecoveryArchiveImportIntakeService(jobs, steps, rowLockedWrites, storage);
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var first = pool.submit(() -> submit(concurrentService, plan));
+            var second = pool.submit(() -> submit(concurrentService, plan));
+
+            assertThat(List.of(first.get(10, TimeUnit.SECONDS), second.get(10, TimeUnit.SECONDS)))
+                    .containsExactly(job.getId(), job.getId());
+            assertThat(outcomes).containsExactlyInAnyOrder(
+                            RecoveryIntakeReopenOutcome.REOPENED,
+                            RecoveryIntakeReopenOutcome.JOINED);
+            assertThat(job.getRetryEpoch()).isEqualTo(5L);
+            assertThat(stage.getRetryEpoch()).isEqualTo(5L);
+            assertThat(stage.getStatus()).isEqualTo(OperationStepStatus.PENDING);
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test

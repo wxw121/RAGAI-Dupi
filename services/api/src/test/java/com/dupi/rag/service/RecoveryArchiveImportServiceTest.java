@@ -18,6 +18,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.ByteArrayOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.security.MessageDigest;
 import java.time.Instant;
@@ -30,6 +31,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 import static org.assertj.core.api.Assertions.*;
@@ -150,37 +153,37 @@ class RecoveryArchiveImportServiceTest {
         MockMultipartFile upload = archive(false, false, false);
         OperationJobResponse job = OperationJobResponse.builder().id(jobId).build();
         CountDownLatch bothReadIntake = new CountDownLatch(2);
-        CountDownLatch firstPublished = new CountDownLatch(1);
-        AtomicInteger publications = new AtomicInteger();
+        ConcurrentLinkedQueue<StoredRecoveryObject> publishedEvidence = new ConcurrentLinkedQueue<>();
         when(intakeService.createOrResume(any(), eq("race-key"), eq("admin"))).thenAnswer(call -> {
             bothReadIntake.countDown();
             assertThat(bothReadIntake.await(5, TimeUnit.SECONDS)).isTrue();
             return new RecoveryImportIntake(job, com.dupi.rag.domain.enums.OperationStepStatus.PENDING, false);
         });
-        when(storage.stagingKey(eq(jobId), anyString()))
-                .thenAnswer(call -> "recovery-staging/" + call.getArgument(1) + "/" + jobId + ".zip");
-        when(storage.bucket()).thenReturn("dupi-recovery");
-        when(storage.inspect(any())).thenAnswer(call -> {
-            StoredRecoveryObject expected = call.getArgument(0);
-            return new RecoveryStorageInspection(RecoveryStorageOutcome.MATCHING,
-                    new StoredRecoveryObject(expected.bucket(), expected.objectKey(), expected.byteSize(),
-                            expected.sha256(), "etag-shared"));
-        });
         when(intakeService.completeStageAndPublish(eq(jobId), any(), any())).thenAnswer(call -> {
-            if (publications.incrementAndGet() == 1) firstPublished.countDown();
-            else assertThat(firstPublished.await(5, TimeUnit.SECONDS)).isTrue();
+            publishedEvidence.add(call.getArgument(2));
             return job;
         });
+        ConditionalCreateStore sharedStore = new ConditionalCreateStore();
+        RecoveryStorageService firstStorage = new RecoveryStorageService(properties, sharedStore);
+        RecoveryStorageService secondStorage = new RecoveryStorageService(properties, sharedStore);
+        RecoveryArchiveImportService firstService = new RecoveryArchiveImportService(
+                knowledgeBases, firstStorage, properties, manifests, intakeService);
+        RecoveryArchiveImportService secondService = new RecoveryArchiveImportService(
+                knowledgeBases, secondStorage, properties, manifests, intakeService);
 
         var pool = Executors.newFixedThreadPool(2);
         try {
-            var first = pool.submit(() -> service.submit(kbId, upload, "race-key", "admin").getId());
-            var second = pool.submit(() -> service.submit(kbId, upload, "race-key", "admin").getId());
+            var first = pool.submit(() -> firstService.submit(kbId, upload, "race-key", "admin").getId());
+            var second = pool.submit(() -> secondService.submit(kbId, upload, "race-key", "admin").getId());
             assertThat(first.get(10, TimeUnit.SECONDS)).isEqualTo(jobId);
             assertThat(second.get(10, TimeUnit.SECONDS)).isEqualTo(jobId);
         } finally {
             pool.shutdownNow();
         }
+        assertThat(publishedEvidence).hasSize(2).allSatisfy(evidence ->
+                assertThat(evidence.versionToken()).isEqualTo("version-1"));
+        assertThat(publishedEvidence.stream().distinct()).hasSize(1);
+        assertThat(sharedStore.createdVersions).hasValue(1);
         verify(intakeService, times(2)).completeStageAndPublish(eq(jobId), any(), any());
     }
 
@@ -241,6 +244,35 @@ class RecoveryArchiveImportServiceTest {
         return new RecoveryStorageInspection(RecoveryStorageOutcome.MATCHING,
                 new StoredRecoveryObject("dupi-recovery", "recovery-staging/hash/job.zip",
                         1, "a".repeat(64), "etag-1"));
+    }
+
+    private static final class ConditionalCreateStore implements RecoveryObjectStore {
+        private final CyclicBarrier bothConditionalCreates = new CyclicBarrier(2);
+        private final AtomicInteger createdVersions = new AtomicInteger();
+        private volatile byte[] value;
+
+        @Override public void put(String bucket, String key, InputStream input) {
+            throw new AssertionError("staging must use conditional create");
+        }
+        @Override public RecoveryObjectWriteResult putIfAbsent(
+                String bucket, String key, InputStream input) throws Exception {
+            bothConditionalCreates.await(5, TimeUnit.SECONDS);
+            synchronized (this) {
+                if (value != null) return RecoveryObjectWriteResult.lostRace();
+                value = input.readAllBytes();
+                return RecoveryObjectWriteResult.created("version-" + createdVersions.incrementAndGet());
+            }
+        }
+        @Override public String version(String bucket, String key) throws Exception {
+            if (value == null) throw new RecoveryObjectNotFoundException(bucket, key);
+            return "version-1";
+        }
+        @Override public InputStream get(String bucket, String key) throws Exception {
+            if (value == null) throw new RecoveryObjectNotFoundException(bucket, key);
+            return new ByteArrayInputStream(value);
+        }
+        @Override public List<String> list(String bucket, String prefix) { return List.of(); }
+        @Override public void delete(String bucket, String key) { value = null; }
     }
 
     private static final class BulkRejectingMultipartFile implements MultipartFile {
