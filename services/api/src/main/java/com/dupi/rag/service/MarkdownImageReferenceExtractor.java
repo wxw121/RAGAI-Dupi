@@ -108,18 +108,22 @@ final class MarkdownImageReferenceExtractor {
     private FenceContext fenceContext(String line) {
         List<FenceContainer> containers = new ArrayList<>();
         int cursor = 0;
+        int containerColumn = 0;
         while (true) {
-            int marker = skipUpToThreeSpaces(line, cursor);
+            int marker = skipIndent(line, cursor, containerColumn, 3);
             if (marker < line.length() && line.charAt(marker) == '>') {
                 cursor = marker + 1;
                 if (cursor < line.length() && (line.charAt(cursor) == ' ' || line.charAt(cursor) == '\t')) cursor++;
                 containers.add(FenceContainer.blockquote());
+                containerColumn = columnAt(line, cursor);
                 continue;
             }
-            int listEnd = listMarkerEnd(line, marker);
-            if (listEnd >= 0) {
-                containers.add(FenceContainer.listItem(listEnd - cursor));
-                cursor = listEnd;
+            ListMarker list = listMarker(line, marker, containerColumn);
+            if (list != null) {
+                if (!list.validPadding()) return new FenceContext(line.length(), List.copyOf(containers));
+                containers.add(FenceContainer.listItem(list.continuationWidth()));
+                cursor = list.contentStart();
+                containerColumn = columnAt(line, cursor);
                 continue;
             }
             return new FenceContext(marker, List.copyOf(containers));
@@ -128,21 +132,28 @@ final class MarkdownImageReferenceExtractor {
 
     private int closingFenceStart(String line, Fence open) {
         int cursor = 0;
+        int containerColumn = 0;
         for (FenceContainer container : open.containers()) {
             if (container.quote()) {
-                cursor = skipUpToThreeSpaces(line, cursor);
+                cursor = skipIndent(line, cursor, containerColumn, 3);
                 if (cursor >= line.length() || line.charAt(cursor) != '>') return line.length();
                 cursor++;
                 if (cursor < line.length() && (line.charAt(cursor) == ' ' || line.charAt(cursor) == '\t')) cursor++;
+                containerColumn = columnAt(line, cursor);
                 continue;
             }
-            int end = cursor + container.continuationWidth();
-            if (end > line.length()) return line.length();
-            for (; cursor < end; cursor++) {
-                if (line.charAt(cursor) != ' ' && line.charAt(cursor) != '\t') return line.length();
+            int targetColumn = containerColumn + container.continuationWidth();
+            int column = columnAt(line, cursor);
+            while (cursor < line.length() && column < targetColumn) {
+                char current = line.charAt(cursor);
+                if (current != ' ' && current != '\t') return line.length();
+                column = advanceColumn(column, current);
+                cursor++;
             }
+            if (column < targetColumn) return line.length();
+            containerColumn = targetColumn;
         }
-        return skipUpToThreeSpaces(line, cursor);
+        return skipIndent(line, cursor, containerColumn, 3);
     }
 
     private void maskCodeSpans(char[] visible) {
@@ -204,9 +215,9 @@ final class MarkdownImageReferenceExtractor {
                 cursor = skipUpToThreeSpaces(line, cursor);
                 consumedContainer = true;
             }
-            int listEnd = listMarkerEnd(line, cursor);
-            if (listEnd >= 0) {
-                cursor = skipUpToThreeSpaces(line, listEnd);
+            ListMarker list = listMarker(line, cursor, columnAt(line, cursor));
+            if (list != null && list.validPadding()) {
+                cursor = skipUpToThreeSpaces(line, list.contentStart());
                 consumedContainer = true;
             }
         } while (consumedContainer);
@@ -223,8 +234,8 @@ final class MarkdownImageReferenceExtractor {
         return cursor;
     }
 
-    private int listMarkerEnd(String line, int offset) {
-        if (offset >= line.length()) return -1;
+    private ListMarker listMarker(String line, int offset, int containerColumn) {
+        if (offset >= line.length()) return null;
         int markerEnd = offset;
         char first = line.charAt(offset);
         if (first == '-' || first == '+' || first == '*') {
@@ -232,13 +243,40 @@ final class MarkdownImageReferenceExtractor {
         } else if (Character.isDigit(first)) {
             while (markerEnd < line.length() && markerEnd - offset < 9
                     && Character.isDigit(line.charAt(markerEnd))) markerEnd++;
-            if (markerEnd >= line.length() || (line.charAt(markerEnd) != '.' && line.charAt(markerEnd) != ')')) return -1;
+            if (markerEnd >= line.length() || (line.charAt(markerEnd) != '.' && line.charAt(markerEnd) != ')')) return null;
             markerEnd++;
         } else {
-            return -1;
+            return null;
         }
-        if (markerEnd >= line.length() || (line.charAt(markerEnd) != ' ' && line.charAt(markerEnd) != '\t')) return -1;
-        return markerEnd + 1;
+        if (markerEnd >= line.length() || (line.charAt(markerEnd) != ' ' && line.charAt(markerEnd) != '\t')) return null;
+        int contentStart = markerEnd;
+        while (contentStart < line.length()
+                && (line.charAt(contentStart) == ' ' || line.charAt(contentStart) == '\t')) contentStart++;
+        int paddingColumns = columnAt(line, contentStart) - columnAt(line, markerEnd);
+        int continuationWidth = columnAt(line, contentStart) - containerColumn;
+        return new ListMarker(contentStart, continuationWidth, paddingColumns <= 4);
+    }
+
+    private int skipIndent(String line, int offset, int baseColumn, int maxColumns) {
+        int cursor = offset;
+        int column = columnAt(line, cursor);
+        while (cursor < line.length() && (line.charAt(cursor) == ' ' || line.charAt(cursor) == '\t')) {
+            int nextColumn = advanceColumn(column, line.charAt(cursor));
+            if (nextColumn - baseColumn > maxColumns) break;
+            column = nextColumn;
+            cursor++;
+        }
+        return cursor;
+    }
+
+    private int columnAt(String line, int offset) {
+        int column = 0;
+        for (int cursor = 0; cursor < offset; cursor++) column = advanceColumn(column, line.charAt(cursor));
+        return column;
+    }
+
+    private int advanceColumn(int column, char current) {
+        return current == '\t' ? column + 4 - column % 4 : column + 1;
     }
 
     private Destination inlineDestination(String text, int openingParenthesis) {
@@ -377,6 +415,7 @@ final class MarkdownImageReferenceExtractor {
     private record Bracket(String value, int end) { }
     private record Destination(String value, int end) { }
     private record Fence(char marker, int length, List<FenceContainer> containers) { }
+    private record ListMarker(int contentStart, int continuationWidth, boolean validPadding) { }
     private record FenceContainer(boolean quote, int continuationWidth) {
         private static FenceContainer blockquote() { return new FenceContainer(true, 0); }
         private static FenceContainer listItem(int continuationWidth) { return new FenceContainer(false, continuationWidth); }

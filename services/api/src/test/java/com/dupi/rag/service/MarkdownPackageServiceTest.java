@@ -149,6 +149,35 @@ class MarkdownPackageServiceTest {
     }
 
     @Test
+    void multiSpacePaddedListFenceRejectsUnderIndentedClose() throws Exception {
+        MarkdownImportPlan plan = new MarkdownPackageParser().parse(UUID.randomUUID(), UUID.randomUUID(), zip(
+                "guide.md", "-   ```markdown\n"
+                        + "    ![example](images/missing-example.png)\n  ```\n"
+                        + "![still-code](images/missing-still-code.png)")
+                .getInputStream());
+
+        assertThat(plan.documents().get(0).assets()).isEmpty();
+    }
+
+    @Test
+    void multiSpacePaddedListFenceAcceptsIndependentLeafCloseIndentation() throws Exception {
+        assertOnlyGenuineImageIsPlanned("-   ```markdown\n"
+                + "    ![example](images/missing-example.png)\n      ```\n"
+                + "![genuine](images/genuine.png)");
+    }
+
+    @Test
+    void tabPaddedListFenceRejectsUnderIndentedClose() throws Exception {
+        MarkdownImportPlan plan = new MarkdownPackageParser().parse(UUID.randomUUID(), UUID.randomUUID(), zip(
+                "guide.md", "-\t```markdown\n"
+                        + "\t![example](images/missing-example.png)\n  ```\n"
+                        + "![still-code](images/missing-still-code.png)")
+                .getInputStream());
+
+        assertThat(plan.documents().get(0).assets()).isEmpty();
+    }
+
+    @Test
     void backslashBeforeClosingBacktickDoesNotHideFollowingGenuineImage() throws Exception {
         assertOnlyGenuineImageIsPlanned("`example \\` ![genuine](images/genuine.png)`");
     }
