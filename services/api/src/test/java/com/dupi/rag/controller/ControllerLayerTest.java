@@ -39,6 +39,16 @@ import static org.mockito.Mockito.*;
 class ControllerLayerTest {
 
     @Test
+    void markdownPackageUploadIsAnAcceptedOperationResource() throws Exception {
+        var method = DocumentController.class.getDeclaredMethod("uploadMarkdownPackage",
+                UUID.class, org.springframework.web.multipart.MultipartFile.class, String.class);
+        var status = method.getAnnotation(org.springframework.web.bind.annotation.ResponseStatus.class);
+        assertThat(status).isNotNull();
+        assertThat(status.value()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(method.getReturnType()).isEqualTo(OperationJobResponse.class);
+    }
+
+    @Test
     void operationControllerDelegatesStatusAndRetry() {
         OperationJobService service = mock(OperationJobService.class);
         OperationController controller = new OperationController(service);
@@ -145,6 +155,8 @@ class ControllerLayerTest {
                 .build();
         when(documentService.upload(kbId, file, null)).thenReturn(docResponse);
         when(documentService.uploadBatch(kbId, List.of(batchFile))).thenReturn(batchUploadResponse);
+        OperationJobResponse markdownResponse = OperationJobResponse.builder().id(UUID.randomUUID()).build();
+        when(markdownPackageService.upload(kbId, file, "markdown-key")).thenReturn(markdownResponse);
         when(documentService.listByKb(kbId)).thenReturn(List.of(docResponse));
         when(documentService.get(kbId, docId)).thenReturn(docResponse);
         when(ingestJobService.getLatestByDoc(docId)).thenReturn(jobResponse);
@@ -152,6 +164,7 @@ class ControllerLayerTest {
 
         assertThat(controller.upload(kbId, file)).isSameAs(docResponse);
         assertThat(controller.uploadBatch(kbId, List.of(batchFile))).isSameAs(batchUploadResponse);
+        assertThat(controller.uploadMarkdownPackage(kbId, file, "markdown-key")).isSameAs(markdownResponse);
         assertThat(controller.list(kbId)).containsExactly(docResponse);
         assertThat(controller.get(kbId, docId)).isSameAs(docResponse);
         controller.delete(kbId, docId);

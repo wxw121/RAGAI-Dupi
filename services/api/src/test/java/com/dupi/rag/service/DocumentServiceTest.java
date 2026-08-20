@@ -92,6 +92,18 @@ class DocumentServiceTest {
     }
 
     @Test
+    void importingDocumentIsAbsentFromNormalReads() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        Document importing = doc(kbId, docId);
+        importing.setStatus(DocumentStatus.IMPORTING);
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(importing));
+
+        assertThatThrownBy(() -> service().findOrThrow(kbId, docId))
+                .isInstanceOf(com.dupi.rag.exception.ResourceNotFoundException.class);
+    }
+
+    @Test
     void fileFingerprintWrapsUnreadableMultipartFiles() {
         MockMultipartFile unreadable = new MockMultipartFile("file", "broken.md", "text/markdown", "x".getBytes()) {
             @Override

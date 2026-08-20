@@ -106,7 +106,8 @@ public class OperationJobRunner {
                 } else {
                     workflow.executeForward(context);
                 }
-                outcome = Outcome.completed();
+                outcome = workflow.completionMode(context) == OperationCompletionMode.DOMAIN_TRANSACTION
+                        ? Outcome.domainCompleted() : Outcome.completed();
             } catch (CompensateOperationException e) {
                 try {
                     claimService.beginCompensation(context, reason(e));
@@ -130,7 +131,9 @@ public class OperationJobRunner {
 
     private void persistOutcome(OperationExecutionContext context, Outcome outcome) {
         try {
-            if (outcome.kind == OutcomeKind.COMPLETED) {
+            if (outcome.kind == OutcomeKind.DOMAIN_COMPLETED) {
+                claimService.acknowledgeDomainCompletion(context);
+            } else if (outcome.kind == OutcomeKind.COMPLETED) {
                 claimService.complete(context);
             } else if (outcome.kind == OutcomeKind.RETRY) {
                 claimService.scheduleRetry(context, outcome.error);
@@ -160,7 +163,7 @@ public class OperationJobRunner {
                 : error.getMessage();
     }
 
-    private enum OutcomeKind { COMPLETED, RETRY, FAILED }
+    private enum OutcomeKind { COMPLETED, DOMAIN_COMPLETED, RETRY, FAILED }
 
     private static final class Outcome {
         private final OutcomeKind kind;
@@ -172,6 +175,7 @@ public class OperationJobRunner {
         }
 
         private static Outcome completed() { return new Outcome(OutcomeKind.COMPLETED, null); }
+        private static Outcome domainCompleted() { return new Outcome(OutcomeKind.DOMAIN_COMPLETED, null); }
         private static Outcome retry(String error) { return new Outcome(OutcomeKind.RETRY, error); }
         private static Outcome failed(String error) { return new Outcome(OutcomeKind.FAILED, error); }
     }

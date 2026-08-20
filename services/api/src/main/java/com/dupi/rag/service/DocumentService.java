@@ -309,7 +309,7 @@ public class DocumentService {
 
     public Document findOrThrow(UUID kbId, UUID docId) {
         return documentRepository.findById(docId)
-                .filter(d -> d.getKbId().equals(kbId))
+                .filter(d -> d.getKbId().equals(kbId) && d.getStatus() != DocumentStatus.IMPORTING)
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found: " + docId));
     }
 

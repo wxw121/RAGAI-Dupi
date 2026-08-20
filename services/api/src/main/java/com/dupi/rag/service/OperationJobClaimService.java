@@ -74,6 +74,19 @@ public class OperationJobClaimService {
         operationJobRepository.save(job);
     }
 
+    /** Verifies a domain-owned atomic publish already committed the terminal operation row. */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void acknowledgeDomainCompletion(OperationExecutionContext context) {
+        OperationJob job = operationJobRepository.findByIdForUpdate(context.jobId())
+                .orElseThrow(() -> new ResourceNotFoundException("Operation job not found: " + context.jobId()));
+        if (job.getStatus() != OperationStatus.COMPLETED
+                || context.claimEpoch() != safeClaimEpoch(job)
+                || context.retryEpoch() != safeRetryEpoch(job)
+                || context.phase() != job.getPhase()) {
+            throw new OperationConflictException("Domain workflow did not atomically complete its current claim");
+        }
+    }
+
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void scheduleRetry(OperationExecutionContext context, String error) {
         OperationJob job = claimed(context);

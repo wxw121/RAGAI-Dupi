@@ -10,4 +10,8 @@ public interface OperationWorkflow {
     void executeForward(OperationExecutionContext context);
 
     void executeCompensation(OperationExecutionContext context);
+
+    default OperationCompletionMode completionMode(OperationExecutionContext context) {
+        return OperationCompletionMode.RUNNER;
+    }
 }

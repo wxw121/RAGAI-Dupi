@@ -419,6 +419,7 @@ class ConfigAndExceptionTest {
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/import");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/documents");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/documents/batch");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/documents/markdown-package");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/chat");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/retrieve");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/reindex");

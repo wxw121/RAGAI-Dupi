@@ -4,7 +4,7 @@ import com.dupi.rag.dto.BatchDocumentUploadResponse;
 import com.dupi.rag.dto.DocumentIndexDetailResponse;
 import com.dupi.rag.dto.DocumentResponse;
 import com.dupi.rag.dto.IngestJobResponse;
-import com.dupi.rag.dto.MarkdownPackageUploadResponse;
+import com.dupi.rag.dto.OperationJobResponse;
 import com.dupi.rag.service.DocumentAssetService;
 import com.dupi.rag.service.DocumentService;
 import com.dupi.rag.service.DocumentIndexInspectionService;
@@ -52,11 +52,13 @@ public class DocumentController {
     }
 
     @PostMapping(value = "/markdown-package", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public MarkdownPackageUploadResponse uploadMarkdownPackage(
+    @ResponseStatus(org.springframework.http.HttpStatus.ACCEPTED)
+    public OperationJobResponse uploadMarkdownPackage(
             @PathVariable UUID kbId,
-            @RequestParam("file") MultipartFile file
+            @RequestParam("file") MultipartFile file,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey
     ) {
-        return markdownPackageService.upload(kbId, file);
+        return markdownPackageService.upload(kbId, file, idempotencyKey);
     }
 
     @GetMapping("/{docId}/assets")

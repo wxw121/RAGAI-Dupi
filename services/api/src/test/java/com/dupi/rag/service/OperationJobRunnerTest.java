@@ -62,6 +62,20 @@ class OperationJobRunnerTest {
     }
 
     @Test
+    void atomicallyTerminalDomainWorkflowIsAcknowledgedWithoutSecondCompletion() {
+        when(workflow.type()).thenReturn(OperationType.MARKDOWN_PACKAGE_IMPORT);
+        when(workflow.completionMode(any())).thenReturn(OperationCompletionMode.DOMAIN_TRANSACTION);
+        OperationJob claimed = job(OperationPhase.FORWARD);
+        claimed.setOperationType(OperationType.MARKDOWN_PACKAGE_IMPORT);
+        when(claimService.claimNext()).thenReturn(OperationClaimResult.claimed(claimed));
+
+        new OperationJobRunner(claimService, List.of(workflow)).runOne();
+
+        verify(claimService).acknowledgeDomainCompletion(any(OperationExecutionContext.class));
+        verify(claimService, never()).complete(any());
+    }
+
+    @Test
     void disabledRunnerDoesNotClaimAndBatchContinuesPastBoundedCleanup() {
         when(workflow.type()).thenReturn(OperationType.RECOVERY_ARCHIVE_IMPORT);
         new OperationJobRunner(claimService, List.of(workflow), 2, 2, false).runScheduled();

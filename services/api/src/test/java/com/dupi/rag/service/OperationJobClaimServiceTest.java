@@ -145,6 +145,23 @@ class OperationJobClaimServiceTest {
                 .isInstanceOf(OperationConflictException.class);
     }
 
+    @Test
+    void domainCompletionAcknowledgmentAcceptsOnlyTheAtomicallyCompletedCurrentEpoch() {
+        OperationJob completed = currentClaim(OperationPhase.FORWARD, 1, 1);
+        OperationExecutionContext context = context(completed);
+        completed.setStatus(OperationStatus.COMPLETED);
+        completed.setClaimToken(null);
+        completed.setLeaseExpiresAt(null);
+        when(jobs.findByIdForUpdate(completed.getId())).thenReturn(Optional.of(completed));
+
+        service.acknowledgeDomainCompletion(context);
+
+        assertThatThrownBy(() -> service.acknowledgeDomainCompletion(new OperationExecutionContext(
+                context.jobId(), context.claimToken(), context.claimEpoch() + 1, context.retryEpoch(), context.phase())))
+                .isInstanceOf(OperationConflictException.class);
+        verify(jobs, never()).save(any());
+    }
+
     private static OperationExecutionContext context(OperationJob job) {
         return new OperationExecutionContext(job.getId(), job.getClaimToken(), job.getClaimEpoch(),
                 job.getRetryEpoch(), job.getPhase());

@@ -38,6 +38,9 @@ public class Document {
     @Column(name = "quota_reservation_id")
     private UUID quotaReservationId;
 
+    @Column(name = "import_job_id")
+    private UUID importJobId;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     @Builder.Default
