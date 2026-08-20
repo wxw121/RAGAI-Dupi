@@ -7,6 +7,7 @@ import com.dupi.rag.repository.SparseMigrationRepository;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
+import org.mockito.ArgumentCaptor;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
@@ -23,6 +24,9 @@ class RepositoryRecoveryActivityProbeTest {
 
         when(ingest.existsByKbIdAndStatusIn(eq(kbId), anyList())).thenReturn(true);
         assertThat(probe.hasActiveWork(kbId)).isTrue();
+        ArgumentCaptor<java.util.List<IngestJobStatus>> activeStatuses = ArgumentCaptor.forClass(java.util.List.class);
+        verify(ingest).existsByKbIdAndStatusIn(eq(kbId), activeStatuses.capture());
+        assertThat(activeStatuses.getValue()).contains(IngestJobStatus.UPLOAD_INTENT);
         reset(ingest);
         when(eval.existsByKbIdAndStatus(any(), any())).thenReturn(true);
         assertThat(probe.hasActiveWork(kbId)).isTrue();

@@ -16,7 +16,7 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class RepositoryRecoveryActivityProbe implements RecoveryActivityProbe {
     private static final List<IngestJobStatus> ACTIVE_INGEST =
-            List.of(IngestJobStatus.PENDING, IngestJobStatus.PROCESSING);
+            List.of(IngestJobStatus.UPLOAD_INTENT, IngestJobStatus.PENDING, IngestJobStatus.PROCESSING);
     private static final List<SparseMigrationState> ACTIVE_MIGRATIONS = List.of(
             SparseMigrationState.PREPARING,
             SparseMigrationState.BACKFILLING,

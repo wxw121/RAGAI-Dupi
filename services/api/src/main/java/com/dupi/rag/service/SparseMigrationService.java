@@ -138,6 +138,9 @@ public class SparseMigrationService {
     @Transactional
     public SparseMigrationResponse cutover(UUID kbId, UUID migrationId) {
         maintenanceService.assertMutationAllowed(kbId);
+        // RetrievalProfileService.activate also locks the knowledge base. Establish the global
+        // KB -> sparse-migration order before touching the migration row to prevent inversion.
+        knowledgeBaseService.findForUpdateOrThrow(kbId);
         SparseMigration migration = migration(kbId, migrationId);
         requireState(migration, SparseMigrationState.SHADOW_VALIDATING);
         RetrievalProfile profile = profile(kbId, migration.getProfileId());

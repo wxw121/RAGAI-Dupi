@@ -48,7 +48,6 @@ public class DocumentService {
     private final MinioStorageService minioStorageService;
     private final MilvusVectorService milvusVectorService;
     private final IngestJobProducer ingestJobProducer;
-    private final IngestOutboxService ingestOutboxService;
     private final DocumentTombstoneService documentTombstoneService;
     private final VectorCleanupTaskService vectorCleanupTaskService;
     private final AuditLogService auditLogService;
@@ -65,19 +64,19 @@ public class DocumentService {
 
     public DocumentResponse upload(UUID kbId, MultipartFile file, String idempotencyKey) {
         maintenanceService.assertMutationAllowed(kbId);
-        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
-        return upload(kb, kbId, file, idempotencyKey);
+        knowledgeBaseService.findOrThrow(kbId);
+        return performUpload(kbId, file, idempotencyKey);
     }
 
     public BatchDocumentUploadResponse uploadBatch(UUID kbId, List<MultipartFile> files) {
         maintenanceService.assertMutationAllowed(kbId);
-        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
+        knowledgeBaseService.findOrThrow(kbId);
         if (files == null || files.isEmpty()) {
             throw new IllegalArgumentException("Files are empty");
         }
 
         List<BatchDocumentUploadResult> results = files.stream()
-                .map(file -> uploadOneForBatch(kb, kbId, file))
+                .map(file -> uploadOneForBatch(kbId, file))
                 .toList();
         int succeeded = (int) results.stream().filter(BatchDocumentUploadResult::isSuccess).count();
         return BatchDocumentUploadResponse.builder()
@@ -88,13 +87,13 @@ public class DocumentService {
                 .build();
     }
 
-    private BatchDocumentUploadResult uploadOneForBatch(KnowledgeBase kb, UUID kbId, MultipartFile file) {
+    private BatchDocumentUploadResult uploadOneForBatch(UUID kbId, MultipartFile file) {
         String fileName = file != null && file.getOriginalFilename() != null ? file.getOriginalFilename() : "unknown";
         try {
             return BatchDocumentUploadResult.builder()
                     .fileName(fileName)
                     .success(true)
-                    .document(upload(kb, kbId, file, null))
+                    .document(performUpload(kbId, file, null))
                     .build();
         } catch (Exception e) {
             return BatchDocumentUploadResult.builder()
@@ -105,7 +104,7 @@ public class DocumentService {
         }
     }
 
-    private DocumentResponse upload(KnowledgeBase kb, UUID kbId, MultipartFile file, String idempotencyKey) {
+    private DocumentResponse performUpload(UUID kbId, MultipartFile file, String idempotencyKey) {
         if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("File is empty");
         }
@@ -155,11 +154,10 @@ public class DocumentService {
             objectUploaded = true;
             uploadQuotaService.refreshAttemptLease(reservation);
 
-            ingestOutboxService.record(job, kb, objectKey, doc.getFileName(), doc.getMimeType());
-            uploadQuotaService.commit(reservation, doc);
-            doc.setStatus(DocumentStatus.PENDING);
-            doc.setErrorMessage(null);
-            documentRepository.save(doc);
+            DocumentUploadPublication publication = uploadIntents.publish(
+                    TenantContext.getTenantId(), doc, job, reservation);
+            doc = publication.document();
+            job = publication.job();
 
             response = toResponse(doc, job);
         } catch (Exception e) {

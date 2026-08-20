@@ -41,21 +41,27 @@ import static org.mockito.Mockito.*;
 class IngestJobServiceTest {
 
     @Test
+    void queuedRecoveryRepositoryLocksJobsBeforeCheckingRunnableState() throws Exception {
+        var method = IngestJobRepository.class.getMethod(
+                "findTop20ByStatusAndStageOrderByCreatedAtAsc", IngestJobStatus.class, IngestStage.class);
+        var lock = method.getAnnotation(org.springframework.data.jpa.repository.Lock.class);
+
+        assertThat(lock).isNotNull();
+        assertThat(lock.value()).isEqualTo(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
+    }
+
+    @Test
     void deletionCommittedAfterUnlockedPrecheckStillStopsReindexBeforeJobsOrOutbox() throws Exception {
         UUID kbId = UUID.randomUUID();
-        KnowledgeBase staleReady = KnowledgeBase.builder().id(kbId).tenantId("default").build();
-        Document document = doc(kbId, UUID.randomUUID());
         CountDownLatch intentReached = new CountDownLatch(1);
         CountDownLatch deletionCommitted = new CountDownLatch(1);
-        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(staleReady);
-        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(document));
         doAnswer(call -> {
             intentReached.countDown();
             if (!deletionCommitted.await(2, TimeUnit.SECONDS)) {
                 throw new AssertionError("deletion did not reach the row-lock boundary");
             }
             throw new com.dupi.rag.exception.OperationConflictException("deletion is in progress");
-        }).when(profileIndexStateService).resetForReindex(staleReady, List.of(document));
+        }).when(profileIndexStateService).lockForReindex(kbId, "default", "model", 256);
 
         var executor = Executors.newSingleThreadExecutor();
         try {
@@ -71,6 +77,7 @@ class IngestJobServiceTest {
 
         verify(ingestJobRepository, never()).save(any());
         verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
+        verify(documentRepository, never()).findByKbIdOrderByCreatedAtDesc(kbId);
     }
 
     @Mock IngestJobRepository ingestJobRepository;
@@ -1020,7 +1027,12 @@ class IngestJobServiceTest {
         Document second = doc(kbId, secondDocId);
         second.setObjectKey("kb/b.md");
         second.setFileName("b.md");
-        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(profileIndexStateService.lockForReindex(kbId, "default", "current-model", 1024))
+                .thenAnswer(call -> {
+                    kb.setEmbeddingModel(call.getArgument(2));
+                    kb.setEmbeddingDimension(call.getArgument(3));
+                    return kb;
+                });
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(first, second));
 
         var responses = service().reindexKnowledgeBase(kbId, "current-model", 1024);
@@ -1057,7 +1069,8 @@ class IngestJobServiceTest {
                 .embeddingDimension(128)
                 .build();
         Document doc = doc(kbId, docId);
-        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(profileIndexStateService.lockForReindex(kbId, "default", "current-model", 1024))
+                .thenReturn(kb);
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc));
         doThrow(new IllegalStateException("redis unavailable"))
                 .when(ingestOutboxService).record(any(IngestJob.class), eq(kb), eq(doc.getObjectKey()), eq(doc.getFileName()), eq(doc.getMimeType()));
@@ -1079,7 +1092,8 @@ class IngestJobServiceTest {
         UUID docId = UUID.randomUUID();
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         Document doc = doc(kbId, docId);
-        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(profileIndexStateService.lockForReindex(kbId, "default", "model", 256))
+                .thenReturn(kb);
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc));
         var responses = service().reindexKnowledgeBase(kbId, "model", 256);
 
@@ -1176,6 +1190,25 @@ class IngestJobServiceTest {
         assertThat(response.getDiagnosis().getNextAction()).contains("队列").contains("Worker");
         assertThat(response.getDiagnosis().isRetryable()).isFalse();
         assertThat(response.getDiagnosis().getLastUpdatedSeconds()).isGreaterThanOrEqualTo(1_200);
+    }
+
+    @Test
+    void getLatestDiagnosisKeepsUploadIntentOutOfQueuedRecoveryGuidance() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        IngestJob intent = job(kbId, docId, UUID.randomUUID());
+        intent.setStatus(IngestJobStatus.UPLOAD_INTENT);
+        intent.setStage(IngestStage.UPLOAD_PENDING);
+        Document uploading = doc(kbId, docId);
+        uploading.setStatus(DocumentStatus.UPLOADING);
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(docId)).thenReturn(Optional.of(intent));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(uploading));
+
+        var diagnosis = service().getLatestByDoc(docId).getDiagnosis();
+
+        assertThat(diagnosis.getSummary()).contains("上传");
+        assertThat(diagnosis.getNextAction()).doesNotContain("Redis", "队列");
+        assertThat(diagnosis.isRetryable()).isFalse();
     }
 
     @Test

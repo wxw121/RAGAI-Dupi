@@ -2,6 +2,14 @@ package com.dupi.rag.service;
 
 import com.dupi.rag.domain.entity.OperationJob;
 import com.dupi.rag.domain.entity.OperationStep;
+import com.dupi.rag.domain.entity.Document;
+import com.dupi.rag.domain.entity.IngestJob;
+import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.entity.UploadQuotaReservation;
+import com.dupi.rag.domain.enums.DocumentStatus;
+import com.dupi.rag.domain.enums.IngestJobStatus;
+import com.dupi.rag.domain.enums.IngestStage;
+import com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus;
 import com.dupi.rag.domain.enums.OperationPhase;
 import com.dupi.rag.domain.enums.OperationStatus;
 import com.dupi.rag.repository.OperationJobRepository;
@@ -34,6 +42,149 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 class OperationTransactionStructureTest {
+    @Test
+    void proxiedUploadPublicationRollsBackQuotaMetadataAndOutboxAsOneTransaction() {
+        var knowledgeBases = mock(com.dupi.rag.repository.KnowledgeBaseRepository.class);
+        var documents = mock(com.dupi.rag.repository.DocumentRepository.class);
+        var jobs = mock(com.dupi.rag.repository.IngestJobRepository.class);
+        var quota = mock(UploadQuotaService.class);
+        var outbox = mock(IngestOutboxService.class);
+        TrackingTransactionManager transactions = new TrackingTransactionManager();
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).tenantId("tenant-a")
+                .lifecycleStatus(KnowledgeBaseLifecycleStatus.READY).build();
+        Document document = Document.builder().id(UUID.randomUUID()).kbId(kbId)
+                .objectKey("objects/a.md").fileName("a.md").mimeType("text/markdown")
+                .status(DocumentStatus.UPLOADING).build();
+        IngestJob job = IngestJob.builder().id(UUID.randomUUID()).kbId(kbId).docId(document.getId())
+                .status(IngestJobStatus.UPLOAD_INTENT).stage(IngestStage.UPLOAD_PENDING).build();
+        UploadQuotaReservation reservation = UploadQuotaReservation.builder().id(UUID.randomUUID()).build();
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a"))
+                .thenReturn(Optional.of(kb));
+        when(jobs.findByIdForUpdate(job.getId())).thenReturn(Optional.of(job));
+        when(documents.findById(document.getId())).thenReturn(Optional.of(document));
+        doThrow(new IllegalStateException("outbox write failed"))
+                .when(outbox).record(job, kb, document.getObjectKey(), document.getFileName(), document.getMimeType());
+
+        try (AnnotationConfigApplicationContext spring = transactionalContext(transactions)) {
+            spring.registerBean(com.dupi.rag.repository.KnowledgeBaseRepository.class, () -> knowledgeBases);
+            spring.registerBean(com.dupi.rag.repository.DocumentRepository.class, () -> documents);
+            spring.registerBean(com.dupi.rag.repository.IngestJobRepository.class, () -> jobs);
+            spring.registerBean(UploadQuotaService.class, () -> quota);
+            spring.registerBean(IngestOutboxService.class, () -> outbox);
+            spring.registerBean(DocumentUploadIntentService.class,
+                    () -> new DocumentUploadIntentService(knowledgeBases, documents, jobs, quota, outbox));
+            spring.refresh();
+
+            DocumentUploadIntentService publisher = spring.getBean(DocumentUploadIntentService.class);
+            assertThat(AopUtils.isAopProxy(publisher)).isTrue();
+            assertThatThrownBy(() -> publisher.publish("tenant-a", document, job, reservation))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("outbox write failed");
+
+            InOrder order = inOrder(knowledgeBases, jobs, documents, quota, outbox);
+            order.verify(knowledgeBases).findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a");
+            order.verify(jobs).findByIdForUpdate(job.getId());
+            order.verify(documents).findById(document.getId());
+            order.verify(quota).commitInCurrentTransaction(reservation, document);
+            order.verify(documents).save(document);
+            order.verify(jobs).save(job);
+            order.verify(outbox).record(job, kb, document.getObjectKey(), document.getFileName(), document.getMimeType());
+            assertThat(transactions.begins).isEqualTo(1);
+            assertThat(transactions.commits).isZero();
+            assertThat(transactions.rollbacks).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void proxiedReindexLocksBeforeMutatingManagedKnowledgeBase() {
+        var documents = mock(com.dupi.rag.repository.DocumentRepository.class);
+        var knowledgeBases = mock(com.dupi.rag.repository.KnowledgeBaseRepository.class);
+        TrackingTransactionManager transactions = new TrackingTransactionManager();
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase locked = spy(KnowledgeBase.builder().id(kbId).tenantId("tenant-a")
+                .lifecycleStatus(KnowledgeBaseLifecycleStatus.READY).build());
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a"))
+                .thenReturn(Optional.of(locked));
+
+        try (AnnotationConfigApplicationContext spring = transactionalContext(transactions)) {
+            spring.registerBean(com.dupi.rag.repository.DocumentRepository.class, () -> documents);
+            spring.registerBean(com.dupi.rag.repository.KnowledgeBaseRepository.class, () -> knowledgeBases);
+            spring.registerBean(ProfileIndexStateService.class,
+                    () -> new ProfileIndexStateService(documents, knowledgeBases));
+            spring.refresh();
+
+            ProfileIndexStateService state = spring.getBean(ProfileIndexStateService.class);
+            assertThat(AopUtils.isAopProxy(state)).isTrue();
+            assertThat(state.lockForReindex(kbId, "tenant-a", "model-v2", 2048)).isSameAs(locked);
+
+            InOrder order = inOrder(knowledgeBases, locked);
+            order.verify(knowledgeBases).findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a");
+            order.verify(locked).setEmbeddingModel("model-v2");
+            order.verify(locked).setEmbeddingDimension(2048);
+            assertThat(transactions.begins).isEqualTo(1);
+            assertThat(transactions.commits).isEqualTo(1);
+            assertThat(transactions.rollbacks).isZero();
+        }
+    }
+
+    @Test
+    void proxiedSparseCutoverUsesKnowledgeBaseThenMigrationLockOrder() {
+        var migrations = mock(com.dupi.rag.repository.SparseMigrationRepository.class);
+        var profiles = mock(com.dupi.rag.repository.RetrievalProfileRepository.class);
+        var runs = mock(com.dupi.rag.repository.RagEvalRunRepository.class);
+        var chunks = mock(com.dupi.rag.repository.ChunkRepository.class);
+        var knowledgeBases = mock(KnowledgeBaseService.class);
+        var audit = mock(AuditLogService.class);
+        var profileService = mock(RetrievalProfileService.class);
+        var webClient = mock(org.springframework.web.reactive.function.client.WebClient.Builder.class);
+        var maintenance = mock(KnowledgeBaseMaintenanceService.class);
+        var backfills = mock(SparseBackfillIntentService.class);
+        TrackingTransactionManager transactions = new TrackingTransactionManager();
+        UUID kbId = UUID.randomUUID();
+        var profile = com.dupi.rag.domain.entity.RetrievalProfile.builder()
+                .id(UUID.randomUUID()).kbId(kbId).name("candidate").version(2)
+                .vectorCandidateCount(20).sparseCandidateCount(20).rrfConstant(60)
+                .rerankCandidateLimit(10).finalTopK(5).build();
+        var migration = com.dupi.rag.domain.entity.SparseMigration.builder()
+                .id(UUID.randomUUID()).kbId(kbId).profileId(profile.getId())
+                .state(com.dupi.rag.domain.enums.SparseMigrationState.SHADOW_VALIDATING)
+                .sourceChunkCount(10L).indexedChunkCount(10L)
+                .expectedDimension(384).actualDimension(384)
+                .baselineP95Ms(100.0).candidateP95Ms(105.0)
+                .baselineFallbackRate(0.1).candidateFallbackRate(0.1).build();
+        var pass = com.dupi.rag.domain.entity.RagEvalRun.builder().kbId(kbId)
+                .status(com.dupi.rag.domain.enums.RagEvalRunStatus.COMPLETED)
+                .gateStatus(com.dupi.rag.domain.enums.RagQualityGateStatus.PASS)
+                .profileSnapshot(profile.snapshot()).build();
+        when(knowledgeBases.findForUpdateOrThrow(kbId))
+                .thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(migrations.findByIdAndKbId(migration.getId(), kbId)).thenReturn(Optional.of(migration));
+        when(profiles.findByIdAndKbId(profile.getId(), kbId)).thenReturn(Optional.of(profile));
+        when(runs.findByKbIdAndStatusAndGateStatus(kbId,
+                com.dupi.rag.domain.enums.RagEvalRunStatus.COMPLETED,
+                com.dupi.rag.domain.enums.RagQualityGateStatus.PASS)).thenReturn(List.of(pass));
+        when(migrations.save(migration)).thenReturn(migration);
+
+        try (AnnotationConfigApplicationContext spring = transactionalContext(transactions)) {
+            spring.registerBean(SparseMigrationService.class, () -> new SparseMigrationService(
+                    migrations, profiles, runs, chunks, knowledgeBases, audit, profileService,
+                    webClient, maintenance, backfills));
+            spring.refresh();
+
+            SparseMigrationService service = spring.getBean(SparseMigrationService.class);
+            assertThat(AopUtils.isAopProxy(service)).isTrue();
+            assertThat(service.cutover(kbId, migration.getId()).getState())
+                    .isEqualTo(com.dupi.rag.domain.enums.SparseMigrationState.CUTOVER);
+
+            InOrder order = inOrder(knowledgeBases, migrations);
+            order.verify(knowledgeBases).findForUpdateOrThrow(kbId);
+            order.verify(migrations).findByIdAndKbId(migration.getId(), kbId);
+            assertThat(transactions.begins).isEqualTo(1);
+            assertThat(transactions.commits).isEqualTo(1);
+            assertThat(transactions.rollbacks).isZero();
+        }
+    }
     @Test
     void proxiedStepWriterKeepsParentFenceUntilStepFlushCommits() {
         OperationJobRepository jobs = mock(OperationJobRepository.class);
@@ -187,6 +338,19 @@ class OperationTransactionStructureTest {
         protected void doCleanupAfterCompletion(Object transaction) {
             active.remove();
         }
+    }
+
+    private static AnnotationConfigApplicationContext transactionalContext(
+            TrackingTransactionManager transactions) {
+        AnnotationConfigApplicationContext spring = new AnnotationConfigApplicationContext();
+        spring.registerBean("transactionManager", PlatformTransactionManager.class, () -> transactions);
+        spring.register(TransactionOnlyConfig.class);
+        return spring;
+    }
+
+    @Configuration
+    @EnableTransactionManagement(proxyTargetClass = true)
+    static class TransactionOnlyConfig {
     }
 
     private static OperationJob currentJob() {

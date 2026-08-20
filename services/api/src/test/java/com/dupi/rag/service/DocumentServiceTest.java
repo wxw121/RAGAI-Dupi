@@ -97,10 +97,23 @@ class DocumentServiceTest {
     @BeforeEach
     void persistIntentThroughLegacyRepositoryMocks() {
         lenient().doAnswer(call -> {
-            documentRepository.save(call.getArgument(1));
-            ingestJobRepository.save(call.getArgument(2));
+            Document document = call.getArgument(1);
+            IngestJob job = call.getArgument(2);
+            document.setStatus(DocumentStatus.UPLOADING);
+            job.setStatus(IngestJobStatus.UPLOAD_INTENT);
+            job.setStage(IngestStage.UPLOAD_PENDING);
+            documentRepository.save(document);
+            ingestJobRepository.save(job);
             return null;
         }).when(uploadIntents).prepare(anyString(), any(), any());
+        lenient().when(uploadIntents.publish(anyString(), any(), any(), any())).thenAnswer(call -> {
+            Document document = call.getArgument(1);
+            IngestJob job = call.getArgument(2);
+            document.setStatus(DocumentStatus.PENDING);
+            job.setStatus(IngestJobStatus.PENDING);
+            job.setStage(IngestStage.QUEUED);
+            return new DocumentUploadPublication(document, job);
+        });
         lenient().doAnswer(call -> {
             Document document = call.getArgument(0);
             IngestJob job = call.getArgument(1);
@@ -122,7 +135,6 @@ class DocumentServiceTest {
                 minioStorageService,
                 milvusVectorService,
                 ingestJobProducer,
-                ingestOutboxService,
                 documentTombstoneService,
                 vectorCleanupTaskService,
                 auditLogService,
@@ -234,7 +246,7 @@ class DocumentServiceTest {
     }
 
     @Test
-    void uploadStoresFileCreatesJobAndRecordsOutboxWithoutDirectRedisPush() {
+    void uploadStoresFileCreatesJobAndAtomicallyPublishesWithoutDirectRedisPush() {
         UUID kbId = UUID.randomUUID();
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).name("KB").build();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
@@ -248,18 +260,11 @@ class DocumentServiceTest {
         assertThat(response.getCurrentJob()).isNotNull();
         assertThat(response.getCurrentJob().getStatus()).isEqualTo(IngestJobStatus.PENDING);
         verify(minioStorageService).upload(contains(kbId.toString()), any(), eq(5L), eq("text/markdown"));
-        verify(ingestJobRepository).save(any(IngestJob.class));
-        verify(ingestOutboxService).record(any(IngestJob.class), eq(kb), contains("a.md"), eq("a.md"), eq("text/markdown"));
-        verify(uploadQuotaService).commit(any(UploadQuotaReservation.class), any(Document.class));
+        verify(uploadIntents).publish(eq("default"), any(Document.class), any(IngestJob.class),
+                any(UploadQuotaReservation.class));
         verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
-        verify(documentRepository, atLeast(2)).save(any(Document.class));
         verify(auditLogService).recordSuccess(
                 "DOCUMENT_UPLOAD", "DOCUMENT", response.getId(), "Uploaded document a.md");
-        var publishOrder = inOrder(ingestOutboxService, uploadQuotaService, documentRepository);
-        publishOrder.verify(ingestOutboxService)
-                .record(any(IngestJob.class), eq(kb), contains("a.md"), eq("a.md"), eq("text/markdown"));
-        publishOrder.verify(uploadQuotaService).commit(any(UploadQuotaReservation.class), any(Document.class));
-        publishOrder.verify(documentRepository).save(any(Document.class));
     }
 
     @Test
@@ -286,8 +291,7 @@ class DocumentServiceTest {
         assertThat(response.getCurrentJob().getId()).isEqualTo(jobId);
         verifyNoInteractions(minioStorageService);
         verify(ingestJobRepository, never()).save(any());
-        verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
-        verify(uploadQuotaService, never()).commit(any(), any());
+        verify(uploadIntents, never()).publish(anyString(), any(), any(), any());
     }
 
     @Test
@@ -306,7 +310,7 @@ class DocumentServiceTest {
                 .hasMessageContaining("Upload failed");
 
         verify(uploadQuotaService).release(reservation, "Upload failed");
-        verify(uploadQuotaService, never()).commit(any(), any());
+        verify(uploadIntents, never()).publish(anyString(), any(), any(), any());
         ArgumentCaptor<Document> savedDocument = ArgumentCaptor.forClass(Document.class);
         verify(documentRepository, atLeast(2)).save(savedDocument.capture());
         assertThat(savedDocument.getAllValues().get(savedDocument.getAllValues().size() - 1)
@@ -346,8 +350,8 @@ class DocumentServiceTest {
                 eq("text/markdown"), eq(5L), anyString()))
                 .thenAnswer(invocation -> reservation(
                         kbId, invocation.getArgument(1), "key", 5L));
-        doThrow(new IllegalStateException("outbox database down"))
-                .when(ingestOutboxService).record(any(), any(), any(), any(), any());
+        doThrow(new IllegalStateException("publication database down"))
+                .when(uploadIntents).publish(anyString(), any(), any(), any());
 
         assertThatThrownBy(() -> service().upload(
                 kbId,
@@ -358,7 +362,7 @@ class DocumentServiceTest {
         verify(minioStorageService).upload(contains("a.md"), any(), eq(5L), eq("text/markdown"));
         verify(minioStorageService).delete(contains("a.md"));
         verify(uploadQuotaService).release(any(UploadQuotaReservation.class), eq("Upload failed"));
-        verify(ingestOutboxService).record(any(), any(), any(), any(), any());
+        verify(uploadIntents).publish(anyString(), any(), any(), any());
     }
 
     @Test
@@ -371,8 +375,8 @@ class DocumentServiceTest {
                 eq("text/markdown"), eq(5L), anyString()))
                 .thenAnswer(invocation -> reservation(
                         kbId, invocation.getArgument(1), "key", 5L));
-        doThrow(new IllegalStateException("outbox database down"))
-                .when(ingestOutboxService).record(any(), any(), any(), any(), any());
+        doThrow(new IllegalStateException("publication database down"))
+                .when(uploadIntents).publish(anyString(), any(), any(), any());
         doThrow(new IllegalStateException("object cleanup down"))
                 .when(minioStorageService).delete(anyString());
 
@@ -409,7 +413,8 @@ class DocumentServiceTest {
         verify(knowledgeBaseService, times(1)).findOrThrow(kbId);
         verify(minioStorageService).upload(contains("a.md"), any(), eq(5L), eq("text/markdown"));
         verify(minioStorageService).upload(contains("b.md"), any(), eq(5L), eq("text/markdown"));
-        verify(ingestOutboxService, times(2)).record(any(IngestJob.class), eq(kb), anyString(), anyString(), eq("text/markdown"));
+        verify(uploadIntents, times(2)).publish(eq("default"), any(Document.class), any(IngestJob.class),
+                any(UploadQuotaReservation.class));
         verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
     }
 
@@ -472,13 +477,13 @@ class DocumentServiceTest {
     }
 
     @Test
-    void uploadFailsBeforeReturningWhenOutboxRecordFails() {
+    void uploadFailsBeforeReturningWhenAtomicPublicationFails() {
         UUID kbId = UUID.randomUUID();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
         when(uploadQuotaService.reserveForUpload(eq(kbId), any(UUID.class), isNull(), eq("a.md"), eq("text/markdown"), eq(5L), anyString()))
                 .thenAnswer(invocation -> reservation(kbId, invocation.getArgument(1), null, 5L));
         doThrow(new IllegalStateException("database down"))
-                .when(ingestOutboxService).record(any(), any(), any(), any(), any());
+                .when(uploadIntents).publish(anyString(), any(), any(), any());
         MockMultipartFile file = new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes());
 
         assertThatThrownBy(() -> service().upload(kbId, file))

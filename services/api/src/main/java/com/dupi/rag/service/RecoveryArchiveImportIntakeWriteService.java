@@ -115,6 +115,11 @@ class RecoveryArchiveImportIntakeWriteService {
     @Transactional
     RecoveryIntakeReopenOutcome reopenCleanedIntake(
             UUID jobId, RecoveryArchiveImportPlan plan, String stagingKey) {
+        var knowledgeBase = knowledgeBases
+                .findByIdAndTenantIdForUpdateAnyStatus(plan.knowledgeBaseId(), plan.tenantId())
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Knowledge base not found: " + plan.knowledgeBaseId()));
+        KnowledgeBaseLifecyclePolicy.requireReady(knowledgeBase, plan.knowledgeBaseId());
         OperationJob job = locked(jobId);
         validatePlan(job, plan);
         OperationStep stage = requiredStage(jobId);

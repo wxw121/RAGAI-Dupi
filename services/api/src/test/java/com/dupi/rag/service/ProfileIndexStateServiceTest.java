@@ -17,18 +17,36 @@ import static org.mockito.Mockito.*;
 class ProfileIndexStateServiceTest {
 
     @Test
+    void reindexLocksBeforeMutatingTheManagedAggregate() {
+        DocumentRepository documents = mock(DocumentRepository.class);
+        KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase locked = spy(KnowledgeBase.builder().id(kbId).tenantId("tenant-a").build());
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a"))
+                .thenReturn(Optional.of(locked));
+
+        KnowledgeBase result = service(documents, knowledgeBases)
+                .lockForReindex(kbId, "tenant-a", "new-model", 2048);
+
+        var order = inOrder(knowledgeBases, locked);
+        order.verify(knowledgeBases).findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a");
+        order.verify(locked).setEmbeddingModel("new-model");
+        order.verify(locked).setEmbeddingDimension(2048);
+        assertThat(result).isSameAs(locked);
+    }
+
+    @Test
     void deletionFirstRejectsReindexIntentBeforeDocumentsAreChanged() {
         DocumentRepository documents = mock(DocumentRepository.class);
         KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
         UUID kbId = UUID.randomUUID();
-        KnowledgeBase staleReady = KnowledgeBase.builder().id(kbId).tenantId("tenant-a").build();
         KnowledgeBase deleting = KnowledgeBase.builder().id(kbId).tenantId("tenant-a")
                 .lifecycleStatus(com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus.DELETING).build();
         when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a"))
                 .thenReturn(Optional.of(deleting));
 
         assertThatThrownBy(() -> service(documents, knowledgeBases)
-                .resetForReindex(staleReady, List.of(Document.builder().indexSchemaVersion(2).build())))
+                .lockForReindex(kbId, "tenant-a", "new-model", 2048))
                 .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class);
 
         verifyNoInteractions(documents);

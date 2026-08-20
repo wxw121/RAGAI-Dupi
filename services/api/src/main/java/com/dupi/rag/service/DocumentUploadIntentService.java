@@ -3,6 +3,7 @@ package com.dupi.rag.service;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.entity.UploadQuotaReservation;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
 import com.dupi.rag.domain.enums.IngestStage;
@@ -27,6 +28,8 @@ class DocumentUploadIntentService {
     private final KnowledgeBaseRepository knowledgeBases;
     private final DocumentRepository documents;
     private final IngestJobRepository jobs;
+    private final UploadQuotaService quota;
+    private final IngestOutboxService outbox;
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     void prepare(String tenantId, Document document, IngestJob job) {
@@ -35,11 +38,50 @@ class DocumentUploadIntentService {
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "Knowledge base not found: " + document.getKbId()));
         KnowledgeBaseLifecyclePolicy.requireReady(locked, document.getKbId());
+        document.setStatus(DocumentStatus.UPLOADING);
+        document.setErrorMessage(null);
+        job.setStatus(IngestJobStatus.UPLOAD_INTENT);
+        job.setStage(IngestStage.UPLOAD_PENDING);
+        job.setErrorMessage(null);
         documents.save(document);
         long revision = locked.getIndexRevision() == null ? 0L : locked.getIndexRevision();
         locked.setIndexRevision(revision + 1);
         knowledgeBases.save(locked);
         jobs.saveAndFlush(job);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    DocumentUploadPublication publish(String tenantId, Document intentDocument, IngestJob intentJob,
+                                      UploadQuotaReservation reservation) {
+        KnowledgeBase locked = knowledgeBases
+                .findByIdAndTenantIdForUpdateAnyStatus(intentDocument.getKbId(), tenantId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Knowledge base not found: " + intentDocument.getKbId()));
+        KnowledgeBaseLifecyclePolicy.requireReady(locked, intentDocument.getKbId());
+        IngestJob job = jobs.findByIdForUpdate(intentJob.getId())
+                .filter(candidate -> intentDocument.getKbId().equals(candidate.getKbId())
+                        && intentDocument.getId().equals(candidate.getDocId()))
+                .orElseThrow(() -> new IllegalStateException("Upload intent ingest job is missing"));
+        Document document = documents.findById(intentDocument.getId())
+                .filter(candidate -> intentDocument.getKbId().equals(candidate.getKbId()))
+                .orElseThrow(() -> new IllegalStateException("Upload intent document is missing"));
+        if (job.getStatus() != IngestJobStatus.UPLOAD_INTENT
+                || job.getStage() != IngestStage.UPLOAD_PENDING
+                || document.getStatus() != DocumentStatus.UPLOADING) {
+            throw new IllegalStateException("Upload intent is no longer publishable");
+        }
+
+        quota.commitInCurrentTransaction(reservation, document);
+        document.setStatus(DocumentStatus.PENDING);
+        document.setErrorMessage(null);
+        job.setStatus(IngestJobStatus.PENDING);
+        job.setStage(IngestStage.QUEUED);
+        job.setErrorMessage(null);
+        documents.save(document);
+        jobs.save(job);
+        outbox.record(job, locked, document.getObjectKey(), document.getFileName(), document.getMimeType());
+        jobs.flush();
+        return new DocumentUploadPublication(document, job);
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -53,6 +95,7 @@ class DocumentUploadIntentService {
         job.setStage(IngestStage.FAILED);
         job.setErrorMessage(error);
         job.setCompletedAt(now);
+        outbox.cancelPendingForJob(job.getId(), "Upload publication failed");
         documents.save(document);
         jobs.saveAndFlush(job);
     }

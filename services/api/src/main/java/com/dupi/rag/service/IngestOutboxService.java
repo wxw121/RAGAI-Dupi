@@ -78,10 +78,14 @@ public class IngestOutboxService {
                 continue;
             }
 
-            IngestJob job = ingestJobRepository.findById(event.getJobId()).orElse(null);
+            IngestJob job = ingestJobRepository.findByIdForUpdate(event.getJobId()).orElse(null);
             Document doc = documentRepository.findById(event.getDocId()).orElse(null);
             if (job == null || doc == null) {
                 cancel(event, "Ingest job or document no longer exists");
+                continue;
+            }
+            if (!isDispatchable(job, doc)) {
+                cancel(event, "Ingest job or document is not dispatchable");
                 continue;
             }
 
@@ -99,10 +103,22 @@ public class IngestOutboxService {
                 outboxRepository.save(event);
                 dispatched++;
             } catch (Exception e) {
-                markRetryable(event, job, doc, now, e);
+                if (!isDispatchable(job, doc)
+                        || e instanceof com.dupi.rag.exception.OperationConflictException
+                        || e instanceof com.dupi.rag.exception.ResourceNotFoundException) {
+                    cancel(event, "Knowledge base or ingest work is no longer dispatchable");
+                } else {
+                    markRetryable(event, job, doc, now, e);
+                }
             }
         }
         return dispatched;
+    }
+
+    private boolean isDispatchable(IngestJob job, Document doc) {
+        return job.getStatus() == IngestJobStatus.PENDING
+                && job.getStage() == IngestStage.QUEUED
+                && doc.getStatus() == DocumentStatus.PENDING;
     }
 
     private void cancel(IngestOutboxEvent event, String reason) {

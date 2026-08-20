@@ -73,7 +73,7 @@ class IngestOutboxServiceTest {
                 any(Instant.class)
         )).thenReturn(List.of(event));
         when(documentTombstoneService.isDeleted(docId)).thenReturn(false);
-        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
         when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
 
@@ -88,6 +88,7 @@ class IngestOutboxServiceTest {
         verify(outboxRepository).save(event);
         verify(documentRepository).save(doc);
         verify(ingestJobRepository).save(job);
+        verify(ingestJobRepository).findByIdForUpdate(jobId);
     }
 
     @Test
@@ -105,7 +106,7 @@ class IngestOutboxServiceTest {
                 any(Instant.class)
         )).thenReturn(List.of(event));
         when(documentTombstoneService.isDeleted(docId)).thenReturn(false);
-        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
         when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
         doThrow(new IllegalStateException("redis down"))
@@ -157,7 +158,7 @@ class IngestOutboxServiceTest {
                 any(Instant.class)
         )).thenReturn(List.of(event));
         when(documentTombstoneService.isDeleted(docId)).thenReturn(false);
-        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.empty());
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.empty());
         when(documentRepository.findById(docId)).thenReturn(Optional.of(doc(kbId, docId)));
 
         int dispatched = service().dispatchPending();
@@ -167,6 +168,33 @@ class IngestOutboxServiceTest {
         assertThat(event.getLastError()).contains("no longer exists");
         verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
         verify(outboxRepository).save(event);
+    }
+
+    @Test
+    void dispatcherCancelsUploadIntentAndTerminalJobInsteadOfResurrectingThem() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestOutboxEvent intentEvent = event(kbId, docId, jobId);
+        IngestJob uploadIntent = job(kbId, docId, jobId);
+        uploadIntent.setStatus(IngestJobStatus.UPLOAD_INTENT);
+        uploadIntent.setStage(IngestStage.UPLOAD_PENDING);
+        Document uploading = doc(kbId, docId);
+        uploading.setStatus(DocumentStatus.UPLOADING);
+        when(outboxRepository.findTop50ByStatusInAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
+                eq(List.of(IngestOutboxStatus.PENDING, IngestOutboxStatus.FAILED)), any(Instant.class)))
+                .thenReturn(List.of(intentEvent));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(uploadIntent));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(uploading));
+
+        assertThat(service().dispatchPending()).isZero();
+
+        assertThat(intentEvent.getStatus()).isEqualTo(IngestOutboxStatus.CANCELLED);
+        assertThat(uploadIntent.getStatus()).isEqualTo(IngestJobStatus.UPLOAD_INTENT);
+        assertThat(uploading.getStatus()).isEqualTo(DocumentStatus.UPLOADING);
+        verifyNoInteractions(ingestJobProducer, knowledgeBaseService);
+        verify(ingestJobRepository, never()).save(any());
+        verify(documentRepository, never()).save(any());
     }
 
     @Test
@@ -184,7 +212,7 @@ class IngestOutboxServiceTest {
                 any(Instant.class)
         )).thenReturn(List.of(event));
         when(documentTombstoneService.isDeleted(docId)).thenReturn(false);
-        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
         when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
         doThrow(new IllegalStateException(" "))

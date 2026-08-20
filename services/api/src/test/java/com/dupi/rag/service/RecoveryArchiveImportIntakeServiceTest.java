@@ -79,6 +79,25 @@ class RecoveryArchiveImportIntakeServiceTest {
     }
 
     @Test
+    void deletionFirstPreventsCompletedCompensationFromReopening() {
+        RecoveryArchiveImportPlan plan = plan("tenant-a", UUID.randomUUID(), "7".repeat(64));
+        OperationJob job = job("tenant-a", plan.knowledgeBaseId(), plan);
+        job.setPhase(OperationPhase.COMPENSATION);
+        job.setStatus(OperationStatus.COMPLETED);
+        OperationStep stage = stage(job.getId(), OperationStepStatus.COMPENSATED, "old-stage");
+        reset(knowledgeBases);
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(plan.knowledgeBaseId(), "tenant-a"))
+                .thenReturn(Optional.of(KnowledgeBase.builder().id(plan.knowledgeBaseId()).tenantId("tenant-a")
+                        .lifecycleStatus(KnowledgeBaseLifecycleStatus.DELETING).build()));
+
+        assertThatThrownBy(() -> writes.reopenCleanedIntake(job.getId(), plan, "new-stage"))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class);
+
+        verify(jobs, never()).findByIdForUpdate(job.getId());
+        assertThat(job.getStatus()).isEqualTo(OperationStatus.COMPLETED);
+    }
+
+    @Test
     void tenantScopedKeysNeverProbeOrConflictAcrossTenants() {
         UUID kbId = UUID.randomUUID();
         RecoveryArchiveImportPlan planA = plan("tenant-a", kbId, "a".repeat(64));
@@ -166,6 +185,9 @@ class RecoveryArchiveImportIntakeServiceTest {
         assertThat(stage.getStatus()).isEqualTo(OperationStepStatus.PENDING);
         assertThat(cleanup.getStatus()).isEqualTo(OperationStepStatus.PENDING);
         assertThat(cleanup.getRetryEpoch()).isEqualTo(5L);
+        var locks = inOrder(knowledgeBases, jobs);
+        locks.verify(knowledgeBases).findByIdAndTenantIdForUpdateAnyStatus(plan.knowledgeBaseId(), "tenant-a");
+        locks.verify(jobs).findByIdForUpdate(job.getId());
     }
 
     @Test

@@ -22,6 +22,7 @@ public interface IngestJobRepository extends JpaRepository<IngestJob, UUID> {
 
     List<IngestJob> findByKbIdOrderByCreatedAtDesc(UUID kbId);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
     List<IngestJob> findTop20ByStatusAndStageOrderByCreatedAtAsc(IngestJobStatus status, IngestStage stage);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)

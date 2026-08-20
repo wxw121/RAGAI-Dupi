@@ -6,6 +6,9 @@ import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.IngestOutboxEvent;
 import com.dupi.rag.domain.entity.UploadQuotaReservation;
 import com.dupi.rag.domain.enums.DocumentStatus;
+import com.dupi.rag.domain.enums.IngestJobStatus;
+import com.dupi.rag.domain.enums.IngestOutboxStatus;
+import com.dupi.rag.domain.enums.IngestStage;
 import com.dupi.rag.domain.enums.UploadQuotaReservationStatus;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
@@ -76,7 +79,7 @@ public class UploadQuotaReconciliationService {
             return false;
         }
         IngestJob job = ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(doc.getId()).orElse(null);
-        if (job != null && hasDurableOutbox(job)) {
+        if (job != null && hasPublishedOutbox(job, doc)) {
             commit(reservation, doc);
             return true;
         }
@@ -99,9 +102,15 @@ public class UploadQuotaReconciliationService {
         return true;
     }
 
-    private boolean hasDurableOutbox(IngestJob job) {
+    private boolean hasPublishedOutbox(IngestJob job, Document doc) {
+        if (job.getStatus() != IngestJobStatus.PENDING
+                || job.getStage() != IngestStage.QUEUED
+                || doc.getStatus() != DocumentStatus.PENDING) {
+            return false;
+        }
         List<IngestOutboxEvent> outboxEvents = outboxRepository.findByJobId(job.getId());
-        return !outboxEvents.isEmpty();
+        return outboxEvents.stream().anyMatch(event -> event.getStatus() == IngestOutboxStatus.PENDING
+                || event.getStatus() == IngestOutboxStatus.FAILED);
     }
 
     private boolean cleanupObject(Document doc, UploadQuotaReservation reservation) {

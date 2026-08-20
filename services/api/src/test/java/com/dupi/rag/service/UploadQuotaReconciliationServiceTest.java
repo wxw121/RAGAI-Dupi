@@ -155,6 +155,51 @@ class UploadQuotaReconciliationServiceTest {
     }
 
     @Test
+    void crashedPreObjectUploadIntentIsCleanedWithoutEverPublishingToRecovery() {
+        UUID attemptId = UUID.randomUUID();
+        UploadQuotaReservation reservation = pendingReservation(attemptId);
+        Document doc = document(reservation.getKbId(), attemptId);
+        doc.setStatus(DocumentStatus.UPLOADING);
+        IngestJob job = job(reservation.getKbId(), attemptId);
+        job.setStatus(IngestJobStatus.UPLOAD_INTENT);
+        job.setStage(IngestStage.UPLOAD_PENDING);
+        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
+                .thenReturn(List.of(reservation));
+        when(documentRepository.findById(attemptId)).thenReturn(Optional.of(doc));
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(attemptId)).thenReturn(Optional.of(job));
+        when(minioStorageService.delete(doc.getObjectKey())).thenReturn(true);
+
+        assertThat(service().reconcileStalePendingReservations()).isEqualTo(1);
+
+        verify(outboxRepository).deleteByJobId(job.getId());
+        verify(ingestJobRepository).delete(job);
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.FAILED);
+        assertThat(reservation.getStatus()).isEqualTo(UploadQuotaReservationStatus.RELEASED);
+    }
+
+    @Test
+    void terminalJobWithStalePendingOutboxIsCompensatedInsteadOfPromoted() {
+        UUID attemptId = UUID.randomUUID();
+        UploadQuotaReservation reservation = pendingReservation(attemptId);
+        Document doc = document(reservation.getKbId(), attemptId);
+        doc.setStatus(DocumentStatus.FAILED);
+        IngestJob job = job(reservation.getKbId(), attemptId);
+        job.setStatus(IngestJobStatus.FAILED);
+        job.setStage(IngestStage.FAILED);
+        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
+                .thenReturn(List.of(reservation));
+        when(documentRepository.findById(attemptId)).thenReturn(Optional.of(doc));
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(attemptId)).thenReturn(Optional.of(job));
+        when(minioStorageService.delete(doc.getObjectKey())).thenReturn(true);
+
+        assertThat(service().reconcileStalePendingReservations()).isEqualTo(1);
+
+        assertThat(reservation.getStatus()).isEqualTo(UploadQuotaReservationStatus.RELEASED);
+        verify(outboxRepository).deleteByJobId(job.getId());
+        verify(ingestJobRepository).delete(job);
+    }
+
+    @Test
     void expiredReservationOwnedByActiveImportIsNotReconciledOrExposed() {
         UUID attemptId = UUID.randomUUID();
         UploadQuotaReservation reservation = pendingReservation(attemptId);

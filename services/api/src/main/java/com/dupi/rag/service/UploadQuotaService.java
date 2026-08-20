@@ -119,6 +119,16 @@ public class UploadQuotaService {
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void commit(UploadQuotaReservation reservation, Document doc) {
+        commitOwned(reservation, doc);
+    }
+
+    /** Joins upload publication so quota, document, ingest job, and outbox become visible atomically. */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void commitInCurrentTransaction(UploadQuotaReservation reservation, Document doc) {
+        commitOwned(reservation, doc);
+    }
+
+    private void commitOwned(UploadQuotaReservation reservation, Document doc) {
         if (reservation == null || reservation.getId() == null || doc == null || doc.getId() == null) {
             return;
         }

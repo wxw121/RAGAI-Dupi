@@ -228,6 +228,8 @@ class SparseMigrationServiceTest {
         SparseMigration migration = migration(kbId, profile.getId());
         RagEvalRun pass = RagEvalRun.builder().kbId(kbId).status(RagEvalRunStatus.COMPLETED)
                 .gateStatus(RagQualityGateStatus.PASS).profileSnapshot(profile.snapshot()).build();
+        KnowledgeBase locked = KnowledgeBase.builder().id(kbId).build();
+        when(knowledgeBaseService.findForUpdateOrThrow(kbId)).thenReturn(locked);
         when(repository.findByIdAndKbId(migration.getId(), kbId)).thenReturn(Optional.of(migration));
         when(profileRepository.findByIdAndKbId(profile.getId(), kbId)).thenReturn(Optional.of(profile));
         when(runRepository.findByKbIdAndStatusAndGateStatus(
@@ -237,6 +239,9 @@ class SparseMigrationServiceTest {
         var response = service().cutover(kbId, migration.getId());
 
         assertThat(response.getState()).isEqualTo(SparseMigrationState.CUTOVER);
+        var locks = inOrder(knowledgeBaseService, repository);
+        locks.verify(knowledgeBaseService).findForUpdateOrThrow(kbId);
+        locks.verify(repository).findByIdAndKbId(migration.getId(), kbId);
         verify(auditLogService).recordSuccessInCurrentTransaction(
                 "SPARSE_MIGRATION_CUTOVER", "KNOWLEDGE_BASE", kbId,
                 "Cut over sparse migration " + migration.getId());

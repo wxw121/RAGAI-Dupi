@@ -1,5 +1,6 @@
 package com.dupi.rag.service;
 
+import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.config.LlmProperties;
 import com.dupi.rag.config.RedisQueueProperties;
@@ -359,9 +360,8 @@ public class IngestJobService {
 
     @Transactional
     public List<IngestJobResponse> reindexKnowledgeBase(UUID kbId, String embeddingModel, int embeddingDimension) {
-        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
-        kb.setEmbeddingModel(embeddingModel);
-        kb.setEmbeddingDimension(embeddingDimension);
+        KnowledgeBase kb = profileIndexStateService.lockForReindex(
+                kbId, TenantContext.getTenantId(), embeddingModel, embeddingDimension);
         List<Document> documents = documentRepository.findByKbIdOrderByCreatedAtDesc(kbId);
         profileIndexStateService.resetForReindex(kb, documents);
         vectorCleanupTaskService.completePendingProfileKnowledgeBase(kbId);
@@ -625,6 +625,17 @@ public class IngestJobService {
                     .nextAction(stalledNextAction(job))
                     .retryable(false)
                     .stalled(true)
+                    .ageSeconds(ageSeconds)
+                    .lastUpdatedSeconds(lastUpdatedSeconds)
+                    .build();
+        }
+        if (job.getStatus() == IngestJobStatus.UPLOAD_INTENT) {
+            return IngestDiagnosisResponse.builder()
+                    .severity("info")
+                    .summary("文档上传正在完成持久化")
+                    .nextAction("等待上传完成；中断的上传会在租约到期后自动清理。")
+                    .retryable(false)
+                    .stalled(false)
                     .ageSeconds(ageSeconds)
                     .lastUpdatedSeconds(lastUpdatedSeconds)
                     .build();
