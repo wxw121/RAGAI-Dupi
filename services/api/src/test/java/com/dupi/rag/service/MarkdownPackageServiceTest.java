@@ -121,6 +121,34 @@ class MarkdownPackageServiceTest {
     }
 
     @Test
+    void topLevelFenceAcceptsIndentedCloseAfterUnindentedOpen() throws Exception {
+        assertOnlyGenuineImageIsPlanned("```markdown\n"
+                + "![example](images/missing-example.png)\n  ```\n"
+                + "![genuine](images/genuine.png)");
+    }
+
+    @Test
+    void topLevelFenceAcceptsUnindentedCloseAfterIndentedOpen() throws Exception {
+        assertOnlyGenuineImageIsPlanned("  ```markdown\n"
+                + "  ![example](images/missing-example.png)\n```\n"
+                + "![genuine](images/genuine.png)");
+    }
+
+    @Test
+    void blockquoteFenceAcceptsIndependentlyIndentedClose() throws Exception {
+        assertOnlyGenuineImageIsPlanned("> ```markdown\n"
+                + "> ![example](images/missing-example.png)\n>   ```\n"
+                + "![genuine](images/genuine.png)");
+    }
+
+    @Test
+    void listFenceAcceptsIndependentlyIndentedClose() throws Exception {
+        assertOnlyGenuineImageIsPlanned("- ```markdown\n"
+                + "  ![example](images/missing-example.png)\n    ```\n"
+                + "![genuine](images/genuine.png)");
+    }
+
+    @Test
     void backslashBeforeClosingBacktickDoesNotHideFollowingGenuineImage() throws Exception {
         assertOnlyGenuineImageIsPlanned("`example \\` ![genuine](images/genuine.png)`");
     }

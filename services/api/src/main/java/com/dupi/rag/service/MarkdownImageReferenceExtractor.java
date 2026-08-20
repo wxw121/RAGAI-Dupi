@@ -88,9 +88,8 @@ final class MarkdownImageReferenceExtractor {
     }
 
     private Fence fence(String line, Fence open) {
-        LineContext context = open == null ? lineContext(line) : null;
-        int start = open == null ? context.contentStart() : open.markerColumn();
-        if (open != null && !sameContainerPrefix(line, open)) return null;
+        FenceContext context = open == null ? fenceContext(line) : null;
+        int start = open == null ? context.markerColumn() : closingFenceStart(line, open);
         if (start >= line.length()) return null;
         char marker = line.charAt(start);
         if (marker != '`' && marker != '~') return null;
@@ -101,20 +100,49 @@ final class MarkdownImageReferenceExtractor {
         String remainder = line.substring(end);
         if (open == null) {
             if (marker == '`' && remainder.indexOf('`') >= 0) return null;
-            return new Fence(marker, length, context.quoteDepth(), start);
+            return new Fence(marker, length, context.containers());
         }
         return marker == open.marker() && length >= open.length() && remainder.isBlank() ? open : null;
     }
 
-    private boolean sameContainerPrefix(String line, Fence open) {
-        if (line.length() <= open.markerColumn()) return false;
-        int quoteDepth = 0;
-        for (int cursor = 0; cursor < open.markerColumn(); cursor++) {
-            char current = line.charAt(cursor);
-            if (current == '>') quoteDepth++;
-            else if (current != ' ' && current != '\t') return false;
+    private FenceContext fenceContext(String line) {
+        List<FenceContainer> containers = new ArrayList<>();
+        int cursor = 0;
+        while (true) {
+            int marker = skipUpToThreeSpaces(line, cursor);
+            if (marker < line.length() && line.charAt(marker) == '>') {
+                cursor = marker + 1;
+                if (cursor < line.length() && (line.charAt(cursor) == ' ' || line.charAt(cursor) == '\t')) cursor++;
+                containers.add(FenceContainer.blockquote());
+                continue;
+            }
+            int listEnd = listMarkerEnd(line, marker);
+            if (listEnd >= 0) {
+                containers.add(FenceContainer.listItem(listEnd - cursor));
+                cursor = listEnd;
+                continue;
+            }
+            return new FenceContext(marker, List.copyOf(containers));
         }
-        return quoteDepth == open.quoteDepth();
+    }
+
+    private int closingFenceStart(String line, Fence open) {
+        int cursor = 0;
+        for (FenceContainer container : open.containers()) {
+            if (container.quote()) {
+                cursor = skipUpToThreeSpaces(line, cursor);
+                if (cursor >= line.length() || line.charAt(cursor) != '>') return line.length();
+                cursor++;
+                if (cursor < line.length() && (line.charAt(cursor) == ' ' || line.charAt(cursor) == '\t')) cursor++;
+                continue;
+            }
+            int end = cursor + container.continuationWidth();
+            if (end > line.length()) return line.length();
+            for (; cursor < end; cursor++) {
+                if (line.charAt(cursor) != ' ' && line.charAt(cursor) != '\t') return line.length();
+            }
+        }
+        return skipUpToThreeSpaces(line, cursor);
     }
 
     private void maskCodeSpans(char[] visible) {
@@ -348,6 +376,11 @@ final class MarkdownImageReferenceExtractor {
 
     private record Bracket(String value, int end) { }
     private record Destination(String value, int end) { }
-    private record Fence(char marker, int length, int quoteDepth, int markerColumn) { }
+    private record Fence(char marker, int length, List<FenceContainer> containers) { }
+    private record FenceContainer(boolean quote, int continuationWidth) {
+        private static FenceContainer blockquote() { return new FenceContainer(true, 0); }
+        private static FenceContainer listItem(int continuationWidth) { return new FenceContainer(false, continuationWidth); }
+    }
+    private record FenceContext(int markerColumn, List<FenceContainer> containers) { }
     private record LineContext(int contentStart, int quoteDepth) { }
 }
