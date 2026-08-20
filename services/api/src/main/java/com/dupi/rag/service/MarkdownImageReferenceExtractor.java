@@ -6,6 +6,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.function.LongConsumer;
 
 /**
  * Extracts the supported CommonMark image forms without attempting to render Markdown.
@@ -13,6 +15,16 @@ import java.util.Map;
  * parentheses) and full, collapsed, or shortcut references backed by a link definition.
  */
 final class MarkdownImageReferenceExtractor {
+
+    private final LongConsumer columnVisits;
+
+    MarkdownImageReferenceExtractor() {
+        this(ignored -> { });
+    }
+
+    MarkdownImageReferenceExtractor(LongConsumer columnVisits) {
+        this.columnVisits = Objects.requireNonNull(columnVisits);
+    }
 
     List<String> extract(String markdown) {
         String visible = withoutCode(markdown);
@@ -107,15 +119,17 @@ final class MarkdownImageReferenceExtractor {
 
     private FenceContext fenceContext(String line) {
         List<FenceContainer> containers = new ArrayList<>();
-        int cursor = 0;
+        Position cursor = Position.start();
         int containerColumn = 0;
         while (true) {
-            int marker = skipIndent(line, cursor, containerColumn, 3);
-            if (marker < line.length() && line.charAt(marker) == '>') {
-                cursor = marker + 1;
-                if (cursor < line.length() && (line.charAt(cursor) == ' ' || line.charAt(cursor) == '\t')) cursor++;
+            Position marker = skipIndent(line, cursor, containerColumn, 3);
+            if (marker.offset() < line.length() && line.charAt(marker.offset()) == '>') {
+                cursor = advance(line, marker);
+                if (cursor.offset() < line.length() && isWhitespace(line.charAt(cursor.offset()))) {
+                    cursor = advance(line, cursor);
+                }
                 containers.add(FenceContainer.blockquote());
-                containerColumn = columnAt(line, cursor);
+                containerColumn = cursor.column();
                 continue;
             }
             ListMarker list = listMarker(line, marker, containerColumn);
@@ -123,37 +137,38 @@ final class MarkdownImageReferenceExtractor {
                 if (!list.validPadding()) return new FenceContext(line.length(), List.copyOf(containers));
                 containers.add(FenceContainer.listItem(list.continuationWidth()));
                 cursor = list.contentStart();
-                containerColumn = columnAt(line, cursor);
+                containerColumn = cursor.column();
                 continue;
             }
-            return new FenceContext(marker, List.copyOf(containers));
+            return new FenceContext(marker.offset(), List.copyOf(containers));
         }
     }
 
     private int closingFenceStart(String line, Fence open) {
-        int cursor = 0;
+        Position cursor = Position.start();
         int containerColumn = 0;
         for (FenceContainer container : open.containers()) {
             if (container.quote()) {
                 cursor = skipIndent(line, cursor, containerColumn, 3);
-                if (cursor >= line.length() || line.charAt(cursor) != '>') return line.length();
-                cursor++;
-                if (cursor < line.length() && (line.charAt(cursor) == ' ' || line.charAt(cursor) == '\t')) cursor++;
-                containerColumn = columnAt(line, cursor);
+                if (cursor.offset() >= line.length() || line.charAt(cursor.offset()) != '>') {
+                    return line.length();
+                }
+                cursor = advance(line, cursor);
+                if (cursor.offset() < line.length() && isWhitespace(line.charAt(cursor.offset()))) {
+                    cursor = advance(line, cursor);
+                }
+                containerColumn = cursor.column();
                 continue;
             }
             int targetColumn = containerColumn + container.continuationWidth();
-            int column = columnAt(line, cursor);
-            while (cursor < line.length() && column < targetColumn) {
-                char current = line.charAt(cursor);
-                if (current != ' ' && current != '\t') return line.length();
-                column = advanceColumn(column, current);
-                cursor++;
+            while (cursor.offset() < line.length() && cursor.column() < targetColumn) {
+                if (!isWhitespace(line.charAt(cursor.offset()))) return line.length();
+                cursor = advance(line, cursor);
             }
-            if (column < targetColumn) return line.length();
+            if (cursor.column() < targetColumn) return line.length();
             containerColumn = targetColumn;
         }
-        return skipIndent(line, cursor, containerColumn, 3);
+        return skipIndent(line, cursor, containerColumn, 3).offset();
     }
 
     private void maskCodeSpans(char[] visible) {
@@ -203,80 +218,88 @@ final class MarkdownImageReferenceExtractor {
     }
 
     private LineContext lineContext(String line) {
-        int cursor = skipUpToThreeSpaces(line, 0);
+        Position cursor = skipUpToThreeSpaces(line, Position.start());
         int quoteDepth = 0;
         boolean consumedContainer;
         do {
             consumedContainer = false;
-            if (cursor < line.length() && line.charAt(cursor) == '>') {
+            if (cursor.offset() < line.length() && line.charAt(cursor.offset()) == '>') {
                 quoteDepth++;
-                cursor++;
-                if (cursor < line.length() && (line.charAt(cursor) == ' ' || line.charAt(cursor) == '\t')) cursor++;
+                cursor = advance(line, cursor);
+                if (cursor.offset() < line.length() && isWhitespace(line.charAt(cursor.offset()))) {
+                    cursor = advance(line, cursor);
+                }
                 cursor = skipUpToThreeSpaces(line, cursor);
                 consumedContainer = true;
             }
-            ListMarker list = listMarker(line, cursor, columnAt(line, cursor));
+            ListMarker list = listMarker(line, cursor, cursor.column());
             if (list != null && list.validPadding()) {
                 cursor = skipUpToThreeSpaces(line, list.contentStart());
                 consumedContainer = true;
             }
         } while (consumedContainer);
-        return new LineContext(cursor, quoteDepth);
+        return new LineContext(cursor.offset(), quoteDepth);
     }
 
-    private int skipUpToThreeSpaces(String line, int offset) {
-        int cursor = offset;
+    private Position skipUpToThreeSpaces(String line, Position offset) {
+        Position cursor = offset;
         int spaces = 0;
-        while (cursor < line.length() && spaces < 3 && line.charAt(cursor) == ' ') {
-            cursor++;
+        while (cursor.offset() < line.length() && spaces < 3 && line.charAt(cursor.offset()) == ' ') {
+            cursor = advance(line, cursor);
             spaces++;
         }
         return cursor;
     }
 
-    private ListMarker listMarker(String line, int offset, int containerColumn) {
-        if (offset >= line.length()) return null;
-        int markerEnd = offset;
-        char first = line.charAt(offset);
+    private ListMarker listMarker(String line, Position offset, int containerColumn) {
+        if (offset.offset() >= line.length()) return null;
+        Position markerEnd = offset;
+        char first = line.charAt(offset.offset());
         if (first == '-' || first == '+' || first == '*') {
-            markerEnd++;
+            markerEnd = advance(line, markerEnd);
         } else if (Character.isDigit(first)) {
-            while (markerEnd < line.length() && markerEnd - offset < 9
-                    && Character.isDigit(line.charAt(markerEnd))) markerEnd++;
-            if (markerEnd >= line.length() || (line.charAt(markerEnd) != '.' && line.charAt(markerEnd) != ')')) return null;
-            markerEnd++;
+            while (markerEnd.offset() < line.length() && markerEnd.offset() - offset.offset() < 9
+                    && Character.isDigit(line.charAt(markerEnd.offset()))) {
+                markerEnd = advance(line, markerEnd);
+            }
+            if (markerEnd.offset() >= line.length()
+                    || (line.charAt(markerEnd.offset()) != '.' && line.charAt(markerEnd.offset()) != ')')) return null;
+            markerEnd = advance(line, markerEnd);
         } else {
             return null;
         }
-        if (markerEnd >= line.length() || (line.charAt(markerEnd) != ' ' && line.charAt(markerEnd) != '\t')) return null;
-        int contentStart = markerEnd;
-        while (contentStart < line.length()
-                && (line.charAt(contentStart) == ' ' || line.charAt(contentStart) == '\t')) contentStart++;
-        int paddingColumns = columnAt(line, contentStart) - columnAt(line, markerEnd);
-        int continuationWidth = columnAt(line, contentStart) - containerColumn;
+        if (markerEnd.offset() >= line.length() || !isWhitespace(line.charAt(markerEnd.offset()))) return null;
+        Position contentStart = markerEnd;
+        while (contentStart.offset() < line.length() && isWhitespace(line.charAt(contentStart.offset()))) {
+            contentStart = advance(line, contentStart);
+        }
+        int paddingColumns = contentStart.column() - markerEnd.column();
+        int continuationWidth = contentStart.column() - containerColumn;
         return new ListMarker(contentStart, continuationWidth, paddingColumns <= 4);
     }
 
-    private int skipIndent(String line, int offset, int baseColumn, int maxColumns) {
-        int cursor = offset;
-        int column = columnAt(line, cursor);
-        while (cursor < line.length() && (line.charAt(cursor) == ' ' || line.charAt(cursor) == '\t')) {
-            int nextColumn = advanceColumn(column, line.charAt(cursor));
-            if (nextColumn - baseColumn > maxColumns) break;
-            column = nextColumn;
-            cursor++;
+    private Position skipIndent(String line, Position offset, int baseColumn, int maxColumns) {
+        Position cursor = offset;
+        while (cursor.offset() < line.length() && isWhitespace(line.charAt(cursor.offset()))) {
+            Position next = advance(line, cursor);
+            if (next.column() - baseColumn > maxColumns) break;
+            cursor = next;
         }
         return cursor;
     }
 
-    private int columnAt(String line, int offset) {
-        int column = 0;
-        for (int cursor = 0; cursor < offset; cursor++) column = advanceColumn(column, line.charAt(cursor));
-        return column;
+    private Position advance(String line, Position position) {
+        return new Position(position.offset() + 1,
+                advanceColumn(position.column(), line.charAt(position.offset())));
     }
 
     private int advanceColumn(int column, char current) {
+        columnVisits.accept(1L);
         return current == '\t' ? column + 4 - column % 4 : column + 1;
+    }
+
+    private boolean isWhitespace(char current) {
+        return current == ' ' || current == '\t';
     }
 
     private Destination inlineDestination(String text, int openingParenthesis) {
@@ -415,7 +438,10 @@ final class MarkdownImageReferenceExtractor {
     private record Bracket(String value, int end) { }
     private record Destination(String value, int end) { }
     private record Fence(char marker, int length, List<FenceContainer> containers) { }
-    private record ListMarker(int contentStart, int continuationWidth, boolean validPadding) { }
+    private record Position(int offset, int column) {
+        private static Position start() { return new Position(0, 0); }
+    }
+    private record ListMarker(Position contentStart, int continuationWidth, boolean validPadding) { }
     private record FenceContainer(boolean quote, int continuationWidth) {
         private static FenceContainer blockquote() { return new FenceContainer(true, 0); }
         private static FenceContainer listItem(int continuationWidth) { return new FenceContainer(false, continuationWidth); }
