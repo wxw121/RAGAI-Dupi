@@ -6,7 +6,11 @@ import io.minio.errors.ErrorResponseException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -62,14 +66,21 @@ public class MinioRecoveryObjectStore implements RecoveryObjectStore {
         }
     }
 
+    /**
+     * MinIO Java 8.5.10 does not forward extra headers to multipart completion. Recovery ZIPs are
+     * bounded to 1 GiB, so a disk-backed, one-part upload stays below the direct-PUT ceiling and
+     * places {@code If-None-Match} on the operation that atomically publishes the object.
+     */
     @Override
     public RecoveryObjectWriteResult putIfAbsent(String bucket, String key, InputStream input) throws Exception {
         ensureBucket(bucket);
+        Path upload = Files.createTempFile("dupi-recovery-stage-", ".upload");
         try {
-            ObjectWriteResponse response = minioClient.putObject(PutObjectArgs.builder()
+            long size = Files.copy(input, upload, StandardCopyOption.REPLACE_EXISTING);
+            ObjectWriteResponse response = minioClient.uploadObject(UploadObjectArgs.builder()
                     .bucket(bucket)
                     .object(key)
-                    .stream(input, -1, MIN_PART_SIZE)
+                    .filename(upload.toString(), Math.max(size, MIN_PART_SIZE))
                     .contentType("application/octet-stream")
                     .extraHeaders(Map.of("If-None-Match", "*"))
                     .build());
@@ -79,6 +90,12 @@ public class MinioRecoveryObjectStore implements RecoveryObjectStore {
         } catch (ErrorResponseException exception) {
             if (isPreconditionFailed(exception)) return RecoveryObjectWriteResult.lostRace();
             throw exception;
+        } finally {
+            try {
+                Files.deleteIfExists(upload);
+            } catch (IOException cleanupFailure) {
+                upload.toFile().deleteOnExit();
+            }
         }
     }
 

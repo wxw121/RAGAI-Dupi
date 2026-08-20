@@ -148,13 +148,25 @@ class RecoveryArchiveImportIntakeServiceTest {
         when(steps.findByJobIdOrderBySequenceNumberAsc(job.getId())).thenReturn(List.of(stage));
         when(jobs.saveAndFlush(job)).thenReturn(job);
         CyclicBarrier bothObservedTerminal = new CyclicBarrier(2);
+        CyclicBarrier bothObservedCompensatedStage = new CyclicBarrier(2);
+        AtomicInteger stageObservations = new AtomicInteger();
         ReentrantLock simulatedDatabaseRowLock = new ReentrantLock();
         java.util.concurrent.ConcurrentLinkedQueue<RecoveryIntakeReopenOutcome> outcomes =
                 new java.util.concurrent.ConcurrentLinkedQueue<>();
         when(jobs.findByTenantIdAndOperationTypeAndIdempotencyKey(
                 "tenant-a", OperationType.RECOVERY_ARCHIVE_IMPORT, "race-key")).thenAnswer(call -> {
+            OperationJob snapshot = terminalSnapshot(job);
             bothObservedTerminal.await(5, TimeUnit.SECONDS);
-            return Optional.of(job);
+            return Optional.of(snapshot);
+        });
+        when(steps.findByJobIdAndStepKey(job.getId(), "stage-zip")).thenAnswer(call -> {
+            if (stageObservations.incrementAndGet() <= 2) {
+                OperationStep snapshot = stage(job.getId(), OperationStepStatus.COMPENSATED, "old-stage");
+                snapshot.setRetryEpoch(4L);
+                bothObservedCompensatedStage.await(5, TimeUnit.SECONDS);
+                return Optional.of(snapshot);
+            }
+            return Optional.of(stage);
         });
         when(jobs.findById(job.getId())).thenReturn(Optional.of(job));
         RecoveryArchiveImportIntakeWriteService rowLockedWrites =
@@ -301,5 +313,15 @@ class RecoveryArchiveImportIntakeServiceTest {
     private static OperationStep stage(UUID jobId, OperationStepStatus status, String ref) {
         return OperationStep.builder().jobId(jobId).sequenceNumber(1).stepKey("stage-zip")
                 .stepType("STAGE_UPLOAD").status(status).resourceRef(ref).attemptCount(0).build();
+    }
+
+    private static OperationJob terminalSnapshot(OperationJob job) {
+        return OperationJob.builder().id(job.getId()).tenantId(job.getTenantId())
+                .operationType(job.getOperationType()).aggregateType(job.getAggregateType())
+                .aggregateId(job.getAggregateId()).status(OperationStatus.COMPLETED)
+                .phase(OperationPhase.COMPENSATION).runnable(true)
+                .idempotencyKey(job.getIdempotencyKey()).input(job.getInput())
+                .attemptCount(job.getAttemptCount()).retryEpoch(job.getRetryEpoch())
+                .createdBy(job.getCreatedBy()).completedAt(job.getCompletedAt()).build();
     }
 }
