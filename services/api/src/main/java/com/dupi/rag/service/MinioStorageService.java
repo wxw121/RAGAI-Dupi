@@ -74,6 +74,18 @@ public class MinioStorageService {
         }
     }
 
+    /** Workflow download that preserves transport causes after a prior deterministic inspection. */
+    public InputStream downloadChecked(String objectKey) {
+        try {
+            return minioClient.getObject(GetObjectArgs.builder()
+                    .bucket(properties.getBucket())
+                    .object(objectKey)
+                    .build());
+        } catch (Exception failure) {
+            throw new IllegalStateException("Failed to download MinIO object: " + objectKey, failure);
+        }
+    }
+
     /** Atomic conditional create for known, bounded document objects. */
     public ObjectWriteResult uploadIfAbsent(String objectKey, InputStream stream, long size, String contentType) {
         ensureBucket();

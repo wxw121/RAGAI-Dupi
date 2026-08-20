@@ -43,8 +43,8 @@ class MarkdownPackageImportWorkflowTest {
     void preparesStoresAndAtomicallyPublishesAValidatedPlan() throws Exception {
         Fixture fixture = fixture(plan("guide.md", "hello"));
         when(fixture.storage.inspect(anyString(), anyLong(), anyString()))
-                .thenReturn(absent(), matching());
-        when(fixture.storage.download(anyString())).thenReturn(new ByteArrayInputStream("hello".getBytes()));
+                .thenReturn(absent(), matching(), matching());
+        when(fixture.storage.downloadChecked(anyString())).thenReturn(new ByteArrayInputStream("hello".getBytes()));
 
         fixture.workflow.executeForward(fixture.context);
 
@@ -61,8 +61,8 @@ class MarkdownPackageImportWorkflowTest {
         MarkdownImportPlan plan = plan("a.md", "a", "b.md", "b");
         Fixture fixture = fixture(plan);
         when(fixture.storage.inspect(anyString(), anyLong(), anyString()))
-                .thenReturn(absent(), matching(), absent());
-        when(fixture.storage.download(anyString())).thenReturn(new ByteArrayInputStream("x".getBytes()));
+                .thenReturn(absent(), matching(), matching(), absent(), matching());
+        when(fixture.storage.downloadChecked(anyString())).thenReturn(new ByteArrayInputStream("x".getBytes()));
         when(fixture.storage.uploadIfAbsent(anyString(), any(), anyLong(), anyString()))
                 .thenReturn(MinioStorageService.ObjectWriteResult.CREATED)
                 .thenThrow(new IllegalStateException("minio down"));
@@ -85,6 +85,49 @@ class MarkdownPackageImportWorkflowTest {
     }
 
     @Test
+    void runnerMovesProvablyAbsentStagingInputIntoCompensation() throws Exception {
+        Fixture fixture = fixture(plan("guide.md", "hello"));
+        when(fixture.storage.inspect(anyString(), anyLong(), anyString())).thenReturn(absent(), absent());
+        OperationJob job = claimed(fixture);
+        when(fixture.claims.claimNext()).thenReturn(OperationClaimResult.claimed(job));
+
+        new OperationJobRunner(fixture.claims, List.of(fixture.workflow)).runOne();
+
+        verify(fixture.claims).beginCompensation(eq(fixture.context), contains("staged input is missing"));
+        verify(fixture.claims, never()).scheduleRetry(any(), anyString());
+        verify(fixture.storage, never()).downloadChecked(anyString());
+    }
+
+    @Test
+    void runnerMovesConflictingStagingInputIntoCompensation() throws Exception {
+        Fixture fixture = fixture(plan("guide.md", "hello"));
+        when(fixture.storage.inspect(anyString(), anyLong(), anyString())).thenReturn(absent(), conflict());
+        OperationJob job = claimed(fixture);
+        when(fixture.claims.claimNext()).thenReturn(OperationClaimResult.claimed(job));
+
+        new OperationJobRunner(fixture.claims, List.of(fixture.workflow)).runOne();
+
+        verify(fixture.claims).beginCompensation(eq(fixture.context), contains("staged input conflicts"));
+        verify(fixture.claims, never()).scheduleRetry(any(), anyString());
+        verify(fixture.storage, never()).downloadChecked(anyString());
+    }
+
+    @Test
+    void runnerRetriesTemporaryStagingInspectionOutageAndPreservesCause() throws Exception {
+        Fixture fixture = fixture(plan("guide.md", "hello"));
+        IllegalStateException transport = new IllegalStateException("stage transport outage");
+        when(fixture.storage.inspect(anyString(), anyLong(), anyString())).thenReturn(absent()).thenThrow(transport);
+        OperationJob job = claimed(fixture);
+        when(fixture.claims.claimNext()).thenReturn(OperationClaimResult.claimed(job));
+
+        new OperationJobRunner(fixture.claims, List.of(fixture.workflow)).runOne();
+
+        verify(fixture.claims).scheduleRetry(eq(fixture.context), contains("stage transport outage"));
+        verify(fixture.claims, never()).beginCompensation(any(), anyString());
+        verify(fixture.storage, never()).downloadChecked(anyString());
+    }
+
+    @Test
     void matchingObjectAfterCrashCompletesTheStepWithoutUploadingAgain() throws Exception {
         Fixture fixture = fixture(plan("guide.md", "hello"));
         when(fixture.storage.inspect(anyString(), anyLong(), anyString())).thenReturn(matching());
@@ -93,6 +136,40 @@ class MarkdownPackageImportWorkflowTest {
 
         verify(fixture.storage, never()).uploadIfAbsent(anyString(), any(), anyLong(), anyString());
         verify(fixture.operations).completeStep(eq(fixture.context), startsWith("store-document-"));
+    }
+
+    @Test
+    void successfulImportDurablyDeletesEveryStagedEntryBeforePublishIncludingUnreferencedImages() throws Exception {
+        MarkdownImportPlan plan = plan("guide.md", "hello", "images/unused.png", "unused");
+        Fixture fixture = fixture(plan);
+        when(fixture.storage.inspect(anyString(), anyLong(), anyString()))
+                .thenReturn(absent(), matching(), matching());
+        when(fixture.storage.downloadChecked(anyString())).thenReturn(new ByteArrayInputStream("hello".getBytes()));
+
+        fixture.workflow.executeForward(fixture.context);
+
+        var order = inOrder(fixture.storage, fixture.persistence);
+        order.verify(fixture.storage).deleteChecked(plan.entries().get(0).stagingKey());
+        order.verify(fixture.storage).deleteChecked(plan.entries().get(1).stagingKey());
+        order.verify(fixture.persistence).publish(eq(fixture.context),
+                argThat(actual -> actual.toInput().equals(plan.toInput())), eq("publish"));
+        verify(fixture.operations).completeStep(fixture.context,
+                "cleanup-stage-" + stepDigest(plan.entries().get(1).path()));
+    }
+
+    @Test
+    void runnerRetriesSuccessfulPathStageCleanupFailureBeforePublish() throws Exception {
+        Fixture fixture = fixture(plan("guide.md", "hello"));
+        when(fixture.storage.inspect(anyString(), anyLong(), anyString())).thenReturn(matching());
+        doThrow(new IllegalStateException("stage cleanup outage"))
+                .when(fixture.storage).deleteChecked(fixture.plan.entries().get(0).stagingKey());
+        when(fixture.claims.claimNext()).thenReturn(OperationClaimResult.claimed(claimed(fixture)));
+
+        new OperationJobRunner(fixture.claims, List.of(fixture.workflow)).runOne();
+
+        verify(fixture.claims).scheduleRetry(eq(fixture.context), contains("stage cleanup outage"));
+        verify(fixture.persistence, never()).publish(any(), any(), anyString());
+        verify(fixture.operations, never()).completeStep(eq(fixture.context), startsWith("cleanup-stage-"));
     }
 
     @Test
@@ -139,11 +216,13 @@ class MarkdownPackageImportWorkflowTest {
         OperationExecutionContext context = new OperationExecutionContext(plan.jobId(), UUID.randomUUID(), 2, 0,
                 OperationPhase.FORWARD);
         OperationJob operation = OperationJob.builder().id(plan.jobId()).status(OperationStatus.RUNNING)
+                .tenantId("tenant-a").createdBy("alice")
                 .phase(OperationPhase.FORWARD).claimToken(context.claimToken()).claimEpoch(2L).retryEpoch(0L)
                 .leaseExpiresAt(Instant.now().plusSeconds(30)).build();
         Document document = Document.builder().id(item.documentId()).kbId(plan.knowledgeBaseId())
                 .importJobId(plan.jobId()).objectKey(item.objectKey()).fileName(item.fileName())
-                .mimeType("text/markdown").fileSize(item.byteSize()).quotaReservationId(UUID.randomUUID())
+                .mimeType("text/markdown").fileSize(item.byteSize()).quotaReservationId(
+                        MarkdownImportPlan.deterministicId(plan.jobId(), "quota", item.path()))
                 .status(DocumentStatus.IMPORTING).build();
         OperationStep publish = OperationStep.builder().jobId(plan.jobId()).stepKey("publish")
                 .status(OperationStepStatus.RUNNING).build();
@@ -172,7 +251,7 @@ class MarkdownPackageImportWorkflowTest {
 
         verify(guard).assertActive(context);
         verify(outbox, times(1)).save(argThat(event -> event.getDocId().equals(item.documentId())));
-        verify(quotas).commitForImport(document.getQuotaReservationId(), document.getId());
+        verify(quotas).commitForImport(document.getQuotaReservationId(), "tenant-a", "alice", document.getId());
         assertThat(document.getStatus()).isEqualTo(DocumentStatus.PENDING);
         assertThat(operation.getStatus()).isEqualTo(OperationStatus.COMPLETED);
         assertThat(operation.getClaimToken()).isNull();
@@ -188,14 +267,23 @@ class MarkdownPackageImportWorkflowTest {
         MinioStorageService storage = mock(MinioStorageService.class);
         MarkdownImportPersistenceService persistence = mock(MarkdownImportPersistenceService.class);
         OperationExecutionContext context = new OperationExecutionContext(plan.jobId(), UUID.randomUUID(), 1, 0,
-                OperationPhase.FORWARD);
+                OperationPhase.FORWARD, "tenant-a", "alice");
         when(jobs.findById(plan.jobId())).thenReturn(Optional.of(OperationJob.builder().id(plan.jobId()).input(plan.toInput()).build()));
         when(operations.recordStep(any(), anyString(), anyString(), anyString())).thenAnswer(invocation ->
                 OperationStep.builder().jobId(plan.jobId()).stepKey(invocation.getArgument(1))
                         .status(OperationStepStatus.PENDING).build());
         MarkdownPackageImportWorkflow workflow = new MarkdownPackageImportWorkflow(
                 jobs, steps, operations, claims, storage, persistence);
-        return new Fixture(plan, context, steps, operations, storage, persistence, workflow);
+        return new Fixture(plan, context, steps, operations, claims, storage, persistence, workflow);
+    }
+
+    private static OperationJob claimed(Fixture fixture) {
+        return OperationJob.builder().id(fixture.plan.jobId()).input(fixture.plan.toInput())
+                .operationType(com.dupi.rag.domain.enums.OperationType.MARKDOWN_PACKAGE_IMPORT)
+                .status(OperationStatus.RUNNING).phase(OperationPhase.FORWARD)
+                .claimToken(fixture.context.claimToken()).claimEpoch(fixture.context.claimEpoch())
+                .retryEpoch(fixture.context.retryEpoch()).leaseExpiresAt(Instant.now().plusSeconds(30))
+                .tenantId("tenant-a").createdBy("alice").build();
     }
 
     private static MarkdownImportPlan plan(String... pathContent) throws Exception {
@@ -224,8 +312,13 @@ class MarkdownPackageImportWorkflowTest {
         return new MinioStorageService.ObjectInspection(MinioStorageService.ObjectState.CONFLICT, 0, null);
     }
 
+    private static String stepDigest(String value) {
+        return MarkdownImportPlan.deterministicId(new UUID(0, 0), "step", value).toString();
+    }
+
     private record Fixture(MarkdownImportPlan plan, OperationExecutionContext context,
-                           OperationStepRepository steps, OperationJobService operations, MinioStorageService storage,
+                           OperationStepRepository steps, OperationJobService operations, OperationJobClaimService claims,
+                           MinioStorageService storage,
                            MarkdownImportPersistenceService persistence,
                            MarkdownPackageImportWorkflow workflow) { }
 }

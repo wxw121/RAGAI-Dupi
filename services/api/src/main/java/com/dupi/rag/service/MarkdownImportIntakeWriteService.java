@@ -73,7 +73,10 @@ class MarkdownImportIntakeWriteService {
     void scheduleCleanup(java.util.UUID jobId, MarkdownImportPlan plan, String diagnostic) {
         OperationJob job = locked(jobId);
         validatePlan(job, plan);
-        if (Boolean.TRUE.equals(job.getRunnable())) return;
+        if (job.getStatus() == OperationStatus.COMPLETED || Boolean.TRUE.equals(job.getRunnable())) return;
+        if (job.getStatus() != OperationStatus.PREPARED || job.getPhase() != OperationPhase.FORWARD) {
+            throw new OperationConflictException("Markdown import intake is no longer eligible for cleanup");
+        }
         job.setPhase(OperationPhase.COMPENSATION); job.setStatus(OperationStatus.COMPENSATING);
         job.setRunnable(true); job.setLastError(limit(diagnostic)); job.setNextAttemptAt(Instant.now());
         jobs.saveAndFlush(job);

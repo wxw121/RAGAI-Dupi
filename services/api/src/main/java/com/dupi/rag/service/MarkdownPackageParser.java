@@ -13,7 +13,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -24,9 +23,8 @@ public class MarkdownPackageParser {
     static final int MAX_ENTRIES = 1_000;
     static final long MAX_UNCOMPRESSED_BYTES = 100L * 1024 * 1024;
     static final int MAX_ENTRY_BYTES = 50 * 1024 * 1024;
-    private static final Pattern IMAGE_REFERENCE = Pattern.compile(
-            "!\\[[^]\\n]*]\\((?:<([^>\\n]+)>|([^\\s)\\n]+))");
     private static final Pattern EXTERNAL_REFERENCE = Pattern.compile("^[a-zA-Z][a-zA-Z0-9+.-]*:");
+    private final MarkdownImageReferenceExtractor imageReferenceExtractor = new MarkdownImageReferenceExtractor();
 
     public MarkdownImportPlan parse(java.util.UUID jobId, java.util.UUID kbId, InputStream input) {
         if (jobId == null || kbId == null || input == null) {
@@ -129,16 +127,12 @@ public class MarkdownPackageParser {
 
     private List<String> imageReferences(String markdown) {
         List<String> references = new ArrayList<>();
-        Matcher matcher = IMAGE_REFERENCE.matcher(markdown);
-        while (matcher.find()) {
-            String reference = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
-            if (reference != null) {
-                reference = reference.trim();
-                if (reference.length() > 2048) throw new IllegalArgumentException("Markdown image path is too long");
-                if (!reference.isBlank() && !reference.startsWith("#") && !reference.startsWith("//")
-                        && !isExternal(reference) && !references.contains(reference)) {
-                    references.add(reference);
-                }
+        for (String extracted : imageReferenceExtractor.extract(markdown)) {
+            String reference = extracted.trim();
+            if (reference.length() > 2048) throw new IllegalArgumentException("Markdown image path is too long");
+            if (!reference.startsWith("#") && !reference.startsWith("//")
+                    && !isExternal(reference) && !references.contains(reference)) {
+                references.add(reference);
             }
         }
         return references;

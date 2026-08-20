@@ -197,10 +197,10 @@ public class UploadQuotaService {
 
     /** Joins a fenced domain transaction; Markdown import publication must not cross REQUIRES_NEW. */
     @Transactional(propagation = Propagation.MANDATORY)
-    public UploadQuotaReservation reserveForImport(UUID reservationId, UUID kbId, UUID docId,
+    public UploadQuotaReservation reserveForImport(UUID reservationId, String tenantId, String userId,
+                                                    UUID kbId, UUID docId,
                                                     String idempotencyKey, long fileSize, String fingerprint) {
-        String tenantId = currentTenantId();
-        String userId = currentUserId();
+        requireImportOwner(tenantId, userId);
         UploadQuotaReservation existing = reservationRepository.findById(reservationId).orElse(null);
         if (existing != null) {
             if (!tenantId.equals(existing.getTenantId()) || !userId.equals(existing.getUserId())
@@ -224,9 +224,13 @@ public class UploadQuotaService {
     }
 
     @Transactional(propagation = Propagation.MANDATORY)
-    public void commitForImport(UUID reservationId, UUID docId) {
+    public void commitForImport(UUID reservationId, String tenantId, String userId, UUID docId) {
+        requireImportOwner(tenantId, userId);
         UploadQuotaReservation reservation = reservationRepository.findById(reservationId)
                 .orElseThrow(() -> new UploadIdempotencyConflictException("Markdown import quota reservation is missing"));
+        if (!tenantId.equals(reservation.getTenantId()) || !userId.equals(reservation.getUserId())) {
+            throw new UploadIdempotencyConflictException("Markdown import quota owner conflicts with its operation");
+        }
         if (reservation.getStatus() == UploadQuotaReservationStatus.COMMITTED
                 && docId.equals(reservation.getDocId())) return;
         if (reservation.getStatus() != UploadQuotaReservationStatus.PENDING
@@ -238,9 +242,30 @@ public class UploadQuotaService {
         reservation.setReleaseReason(null); reservationRepository.save(reservation);
     }
 
+    @Transactional(propagation = Propagation.MANDATORY, readOnly = true)
+    public void verifyImportReservation(UUID reservationId, String tenantId, String userId,
+                                        UUID kbId, UUID docId, String idempotencyKey,
+                                        long fileSize, String fingerprint) {
+        requireImportOwner(tenantId, userId);
+        UploadQuotaReservation reservation = reservationRepository.findById(reservationId)
+                .orElseThrow(() -> new UploadIdempotencyConflictException("Markdown import quota reservation is missing"));
+        if (!tenantId.equals(reservation.getTenantId()) || !userId.equals(reservation.getUserId())
+                || !kbId.equals(reservation.getKbId()) || !docId.equals(reservation.getAttemptId())
+                || reservation.getDocId() != null || !idempotencyKey.equals(reservation.getIdempotencyKey())
+                || !fingerprint.equals(reservation.getFileFingerprint())
+                || reservation.getReservedBytes() == null || reservation.getReservedBytes() != fileSize
+                || reservation.getStatus() != UploadQuotaReservationStatus.PENDING) {
+            throw new UploadIdempotencyConflictException("Markdown import quota reservation conflicts with its plan");
+        }
+    }
+
     @Transactional(propagation = Propagation.MANDATORY)
-    public void releaseForImport(UUID reservationId, UUID docId, String reason) {
+    public void releaseForImport(UUID reservationId, String tenantId, String userId, UUID docId, String reason) {
+        requireImportOwner(tenantId, userId);
         reservationRepository.findById(reservationId).ifPresent(reservation -> {
+            if (!tenantId.equals(reservation.getTenantId()) || !userId.equals(reservation.getUserId())) {
+                throw new UploadIdempotencyConflictException("Markdown import quota owner conflicts with its operation");
+            }
             boolean owns = reservation.getStatus() == UploadQuotaReservationStatus.PENDING
                     && docId.equals(reservation.getAttemptId());
             if (!owns) return;
@@ -248,6 +273,12 @@ public class UploadQuotaService {
             reservation.setAttemptId(null); reservation.setAttemptExpiresAt(null); reservation.setReleaseReason(reason);
             reservationRepository.save(reservation);
         });
+    }
+
+    private void requireImportOwner(String tenantId, String userId) {
+        if (tenantId == null || tenantId.isBlank() || userId == null || userId.isBlank()) {
+            throw new UploadIdempotencyConflictException("Markdown import quota owner is missing");
+        }
     }
 
     @Transactional(readOnly = true)

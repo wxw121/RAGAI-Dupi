@@ -155,6 +155,27 @@ class UploadQuotaReconciliationServiceTest {
     }
 
     @Test
+    void expiredReservationOwnedByActiveImportIsNotReconciledOrExposed() {
+        UUID attemptId = UUID.randomUUID();
+        UploadQuotaReservation reservation = pendingReservation(attemptId);
+        Document doc = document(reservation.getKbId(), attemptId);
+        doc.setImportJobId(UUID.randomUUID());
+        doc.setStatus(DocumentStatus.IMPORTING);
+        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
+                .thenReturn(List.of(reservation));
+        when(documentRepository.findById(attemptId)).thenReturn(Optional.of(doc));
+
+        assertThat(service().reconcileStalePendingReservations()).isZero();
+
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.IMPORTING);
+        assertThat(doc.getQuotaReservationId()).isNotNull();
+        assertThat(reservation.getStatus()).isEqualTo(UploadQuotaReservationStatus.PENDING);
+        verifyNoInteractions(ingestJobRepository, outboxRepository, minioStorageService);
+        verify(documentRepository, never()).save(any());
+        verify(reservationRepository, never()).save(any());
+    }
+
+    @Test
     void staleClaimQueryUsesBoundedSkipLockedLeasePredicate() throws Exception {
         Method method = UploadQuotaReservationRepository.class.getMethod(
                 "findStalePendingAttemptsForUpdate", Instant.class, int.class);
@@ -164,6 +185,7 @@ class UploadQuotaReconciliationServiceTest {
         assertThat(query.nativeQuery()).isTrue();
         assertThat(query.value().toLowerCase())
                 .contains("attempt_expires_at")
+                .contains("import_job_id")
                 .contains("for update skip locked")
                 .contains("limit");
     }

@@ -154,7 +154,7 @@ public class OperationJobClaimService {
 
     private OperationExecutionContext context(OperationJob job) {
         return new OperationExecutionContext(job.getId(), job.getClaimToken(), safeClaimEpoch(job),
-                safeRetryEpoch(job), job.getPhase());
+                safeRetryEpoch(job), job.getPhase(), job.getTenantId(), job.getCreatedBy());
     }
 
     private boolean isClaimable(OperationJob job, Instant now) {

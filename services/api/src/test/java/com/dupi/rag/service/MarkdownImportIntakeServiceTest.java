@@ -3,9 +3,13 @@ package com.dupi.rag.service;
 import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.OperationJob;
 import com.dupi.rag.domain.enums.OperationStatus;
+import com.dupi.rag.domain.enums.OperationPhase;
+import com.dupi.rag.domain.enums.OperationStepStatus;
 import com.dupi.rag.domain.enums.OperationType;
+import com.dupi.rag.domain.entity.OperationStep;
 import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.repository.OperationJobRepository;
+import com.dupi.rag.repository.OperationStepRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockMultipartFile;
@@ -13,6 +17,9 @@ import org.springframework.mock.web.MockMultipartFile;
 import java.io.ByteArrayOutputStream;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -97,6 +104,74 @@ class MarkdownImportIntakeServiceTest {
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("minio down");
         verify(writes).scheduleCleanup(plan.jobId(), plan, "minio down");
         verify(writes, never()).publishRunnable(any(), any());
+    }
+
+    @Test
+    void delayedSameKeyStageFailureCannotCompensateACompletedWinner() throws Exception {
+        MarkdownImportPlan plan = plan("same-key", "a.md", "a");
+        OperationJob job = job(plan, false);
+        job.setPhase(OperationPhase.FORWARD);
+        OperationStep stage = OperationStep.builder().jobId(plan.jobId()).sequenceNumber(1)
+                .stepKey(MarkdownImportIntakeWriteService.stageStep(plan.entries().get(0)))
+                .stepType("STAGE_OBJECT").resourceRef(plan.entries().get(0).stagingKey())
+                .status(OperationStepStatus.PENDING).attemptCount(0).build();
+        OperationJobRepository jobs = mock(OperationJobRepository.class);
+        OperationStepRepository steps = mock(OperationStepRepository.class);
+        MinioStorageService storage = mock(MinioStorageService.class);
+        when(jobs.findByTenantIdAndOperationTypeAndIdempotencyKey(
+                "tenant-a", OperationType.MARKDOWN_PACKAGE_IMPORT, "same-key"))
+                .thenReturn(Optional.of(job));
+        when(jobs.findByIdForUpdate(plan.jobId())).thenReturn(Optional.of(job));
+        when(jobs.findById(plan.jobId())).thenReturn(Optional.of(job));
+        when(steps.findByJobIdAndStepKey(eq(plan.jobId()), anyString())).thenReturn(Optional.of(stage));
+        CountDownLatch delayedEnteredStorage = new CountDownLatch(1);
+        CountDownLatch winnerPublished = new CountDownLatch(1);
+        when(storage.inspect(anyString(), anyLong(), anyString())).thenAnswer(invocation -> {
+            if (Thread.currentThread().getName().contains("delayed")) {
+                delayedEnteredStorage.countDown();
+                assertThat(winnerPublished.await(5, TimeUnit.SECONDS)).isTrue();
+                throw new IllegalStateException("late staging outage");
+            }
+            return new MinioStorageService.ObjectInspection(
+                    MinioStorageService.ObjectState.MATCHING, 1, plan.entries().get(0).sha256());
+        });
+        when(jobs.saveAndFlush(job)).thenAnswer(invocation -> {
+            if (job.getStatus() == OperationStatus.PREPARED && Boolean.TRUE.equals(job.getRunnable())) {
+                job.setStatus(OperationStatus.COMPLETED);
+                job.setRunnable(false);
+                winnerPublished.countDown();
+            }
+            return job;
+        });
+        MarkdownImportIntakeService intake = new MarkdownImportIntakeService(
+                jobs, new MarkdownImportIntakeWriteService(jobs, steps), storage);
+        var executor = Executors.newFixedThreadPool(2, runnable -> {
+            Thread thread = new Thread(runnable);
+            thread.setName("delayed-intake");
+            return thread;
+        });
+        try {
+            var delayed = executor.submit(() -> {
+                TenantContext.setTenantId("tenant-a");
+                try { return intake.submit(plan, "same-key", "alice"); }
+                finally { TenantContext.clear(); }
+            });
+            assertThat(delayedEnteredStorage.await(5, TimeUnit.SECONDS)).isTrue();
+            var winner = executor.submit(() -> {
+                Thread.currentThread().setName("winner-intake");
+                TenantContext.setTenantId("tenant-a");
+                try { return intake.submit(plan, "same-key", "alice"); }
+                finally { TenantContext.clear(); }
+            });
+
+            assertThat(winner.get(5, TimeUnit.SECONDS).getStatus()).isEqualTo(OperationStatus.COMPLETED);
+            assertThat(delayed.get(5, TimeUnit.SECONDS).getStatus()).isEqualTo(OperationStatus.COMPLETED);
+            assertThat(job.getStatus()).isEqualTo(OperationStatus.COMPLETED);
+            assertThat(job.getPhase()).isEqualTo(OperationPhase.FORWARD);
+            assertThat(job.getRunnable()).isFalse();
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     private static MarkdownImportPlan plan(String key, String... entries) throws Exception {

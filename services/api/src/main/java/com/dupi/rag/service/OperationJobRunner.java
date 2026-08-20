@@ -126,7 +126,8 @@ public class OperationJobRunner {
 
     private OperationExecutionContext context(com.dupi.rag.domain.entity.OperationJob job) {
         return new OperationExecutionContext(job.getId(), job.getClaimToken(), job.getClaimEpoch(),
-                job.getRetryEpoch() == null ? 0L : job.getRetryEpoch(), job.getPhase());
+                job.getRetryEpoch() == null ? 0L : job.getRetryEpoch(), job.getPhase(),
+                job.getTenantId(), job.getCreatedBy());
     }
 
     private void persistOutcome(OperationExecutionContext context, Outcome outcome) {

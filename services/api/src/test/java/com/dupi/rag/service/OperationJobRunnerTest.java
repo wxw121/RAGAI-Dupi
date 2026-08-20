@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.*;
@@ -28,6 +29,24 @@ class OperationJobRunnerTest {
 
         verify(workflow).executeForward(argThat(context -> context.retryEpoch() == 3));
         verify(claimService).complete(any(OperationExecutionContext.class));
+    }
+
+    @Test
+    void runnerCarriesDurableNonDefaultQuotaOwnerWithoutThreadLocals() {
+        when(workflow.type()).thenReturn(OperationType.MARKDOWN_PACKAGE_IMPORT);
+        OperationJob claimed = job(OperationPhase.FORWARD);
+        claimed.setOperationType(OperationType.MARKDOWN_PACKAGE_IMPORT);
+        claimed.setTenantId("tenant-enterprise");
+        claimed.setCreatedBy("owner@example.test");
+        when(claimService.claimNext()).thenReturn(OperationClaimResult.claimed(claimed));
+
+        new OperationJobRunner(claimService, List.of(workflow)).runOne();
+
+        verify(workflow).executeForward(argThat(context -> {
+            assertThat(context.tenantId()).isEqualTo("tenant-enterprise");
+            assertThat(context.createdBy()).isEqualTo("owner@example.test");
+            return true;
+        }));
     }
 
     @Test

@@ -31,6 +31,11 @@ public interface UploadQuotaReservationRepository extends JpaRepository<UploadQu
               and attempt_id is not null
               and attempt_expires_at is not null
               and attempt_expires_at <= :now
+              and not exists (
+                  select 1 from documents d
+                  where d.id = upload_quota_reservations.attempt_id
+                    and d.import_job_id is not null
+              )
             order by updated_at asc
             limit :limit
             for update skip locked

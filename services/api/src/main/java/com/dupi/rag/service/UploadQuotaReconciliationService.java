@@ -72,6 +72,9 @@ public class UploadQuotaReconciliationService {
         }
 
         Document doc = maybeDoc.get();
+        if (doc.getImportJobId() != null || doc.getStatus() == DocumentStatus.IMPORTING) {
+            return false;
+        }
         IngestJob job = ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(doc.getId()).orElse(null);
         if (job != null && hasDurableOutbox(job)) {
             commit(reservation, doc);

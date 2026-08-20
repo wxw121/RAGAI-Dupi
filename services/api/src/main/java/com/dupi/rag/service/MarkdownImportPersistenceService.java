@@ -46,17 +46,18 @@ class MarkdownImportPersistenceService {
 
     @Transactional
     void prepare(OperationExecutionContext context, MarkdownImportPlan plan, String stepKey) {
-        guard.assertActive(context);
+        OperationJob operation = guard.assertActive(context);
         List<Document> existing = documents.findByImportJobIdOrderByCreatedAtAsc(context.jobId());
         if (!existing.isEmpty()) {
-            verifyPrepared(plan, existing);
+            verifyPrepared(plan, existing, operation);
             completeStep(context.jobId(), stepKey);
             return;
         }
         Instant now = Instant.now();
         for (MarkdownImportPlan.MarkdownDocument item : plan.documents()) {
             UUID reservationId = MarkdownImportPlan.deterministicId(context.jobId(), "quota", item.path());
-            var reservation = quotas.reserveForImport(reservationId, plan.knowledgeBaseId(), item.documentId(),
+            var reservation = quotas.reserveForImport(reservationId, operation.getTenantId(), operation.getCreatedBy(),
+                    plan.knowledgeBaseId(), item.documentId(),
                     "markdown:" + context.jobId() + ":" + reservationId, item.byteSize(), "sha256:" + item.sha256());
             Document document = Document.builder().id(item.documentId()).kbId(plan.knowledgeBaseId())
                     .fileName(item.fileName()).objectKey(item.objectKey()).mimeType("text/markdown")
@@ -78,7 +79,7 @@ class MarkdownImportPersistenceService {
     void publish(OperationExecutionContext context, MarkdownImportPlan plan, String stepKey) {
         OperationJob operation = guard.assertActive(context);
         List<Document> owned = documents.findByImportJobIdOrderByCreatedAtAsc(context.jobId());
-        verifyPrepared(plan, owned);
+        verifyPrepared(plan, owned, operation);
         Instant now = Instant.now();
         for (MarkdownImportPlan.MarkdownDocument item : plan.documents()) {
             Document document = owned.stream().filter(candidate -> candidate.getId().equals(item.documentId()))
@@ -98,7 +99,8 @@ class MarkdownImportPersistenceService {
                         .fileName(item.fileName()).mimeType("text/markdown").status(IngestOutboxStatus.PENDING)
                         .attemptCount(0).nextAttemptAt(now).createdAt(now).updatedAt(now).build());
             }
-            quotas.commitForImport(document.getQuotaReservationId(), document.getId());
+            quotas.commitForImport(document.getQuotaReservationId(), operation.getTenantId(), operation.getCreatedBy(),
+                    document.getId());
             document.setStatus(DocumentStatus.PENDING); document.setErrorMessage(null);
             documents.save(document);
         }
@@ -115,7 +117,7 @@ class MarkdownImportPersistenceService {
 
     @Transactional
     void compensateMetadata(OperationExecutionContext context, MarkdownImportPlan plan, String stepKey) {
-        guard.assertActive(context);
+        OperationJob operation = guard.assertActive(context);
         List<Document> owned = documents.findByImportJobIdOrderByCreatedAtAsc(context.jobId());
         for (Document document : owned) {
             ingestJobs.findTopByDocIdOrderByCreatedAtDesc(document.getId()).ifPresent(ingest -> {
@@ -123,14 +125,15 @@ class MarkdownImportPersistenceService {
                 ingestJobs.delete(ingest);
             });
             assets.deleteAll(assets.findByDocIdOrderByCreatedAtAsc(document.getId()));
-            quotas.releaseForImport(document.getQuotaReservationId(), document.getId(), "Markdown import compensated");
+            quotas.releaseForImport(document.getQuotaReservationId(), operation.getTenantId(), operation.getCreatedBy(),
+                    document.getId(), "Markdown import compensated");
         }
         documents.deleteAll(owned);
         documents.flush();
         completeStep(context.jobId(), stepKey);
     }
 
-    private void verifyPrepared(MarkdownImportPlan plan, List<Document> existing) {
+    private void verifyPrepared(MarkdownImportPlan plan, List<Document> existing, OperationJob operation) {
         if (existing.size() != plan.documents().size()) {
             throw new MarkdownImportInvariantException("Markdown import metadata differs from its immutable plan");
         }
@@ -138,12 +141,38 @@ class MarkdownImportPersistenceService {
             Document document = existing.stream().filter(candidate -> candidate.getId().equals(item.documentId()))
                     .findFirst().orElseThrow(() -> new MarkdownImportInvariantException("Markdown import document is missing"));
             if (!plan.knowledgeBaseId().equals(document.getKbId()) || !item.objectKey().equals(document.getObjectKey())
-                    || document.getFileSize() != item.byteSize() || !contextFreeImport(plan, document)) {
+                    || !item.fileName().equals(document.getFileName())
+                    || !"text/markdown".equals(document.getMimeType())
+                    || document.getFileSize() == null || document.getFileSize() != item.byteSize()
+                    || document.getStatus() != DocumentStatus.IMPORTING
+                    || !MarkdownImportPlan.deterministicId(plan.jobId(), "quota", item.path())
+                            .equals(document.getQuotaReservationId())
+                    || !contextFreeImport(plan, document)) {
                 throw new MarkdownImportInvariantException("Markdown import document conflicts with its plan");
             }
+            UUID reservationId = MarkdownImportPlan.deterministicId(plan.jobId(), "quota", item.path());
+            quotas.verifyImportReservation(reservationId, operation.getTenantId(), operation.getCreatedBy(),
+                    plan.knowledgeBaseId(), item.documentId(),
+                    "markdown:" + plan.jobId() + ":" + reservationId,
+                    item.byteSize(), "sha256:" + item.sha256());
             List<DocumentAsset> actualAssets = assets.findByDocIdOrderByCreatedAtAsc(document.getId());
             if (actualAssets.size() != item.assets().size()) {
                 throw new MarkdownImportInvariantException("Markdown import assets differ from their plan");
+            }
+            for (MarkdownImportPlan.Asset expected : item.assets()) {
+                DocumentAsset actual = actualAssets.stream()
+                        .filter(candidate -> expected.assetId().equals(candidate.getId()))
+                        .findFirst().orElseThrow(() -> new MarkdownImportInvariantException(
+                                "Markdown import asset identity differs from its plan"));
+                if (!plan.knowledgeBaseId().equals(actual.getKbId())
+                        || !item.documentId().equals(actual.getDocId())
+                        || !expected.reference().equals(actual.getRelativePath())
+                        || !expected.objectKey().equals(actual.getObjectKey())
+                        || !expected.mimeType().equals(actual.getMimeType())
+                        || !expected.fileName().equals(actual.getFileName())
+                        || actual.getFileSize() == null || actual.getFileSize() != expected.byteSize()) {
+                    throw new MarkdownImportInvariantException("Markdown import asset conflicts with its plan");
+                }
             }
         }
     }

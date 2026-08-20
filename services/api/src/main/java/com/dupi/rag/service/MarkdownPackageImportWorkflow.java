@@ -49,6 +49,9 @@ public class MarkdownPackageImportWorkflow implements OperationWorkflow {
                             asset.objectKey(), asset.stagingKey(), asset.byteSize(), asset.sha256(), asset.mimeType());
                 }
             }
+            for (MarkdownImportPlan.Entry entry : plan.entries()) {
+                cleanupStagingForSuccess(context, entry);
+            }
             publish(context, plan);
         } catch (RetryableOperationException | CompensateOperationException known) {
             throw known;
@@ -126,9 +129,21 @@ public class MarkdownPackageImportWorkflow implements OperationWorkflow {
             throw new MarkdownImportInvariantException("Completed Markdown object is missing: " + objectKey);
         }
         start(context, stepKey, step);
+        MinioStorageService.ObjectInspection staged;
+        try {
+            staged = inspect(stagingKey, byteSize, sha256);
+        } catch (RuntimeException unavailable) {
+            throw new RetryableOperationException("Markdown staged input inspection failed: " + reason(unavailable), unavailable);
+        }
+        if (staged != null && staged.state() == MinioStorageService.ObjectState.ABSENT) {
+            throw new MarkdownImportInvariantException("Markdown staged input is missing: " + stagingKey);
+        }
+        if (staged != null && staged.state() == MinioStorageService.ObjectState.CONFLICT) {
+            throw new MarkdownImportInvariantException("Markdown staged input conflicts with its immutable plan: " + stagingKey);
+        }
         persistence.assertActive(context);
         claims.renewLease(context);
-        try (InputStream input = storage.download(stagingKey)) {
+        try (InputStream input = storage.downloadChecked(stagingKey)) {
             storage.uploadIfAbsent(objectKey, input, byteSize, mimeType);
         } catch (java.io.IOException closed) {
             throw new RetryableOperationException("Unable to close Markdown staged object", closed);
@@ -175,6 +190,16 @@ public class MarkdownPackageImportWorkflow implements OperationWorkflow {
         persistence.compensateMetadata(context, plan, key);
     }
 
+    private void cleanupStagingForSuccess(OperationExecutionContext context, MarkdownImportPlan.Entry entry) {
+        try {
+            cleanupObject(context, "cleanup-stage-" + digest(entry.path()), entry.stagingKey());
+        } catch (RetryableOperationException known) {
+            throw known;
+        } catch (RuntimeException unavailable) {
+            throw new RetryableOperationException("Markdown staging cleanup failed: " + reason(unavailable), unavailable);
+        }
+    }
+
     private void start(OperationExecutionContext context, String key, OperationStep step) {
         if (step.getStatus() == OperationStepStatus.PENDING || step.getStatus() == OperationStepStatus.RETRY_WAIT) {
             operations.startStep(context, key);
@@ -188,6 +213,11 @@ public class MarkdownPackageImportWorkflow implements OperationWorkflow {
 
     private String digest(String value) {
         return MarkdownImportPlan.deterministicId(new UUID(0, 0), "step", value).toString();
+    }
+
+    private String reason(Throwable failure) {
+        return failure.getMessage() == null || failure.getMessage().isBlank()
+                ? failure.getClass().getSimpleName() : failure.getMessage();
     }
 
     private record StoredTarget(String stepKey, String objectKey) { }

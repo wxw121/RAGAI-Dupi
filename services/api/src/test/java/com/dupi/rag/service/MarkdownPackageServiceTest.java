@@ -32,6 +32,34 @@ class MarkdownPackageServiceTest {
     }
 
     @Test
+    void missingReferenceStyleImageFailsBeforeIntakeMutation() throws Exception {
+        MarkdownImportIntakeService intake = mock(MarkdownImportIntakeService.class);
+        MarkdownPackageService service = new MarkdownPackageService(new MarkdownPackageParser(), intake,
+                mock(KnowledgeBaseService.class), mock(KnowledgeBaseMaintenanceService.class));
+
+        assertThatThrownBy(() -> service.upload(UUID.randomUUID(), zip(
+                "guide.md", "![logo][brand]\n\n[brand]: images/missing.png"), "same-key"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("images/missing.png");
+
+        verify(intake, never()).submit(any(), any(), any());
+    }
+
+    @Test
+    void referenceStyleAndBalancedOrEscapedInlineTargetsArePlanned() throws Exception {
+        MarkdownImportPlan plan = new MarkdownPackageParser().parse(UUID.randomUUID(), UUID.randomUUID(), zip(
+                "guide.md", "![logo][brand]\n![balanced](images/chart_(final).png)\n"
+                        + "![escaped](images/chart_\\(draft\\).png)\n\n[brand]: images/logo.png \"Logo\"",
+                "images/logo.png", "logo",
+                "images/chart_(final).png", "final",
+                "images/chart_(draft).png", "draft").getInputStream());
+
+        assertThat(plan.documents().get(0).assets())
+                .extracting(MarkdownImportPlan.Asset::sourcePath)
+                .containsExactly("images/logo.png", "images/chart_(final).png", "images/chart_(draft).png");
+    }
+
+    @Test
     void validPackageCreatesOneImmutableIntakeAfterFullValidation() throws Exception {
         MarkdownPackageParser parser = new MarkdownPackageParser();
         MarkdownImportIntakeService intake = mock(MarkdownImportIntakeService.class);
