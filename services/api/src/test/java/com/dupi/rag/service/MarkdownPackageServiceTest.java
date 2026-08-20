@@ -100,6 +100,38 @@ class MarkdownPackageServiceTest {
     }
 
     @Test
+    void topLevelFenceIgnoresListLookingFenceContentUntilItsRealClose() throws Exception {
+        assertOnlyGenuineImageIsPlanned("```markdown\n- ```\n"
+                + "![example](images/missing-example.png)\n```\n"
+                + "![genuine](images/genuine.png)");
+    }
+
+    @Test
+    void blockquoteFenceIgnoresNestedListLookingFenceContentUntilItsRealClose() throws Exception {
+        assertOnlyGenuineImageIsPlanned("> ```markdown\n> - ```\n"
+                + "> ![example](images/missing-example.png)\n> ```\n"
+                + "![genuine](images/genuine.png)");
+    }
+
+    @Test
+    void listFenceIgnoresNestedListLookingFenceContentUntilItsRealClose() throws Exception {
+        assertOnlyGenuineImageIsPlanned("- ```markdown\n  - ```\n"
+                + "  ![example](images/missing-example.png)\n  ```\n"
+                + "![genuine](images/genuine.png)");
+    }
+
+    @Test
+    void backslashBeforeClosingBacktickDoesNotHideFollowingGenuineImage() throws Exception {
+        assertOnlyGenuineImageIsPlanned("`example \\` ![genuine](images/genuine.png)`");
+    }
+
+    @Test
+    void imageBeforeBackslashPrefixedClosingBacktickRemainsMasked() throws Exception {
+        assertOnlyGenuineImageIsPlanned("`![example](images/missing-example.png) \\` "
+                + "![genuine](images/genuine.png)`");
+    }
+
+    @Test
     void genuineContainerReferencesAndBalancedTargetsRemainPlanned() throws Exception {
         MarkdownImportPlan plan = new MarkdownPackageParser().parse(UUID.randomUUID(), UUID.randomUUID(), zip(
                 "guide.md", "> ![logo][brand]\n>\n> [brand]: images/logo.png\n\n"
@@ -197,5 +229,14 @@ class MarkdownPackageServiceTest {
             }
         }
         return new MockMultipartFile("file", "docs.zip", "application/zip", bytes.toByteArray());
+    }
+
+    private static void assertOnlyGenuineImageIsPlanned(String markdown) throws Exception {
+        MarkdownImportPlan plan = new MarkdownPackageParser().parse(UUID.randomUUID(), UUID.randomUUID(), zip(
+                "guide.md", markdown, "images/genuine.png", "genuine").getInputStream());
+
+        assertThat(plan.documents().get(0).assets())
+                .extracting(MarkdownImportPlan.Asset::sourcePath)
+                .containsExactly("images/genuine.png");
     }
 }

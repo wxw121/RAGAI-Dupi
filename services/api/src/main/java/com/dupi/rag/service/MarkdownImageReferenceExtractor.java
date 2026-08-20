@@ -88,7 +88,9 @@ final class MarkdownImageReferenceExtractor {
     }
 
     private Fence fence(String line, Fence open) {
-        int start = contentStart(line);
+        LineContext context = open == null ? lineContext(line) : null;
+        int start = open == null ? context.contentStart() : open.markerColumn();
+        if (open != null && !sameContainerPrefix(line, open)) return null;
         if (start >= line.length()) return null;
         char marker = line.charAt(start);
         if (marker != '`' && marker != '~') return null;
@@ -99,9 +101,20 @@ final class MarkdownImageReferenceExtractor {
         String remainder = line.substring(end);
         if (open == null) {
             if (marker == '`' && remainder.indexOf('`') >= 0) return null;
-            return new Fence(marker, length);
+            return new Fence(marker, length, context.quoteDepth(), start);
         }
         return marker == open.marker() && length >= open.length() && remainder.isBlank() ? open : null;
+    }
+
+    private boolean sameContainerPrefix(String line, Fence open) {
+        if (line.length() <= open.markerColumn()) return false;
+        int quoteDepth = 0;
+        for (int cursor = 0; cursor < open.markerColumn(); cursor++) {
+            char current = line.charAt(cursor);
+            if (current == '>') quoteDepth++;
+            else if (current != ' ' && current != '\t') return false;
+        }
+        return quoteDepth == open.quoteDepth();
     }
 
     private void maskCodeSpans(char[] visible) {
@@ -123,7 +136,7 @@ final class MarkdownImageReferenceExtractor {
 
     private int findClosingRun(char[] value, int offset, int expectedLength) {
         for (int cursor = offset; cursor < value.length;) {
-            if (value[cursor] != '`' || escaped(value, cursor)) {
+            if (value[cursor] != '`') {
                 cursor++;
                 continue;
             }
@@ -147,11 +160,17 @@ final class MarkdownImageReferenceExtractor {
     }
 
     private int contentStart(String line) {
+        return lineContext(line).contentStart();
+    }
+
+    private LineContext lineContext(String line) {
         int cursor = skipUpToThreeSpaces(line, 0);
+        int quoteDepth = 0;
         boolean consumedContainer;
         do {
             consumedContainer = false;
             if (cursor < line.length() && line.charAt(cursor) == '>') {
+                quoteDepth++;
                 cursor++;
                 if (cursor < line.length() && (line.charAt(cursor) == ' ' || line.charAt(cursor) == '\t')) cursor++;
                 cursor = skipUpToThreeSpaces(line, cursor);
@@ -163,7 +182,7 @@ final class MarkdownImageReferenceExtractor {
                 consumedContainer = true;
             }
         } while (consumedContainer);
-        return cursor;
+        return new LineContext(cursor, quoteDepth);
     }
 
     private int skipUpToThreeSpaces(String line, int offset) {
@@ -329,5 +348,6 @@ final class MarkdownImageReferenceExtractor {
 
     private record Bracket(String value, int end) { }
     private record Destination(String value, int end) { }
-    private record Fence(char marker, int length) { }
+    private record Fence(char marker, int length, int quoteDepth, int markerColumn) { }
+    private record LineContext(int contentStart, int quoteDepth) { }
 }
