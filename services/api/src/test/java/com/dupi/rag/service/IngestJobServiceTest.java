@@ -27,6 +27,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -36,6 +39,39 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class IngestJobServiceTest {
+
+    @Test
+    void deletionCommittedAfterUnlockedPrecheckStillStopsReindexBeforeJobsOrOutbox() throws Exception {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase staleReady = KnowledgeBase.builder().id(kbId).tenantId("default").build();
+        Document document = doc(kbId, UUID.randomUUID());
+        CountDownLatch intentReached = new CountDownLatch(1);
+        CountDownLatch deletionCommitted = new CountDownLatch(1);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(staleReady);
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(document));
+        doAnswer(call -> {
+            intentReached.countDown();
+            if (!deletionCommitted.await(2, TimeUnit.SECONDS)) {
+                throw new AssertionError("deletion did not reach the row-lock boundary");
+            }
+            throw new com.dupi.rag.exception.OperationConflictException("deletion is in progress");
+        }).when(profileIndexStateService).resetForReindex(staleReady, List.of(document));
+
+        var executor = Executors.newSingleThreadExecutor();
+        try {
+            var reindex = executor.submit(() -> assertThatThrownBy(
+                    () -> service().reindexKnowledgeBase(kbId, "model", 256))
+                    .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class));
+            assertThat(intentReached.await(2, TimeUnit.SECONDS)).isTrue();
+            deletionCommitted.countDown();
+            reindex.get(2, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        verify(ingestJobRepository, never()).save(any());
+        verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
+    }
 
     @Mock IngestJobRepository ingestJobRepository;
     @Mock DocumentRepository documentRepository;

@@ -1,6 +1,7 @@
 package com.dupi.rag.service;
 
 import com.dupi.rag.client.MilvusVectorService;
+import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.KnowledgeBase;
@@ -13,6 +14,7 @@ import com.dupi.rag.dto.BatchDocumentUploadResponse;
 import com.dupi.rag.dto.BatchDocumentUploadResult;
 import com.dupi.rag.dto.DocumentResponse;
 import com.dupi.rag.dto.IngestJobResponse;
+import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
@@ -55,6 +57,7 @@ public class DocumentService {
     private final UploadQuotaService uploadQuotaService;
     private final ProfileIndexStateService profileIndexStateService;
     private final DocumentAssetService documentAssetService;
+    private final DocumentUploadIntentService uploadIntents;
 
     public DocumentResponse upload(UUID kbId, MultipartFile file) {
         return upload(kbId, file, null);
@@ -132,29 +135,24 @@ public class DocumentService {
                 .createdAt(now)
                 .updatedAt(now)
                 .build();
+        IngestJob job = IngestJob.builder()
+                .id(UUID.randomUUID())
+                .kbId(kbId)
+                .docId(doc.getId())
+                .status(IngestJobStatus.PENDING)
+                .stage(IngestStage.QUEUED)
+                .createdAt(now)
+                .updatedAt(now)
+                .build();
+        boolean intentPrepared = false;
         boolean objectUploaded = false;
-        IngestJob job = null;
-        boolean jobSaved = false;
         DocumentResponse response;
         try {
-            documentRepository.save(doc);
-            profileIndexStateService.bumpRevision(kb);
+            uploadIntents.prepare(TenantContext.getTenantId(), doc, job);
+            intentPrepared = true;
             uploadQuotaService.refreshAttemptLease(reservation);
             minioStorageService.upload(objectKey, file.getInputStream(), file.getSize(), doc.getMimeType());
             objectUploaded = true;
-            uploadQuotaService.refreshAttemptLease(reservation);
-
-            job = IngestJob.builder()
-                    .id(UUID.randomUUID())
-                    .kbId(kbId)
-                    .docId(doc.getId())
-                    .status(IngestJobStatus.PENDING)
-                    .stage(IngestStage.QUEUED)
-                    .createdAt(now)
-                    .updatedAt(now)
-                    .build();
-            ingestJobRepository.save(job);
-            jobSaved = true;
             uploadQuotaService.refreshAttemptLease(reservation);
 
             ingestOutboxService.record(job, kb, objectKey, doc.getFileName(), doc.getMimeType());
@@ -174,23 +172,13 @@ public class DocumentService {
                     }
                 }
             }
-            if (jobSaved) {
+            if (intentPrepared) {
                 try {
-                    ingestJobRepository.delete(job);
-                } catch (Exception jobCleanupFailure) {
-                    if (jobCleanupFailure != e) {
-                        e.addSuppressed(jobCleanupFailure);
+                    uploadIntents.fail(doc, job, e.getMessage());
+                } catch (Exception statusFailure) {
+                    if (statusFailure != e) {
+                        e.addSuppressed(statusFailure);
                     }
-                }
-            }
-            doc.setStatus(DocumentStatus.FAILED);
-            doc.setErrorMessage(e.getMessage());
-            doc.setQuotaReservationId(null);
-            try {
-                documentRepository.save(doc);
-            } catch (Exception statusFailure) {
-                if (statusFailure != e) {
-                    e.addSuppressed(statusFailure);
                 }
             }
             try {
@@ -199,6 +187,12 @@ public class DocumentService {
                 if (releaseFailure != e) {
                     e.addSuppressed(releaseFailure);
                 }
+            }
+            if (e instanceof OperationConflictException conflict) {
+                throw conflict;
+            }
+            if (e instanceof ResourceNotFoundException notFound) {
+                throw notFound;
             }
             if (e.getMessage() != null && e.getMessage().contains("database down")) {
                 throw new IllegalStateException(e.getMessage(), e);
@@ -308,6 +302,7 @@ public class DocumentService {
     }
 
     public Document findOrThrow(UUID kbId, UUID docId) {
+        knowledgeBaseService.findOrThrow(kbId);
         return documentRepository.findById(docId)
                 .filter(d -> d.getKbId().equals(kbId) && d.getStatus() != DocumentStatus.IMPORTING)
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found: " + docId));

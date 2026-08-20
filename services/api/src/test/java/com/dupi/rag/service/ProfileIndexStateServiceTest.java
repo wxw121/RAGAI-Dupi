@@ -11,9 +11,28 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;
 
 class ProfileIndexStateServiceTest {
+
+    @Test
+    void deletionFirstRejectsReindexIntentBeforeDocumentsAreChanged() {
+        DocumentRepository documents = mock(DocumentRepository.class);
+        KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase staleReady = KnowledgeBase.builder().id(kbId).tenantId("tenant-a").build();
+        KnowledgeBase deleting = KnowledgeBase.builder().id(kbId).tenantId("tenant-a")
+                .lifecycleStatus(com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus.DELETING).build();
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a"))
+                .thenReturn(Optional.of(deleting));
+
+        assertThatThrownBy(() -> service(documents, knowledgeBases)
+                .resetForReindex(staleReady, List.of(Document.builder().indexSchemaVersion(2).build())))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class);
+
+        verifyNoInteractions(documents);
+    }
 
     @Test
     void readinessRequiresCompletedDocumentsAtTargetSchemaVersion() {
@@ -40,7 +59,8 @@ class ProfileIndexStateServiceTest {
         KnowledgeBase kb = KnowledgeBase.builder().id(UUID.randomUUID()).indexRevision(4L).build();
         Document first = Document.builder().indexSchemaVersion(2).build();
         Document second = Document.builder().indexSchemaVersion(2).build();
-        when(knowledgeBases.findByIdForUpdate(kb.getId())).thenReturn(java.util.Optional.of(kb));
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kb.getId(), kb.getTenantId()))
+                .thenReturn(java.util.Optional.of(kb));
 
         service.resetForReindex(kb, List.of(first, second));
 
@@ -58,7 +78,8 @@ class ProfileIndexStateServiceTest {
         KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
         ProfileIndexStateService service = service(documents, knowledgeBases);
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).profileIndexActivated(false).build();
-        when(knowledgeBases.findByIdForUpdate(kbId)).thenReturn(Optional.of(kb));
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kbId, kb.getTenantId()))
+                .thenReturn(Optional.of(kb));
 
         service.activateV2Index(kb);
 

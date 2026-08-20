@@ -23,6 +23,9 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.Map;
 import java.time.Instant;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -30,6 +33,35 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class SparseMigrationServiceTest {
+
+    @Test
+    void deletionCommittedAfterUnlockedPrecheckStillStopsBackfillBeforeWorkerIo() throws Exception {
+        UUID kbId = UUID.randomUUID();
+        UUID migrationId = UUID.randomUUID();
+        CountDownLatch intentReached = new CountDownLatch(1);
+        CountDownLatch deletionCommitted = new CountDownLatch(1);
+        doAnswer(call -> {
+            intentReached.countDown();
+            if (!deletionCommitted.await(2, TimeUnit.SECONDS)) {
+                throw new AssertionError("deletion did not reach the row-lock boundary");
+            }
+            throw new com.dupi.rag.exception.OperationConflictException("deletion is in progress");
+        }).when(backfillIntents).begin("default", kbId, migrationId);
+
+        var executor = Executors.newSingleThreadExecutor();
+        try {
+            var backfill = executor.submit(() -> assertThatThrownBy(() -> service().backfill(kbId, migrationId))
+                    .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class));
+            assertThat(intentReached.await(2, TimeUnit.SECONDS)).isTrue();
+            deletionCommitted.countDown();
+            backfill.get(2, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        verify(webClientBuilder, never()).build();
+        verify(chunkRepository, never()).findByKbIdOrderByIdAsc(any(), any());
+    }
     @Mock SparseMigrationRepository repository;
     @Mock RetrievalProfileRepository profileRepository;
     @Mock RagEvalRunRepository runRepository;
@@ -39,6 +71,7 @@ class SparseMigrationServiceTest {
     @Mock RetrievalProfileService retrievalProfileService;
     @Mock WebClient.Builder webClientBuilder;
     @Mock KnowledgeBaseMaintenanceService maintenanceService;
+    @Mock SparseBackfillIntentService backfillIntents;
 
     @Test
     void backfillSubmitsCanonicalChunksAndTransitionsToDualWrite() {
@@ -48,13 +81,14 @@ class SparseMigrationServiceTest {
         SparseMigration migration = SparseMigration.builder().id(UUID.randomUUID()).kbId(kbId)
                 .profileId(profile.getId()).state(SparseMigrationState.PREPARING).build();
         Chunk chunk = Chunk.builder().id(UUID.randomUUID()).kbId(kbId).docId(docId).content("coverage cutover").build();
-        when(repository.findUnlockedByIdAndKbId(migration.getId(), kbId)).thenReturn(Optional.of(migration));
-        when(profileRepository.findByIdAndKbId(profile.getId(), kbId)).thenReturn(Optional.of(profile));
-        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder()
-                .id(kbId).embeddingDimension(1536).build());
-        when(chunkRepository.countByKbId(kbId)).thenReturn(1L);
+        when(backfillIntents.begin("default", kbId, migration.getId()))
+                .thenReturn(new SparseBackfillIntent(migration, profile, 1536, 1L));
         when(chunkRepository.findByKbIdOrderByIdAsc(eq(kbId), any())).thenReturn(new PageImpl<>(List.of(chunk)));
-        when(repository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(backfillIntents.complete(kbId, migration.getId(), 1L, 1536)).thenAnswer(invocation -> {
+            migration.setIndexedChunkCount(1L); migration.setSourceChunkCount(1L);
+            migration.setExpectedDimension(1536); migration.setActualDimension(1536);
+            migration.setState(SparseMigrationState.DUAL_WRITING); return migration;
+        });
         WebClient.Builder client = WebClient.builder().exchangeFunction(request -> Mono.just(
                 ClientResponse.create(HttpStatus.OK).header("Content-Type", "application/json")
                         .body("{\"indexed_count\":1,\"collection_count\":1,\"verified_dimension\":1536}").build()));
@@ -74,13 +108,15 @@ class SparseMigrationServiceTest {
         SparseMigration migration = SparseMigration.builder().id(UUID.randomUUID()).kbId(kbId)
                 .profileId(profile.getId()).state(SparseMigrationState.PREPARING).build();
         Chunk chunk = Chunk.builder().id(UUID.randomUUID()).kbId(kbId).docId(UUID.randomUUID()).content("x").build();
-        when(repository.findUnlockedByIdAndKbId(migration.getId(), kbId)).thenReturn(Optional.of(migration));
-        when(profileRepository.findByIdAndKbId(profile.getId(), kbId)).thenReturn(Optional.of(profile));
-        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder()
-                .id(kbId).embeddingDimension(8).build());
-        when(chunkRepository.countByKbId(kbId)).thenReturn(1L);
+        when(backfillIntents.begin("default", kbId, migration.getId()))
+                .thenReturn(new SparseBackfillIntent(migration, profile, 8, 1L));
         when(chunkRepository.findByKbIdOrderByIdAsc(eq(kbId), any())).thenReturn(new PageImpl<>(List.of(chunk)));
-        when(repository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(backfillIntents.fail(eq(kbId), eq(migration.getId()), contains("acknowledgement")))
+                .thenAnswer(invocation -> {
+                    migration.setState(SparseMigrationState.FAILED);
+                    migration.setErrorMessage(invocation.getArgument(2));
+                    return migration;
+                });
         WebClient.Builder client = WebClient.builder().exchangeFunction(request -> Mono.just(
                 ClientResponse.create(HttpStatus.OK).header("Content-Type", "application/json")
                         .body("{\"indexed_count\":0}").build()));
@@ -225,13 +261,14 @@ class SparseMigrationServiceTest {
 
     private SparseMigrationService service() {
         return new SparseMigrationService(repository, profileRepository, runRepository, chunkRepository,
-                knowledgeBaseService, auditLogService, retrievalProfileService, webClientBuilder, maintenanceService);
+                knowledgeBaseService, auditLogService, retrievalProfileService, webClientBuilder, maintenanceService,
+                backfillIntents);
     }
 
     private SparseMigrationService service(WebClient.Builder client) {
         SparseMigrationService service = new SparseMigrationService(repository, profileRepository, runRepository,
                 chunkRepository, knowledgeBaseService, auditLogService, retrievalProfileService, client,
-                maintenanceService);
+                maintenanceService, backfillIntents);
         ReflectionTestUtils.setField(service, "workerBaseUrl", "http://worker");
         return service;
     }

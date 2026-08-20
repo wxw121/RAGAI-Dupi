@@ -17,6 +17,7 @@ import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
 import com.dupi.rag.repository.RetrievalProfileRepository;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -29,6 +30,9 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -37,6 +41,40 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class DocumentServiceTest {
+
+    @Test
+    void deletionCommittedAfterUnlockedPrecheckStillStopsUploadBeforeObjectIo() throws Exception {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase staleReady = KnowledgeBase.builder().id(kbId).build();
+        UploadQuotaReservation reservation = reservation(kbId, UUID.randomUUID(), "race", 5L);
+        CountDownLatch intentReached = new CountDownLatch(1);
+        CountDownLatch deletionCommitted = new CountDownLatch(1);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(staleReady);
+        when(uploadQuotaService.reserveForUpload(eq(kbId), any(), eq("race"), anyString(), anyString(),
+                eq(5L), anyString())).thenReturn(reservation);
+        doAnswer(call -> {
+            intentReached.countDown();
+            if (!deletionCommitted.await(2, TimeUnit.SECONDS)) {
+                throw new AssertionError("deletion did not reach the row-lock boundary");
+            }
+            throw new com.dupi.rag.exception.OperationConflictException("deletion is in progress");
+        }).when(uploadIntents).prepare(eq("default"), any(), any());
+
+        var executor = Executors.newSingleThreadExecutor();
+        try {
+            var upload = executor.submit(() -> assertThatThrownBy(() -> service().upload(kbId,
+                    new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes()), "race"))
+                    .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class));
+            assertThat(intentReached.await(2, TimeUnit.SECONDS)).isTrue();
+            deletionCommitted.countDown();
+            upload.get(2, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        verifyNoInteractions(minioStorageService);
+        verify(uploadQuotaService).release(reservation, "Upload failed");
+    }
 
     @Mock DocumentRepository documentRepository;
     @Mock IngestJobRepository ingestJobRepository;
@@ -54,6 +92,26 @@ class DocumentServiceTest {
     @Mock UploadQuotaService uploadQuotaService;
     @Mock ProfileIndexStateService profileIndexStateService;
     @Mock DocumentAssetService documentAssetService;
+    @Mock DocumentUploadIntentService uploadIntents;
+
+    @BeforeEach
+    void persistIntentThroughLegacyRepositoryMocks() {
+        lenient().doAnswer(call -> {
+            documentRepository.save(call.getArgument(1));
+            ingestJobRepository.save(call.getArgument(2));
+            return null;
+        }).when(uploadIntents).prepare(anyString(), any(), any());
+        lenient().doAnswer(call -> {
+            Document document = call.getArgument(0);
+            IngestJob job = call.getArgument(1);
+            document.setStatus(DocumentStatus.FAILED);
+            document.setQuotaReservationId(null);
+            job.setStatus(IngestJobStatus.FAILED);
+            documentRepository.save(document);
+            ingestJobRepository.save(job);
+            return null;
+        }).when(uploadIntents).fail(any(), any(), any());
+    }
 
     DocumentService service() {
         return new DocumentService(
@@ -72,7 +130,8 @@ class DocumentServiceTest {
                 maintenanceService,
                 uploadQuotaService,
                 profileIndexStateService,
-                documentAssetService
+                documentAssetService,
+                uploadIntents
         );
     }
 
@@ -101,6 +160,18 @@ class DocumentServiceTest {
 
         assertThatThrownBy(() -> service().findOrThrow(kbId, docId))
                 .isInstanceOf(com.dupi.rag.exception.ResourceNotFoundException.class);
+    }
+
+    @Test
+    void documentDetailChecksKnowledgeBaseLifecycleBeforeLoadingChildMetadata() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenThrow(
+                new com.dupi.rag.exception.OperationConflictException("deletion in progress"));
+        assertThatThrownBy(() -> service().get(kbId, docId))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class);
+
+        verify(documentRepository, never()).findById(docId);
     }
 
     @Test
@@ -275,8 +346,8 @@ class DocumentServiceTest {
                 eq("text/markdown"), eq(5L), anyString()))
                 .thenAnswer(invocation -> reservation(
                         kbId, invocation.getArgument(1), "key", 5L));
-        doThrow(new IllegalStateException("job database down"))
-                .when(ingestJobRepository).save(any(IngestJob.class));
+        doThrow(new IllegalStateException("outbox database down"))
+                .when(ingestOutboxService).record(any(), any(), any(), any(), any());
 
         assertThatThrownBy(() -> service().upload(
                 kbId,
@@ -287,7 +358,7 @@ class DocumentServiceTest {
         verify(minioStorageService).upload(contains("a.md"), any(), eq(5L), eq("text/markdown"));
         verify(minioStorageService).delete(contains("a.md"));
         verify(uploadQuotaService).release(any(UploadQuotaReservation.class), eq("Upload failed"));
-        verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
+        verify(ingestOutboxService).record(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -300,8 +371,8 @@ class DocumentServiceTest {
                 eq("text/markdown"), eq(5L), anyString()))
                 .thenAnswer(invocation -> reservation(
                         kbId, invocation.getArgument(1), "key", 5L));
-        doThrow(new IllegalStateException("job database down"))
-                .when(ingestJobRepository).save(any(IngestJob.class));
+        doThrow(new IllegalStateException("outbox database down"))
+                .when(ingestOutboxService).record(any(), any(), any(), any(), any());
         doThrow(new IllegalStateException("object cleanup down"))
                 .when(minioStorageService).delete(anyString());
 
@@ -461,7 +532,7 @@ class DocumentServiceTest {
                 .extracting(response -> response.getCurrentJob().getId())
                 .isEqualTo(jobId);
         assertThat(service.get(kbId, docId).getCurrentJob().getId()).isEqualTo(jobId);
-        verify(knowledgeBaseService).findOrThrow(kbId);
+        verify(knowledgeBaseService, times(2)).findOrThrow(kbId);
     }
 
     @Test

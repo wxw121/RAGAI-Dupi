@@ -10,6 +10,7 @@ import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.OperationJobRepository;
 import com.dupi.rag.repository.OperationStepRepository;
+import com.dupi.rag.repository.KnowledgeBaseRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -23,9 +24,15 @@ import java.time.Instant;
 class MarkdownImportIntakeWriteService {
     private final OperationJobRepository jobs;
     private final OperationStepRepository steps;
+    private final KnowledgeBaseRepository knowledgeBases;
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     OperationJob insert(String tenant, String key, String createdBy, MarkdownImportPlan plan) {
+        var knowledgeBase = knowledgeBases
+                .findByIdAndTenantIdForUpdateAnyStatus(plan.knowledgeBaseId(), tenant)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Knowledge base not found: " + plan.knowledgeBaseId()));
+        KnowledgeBaseLifecyclePolicy.requireReady(knowledgeBase, plan.knowledgeBaseId());
         OperationJob job = jobs.saveAndFlush(OperationJob.builder().id(plan.jobId()).tenantId(tenant)
                 .operationType(OperationType.MARKDOWN_PACKAGE_IMPORT).aggregateType("KNOWLEDGE_BASE")
                 .aggregateId(plan.knowledgeBaseId()).status(OperationStatus.PREPARED).phase(OperationPhase.FORWARD)

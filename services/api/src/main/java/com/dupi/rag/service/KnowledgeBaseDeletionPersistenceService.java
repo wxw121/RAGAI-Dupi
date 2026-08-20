@@ -22,7 +22,6 @@ import com.dupi.rag.repository.OperationStepRepository;
 import com.dupi.rag.repository.RecoveryArchiveRepository;
 import com.dupi.rag.repository.RecoveryRestoreJobRepository;
 import com.dupi.rag.repository.RetrievalProfileRepository;
-import com.dupi.rag.repository.SparseMigrationRepository;
 import com.dupi.rag.repository.VectorCleanupTaskRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -51,7 +50,6 @@ class KnowledgeBaseDeletionPersistenceService {
     private final DocumentRepository documents;
     private final DocumentAssetRepository assets;
     private final RetrievalProfileRepository profiles;
-    private final SparseMigrationRepository sparseMigrations;
     private final RecoveryArchiveRepository archives;
     private final RecoveryRestoreJobRepository restores;
     private final OperationJobRepository jobs;
@@ -208,14 +206,8 @@ class KnowledgeBaseDeletionPersistenceService {
                 knowledgeBaseId.toString()));
         items.add(new InventoryItem("legacy-vectors", KnowledgeBaseDeletionWorkflow.DELETE_LEGACY_VECTORS,
                 knowledgeBaseId.toString()));
-        Map<UUID, Integer> profileVersions = profiles.findByKbIdOrderByVersionDesc(knowledgeBaseId).stream()
-                .filter(profile -> profile.getId() != null && profile.getVersion() != null)
-                .collect(java.util.stream.Collectors.toMap(
-                        profile -> profile.getId(),
-                        profile -> profile.getVersion(),
-                        (first, ignored) -> first));
-        sparseMigrations.findByKbIdOrderByCreatedAtDesc(knowledgeBaseId).stream()
-                .map(migration -> profileVersions.get(migration.getProfileId()))
+        profiles.findByKbIdOrderByVersionDesc(knowledgeBaseId).stream()
+                .map(profile -> profile.getVersion())
                 .filter(java.util.Objects::nonNull)
                 .distinct().sorted(Comparator.naturalOrder())
                 .forEach(version -> items.add(new InventoryItem("sparse-vectors-v" + version,

@@ -9,7 +9,11 @@ import com.dupi.rag.domain.enums.OperationStepStatus;
 import com.dupi.rag.domain.enums.OperationType;
 import com.dupi.rag.repository.OperationJobRepository;
 import com.dupi.rag.repository.OperationStepRepository;
+import com.dupi.rag.repository.KnowledgeBaseRepository;
+import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataIntegrityViolationException;
 
@@ -33,12 +37,46 @@ class RecoveryArchiveImportIntakeServiceTest {
     private final OperationJobRepository jobs = mock(OperationJobRepository.class);
     private final OperationStepRepository steps = mock(OperationStepRepository.class);
     private final RecoveryStorageService storage = mock(RecoveryStorageService.class);
+    private final KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
     private final RecoveryArchiveImportIntakeWriteService writes =
-            new RecoveryArchiveImportIntakeWriteService(jobs, steps);
+            new RecoveryArchiveImportIntakeWriteService(jobs, steps, knowledgeBases);
     private final RecoveryArchiveImportIntakeService service =
             new RecoveryArchiveImportIntakeService(jobs, steps, writes, storage);
 
     @AfterEach void clearTenant() { TenantContext.clear(); }
+
+    @BeforeEach
+    void readyKnowledgeBaseByDefault() {
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(any(), anyString())).thenAnswer(call ->
+                Optional.of(KnowledgeBase.builder().id(call.getArgument(0)).tenantId(call.getArgument(1))
+                        .lifecycleStatus(KnowledgeBaseLifecycleStatus.READY).build()));
+    }
+
+    @Test
+    void intakeIntentLocksReadyKnowledgeBaseBeforeCreatingJob() {
+        RecoveryArchiveImportPlan plan = plan("tenant-a", UUID.randomUUID(), "9".repeat(64));
+        when(jobs.saveAndFlush(any())).thenAnswer(call -> call.getArgument(0));
+
+        writes.insert("tenant-a", plan, "same-key", "alice", null);
+
+        var order = inOrder(knowledgeBases, jobs);
+        order.verify(knowledgeBases).findByIdAndTenantIdForUpdateAnyStatus(plan.knowledgeBaseId(), "tenant-a");
+        order.verify(jobs).saveAndFlush(argThat(job -> job.getStatus() == OperationStatus.PREPARED
+                && !job.getRunnable()));
+    }
+
+    @Test
+    void deletionFirstPreventsRecoveryIntakeCreation() {
+        RecoveryArchiveImportPlan plan = plan("tenant-a", UUID.randomUUID(), "8".repeat(64));
+        reset(knowledgeBases);
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(plan.knowledgeBaseId(), "tenant-a"))
+                .thenReturn(Optional.of(KnowledgeBase.builder().id(plan.knowledgeBaseId()).tenantId("tenant-a")
+                        .lifecycleStatus(KnowledgeBaseLifecycleStatus.DELETING).build()));
+
+        assertThatThrownBy(() -> writes.insert("tenant-a", plan, "same-key", "alice", null))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class);
+        verifyNoInteractions(jobs, steps);
+    }
 
     @Test
     void tenantScopedKeysNeverProbeOrConflictAcrossTenants() {
@@ -170,7 +208,7 @@ class RecoveryArchiveImportIntakeServiceTest {
         });
         when(jobs.findById(job.getId())).thenReturn(Optional.of(job));
         RecoveryArchiveImportIntakeWriteService rowLockedWrites =
-                new RecoveryArchiveImportIntakeWriteService(jobs, steps) {
+                new RecoveryArchiveImportIntakeWriteService(jobs, steps, knowledgeBases) {
                     @Override RecoveryIntakeReopenOutcome reopenCleanedIntake(
                             UUID id, RecoveryArchiveImportPlan requested, String key) {
                         simulatedDatabaseRowLock.lock();

@@ -49,10 +49,7 @@ public class ProfileIndexStateService {
 
     @Transactional
     public void activateV2Index(KnowledgeBase kb) {
-        KnowledgeBase locked = knowledgeBaseRepository.findByIdForUpdate(kb.getId())
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "Knowledge base not found: " + kb.getId()
-                ));
+        KnowledgeBase locked = lockReady(kb);
         locked.setProfileIndexActivated(true);
         knowledgeBaseRepository.save(locked);
         kb.setProfileIndexActivated(true);
@@ -60,10 +57,7 @@ public class ProfileIndexStateService {
 
     @Transactional
     public void bumpRevision(KnowledgeBase kb) {
-        KnowledgeBase locked = knowledgeBaseRepository.findByIdForUpdate(kb.getId())
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "Knowledge base not found: " + kb.getId()
-                ));
+        KnowledgeBase locked = lockReady(kb);
         long current = locked.getIndexRevision() == null ? 0L : locked.getIndexRevision();
         locked.setIndexRevision(current + 1);
         knowledgeBaseRepository.save(locked);
@@ -72,8 +66,20 @@ public class ProfileIndexStateService {
 
     @Transactional
     public void resetForReindex(KnowledgeBase kb, List<Document> documents) {
+        KnowledgeBase locked = lockReady(kb);
         documents.forEach(document -> document.setIndexSchemaVersion(1));
         documentRepository.saveAll(documents);
-        bumpRevision(kb);
+        long current = locked.getIndexRevision() == null ? 0L : locked.getIndexRevision();
+        locked.setIndexRevision(current + 1);
+        knowledgeBaseRepository.save(locked);
+        kb.setIndexRevision(locked.getIndexRevision());
+    }
+
+    private KnowledgeBase lockReady(KnowledgeBase kb) {
+        KnowledgeBase locked = knowledgeBaseRepository
+                .findByIdAndTenantIdForUpdateAnyStatus(kb.getId(), kb.getTenantId())
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Knowledge base not found: " + kb.getId()));
+        return KnowledgeBaseLifecyclePolicy.requireReady(locked, kb.getId());
     }
 }

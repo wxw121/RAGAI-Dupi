@@ -10,6 +10,9 @@ import com.dupi.rag.domain.entity.OperationStep;
 import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.repository.OperationJobRepository;
 import com.dupi.rag.repository.OperationStepRepository;
+import com.dupi.rag.repository.KnowledgeBaseRepository;
+import com.dupi.rag.domain.entity.KnowledgeBase;
+import com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockMultipartFile;
@@ -32,6 +35,44 @@ import static org.mockito.Mockito.*;
 class MarkdownImportIntakeServiceTest {
 
     @AfterEach void clearTenant() { TenantContext.clear(); }
+
+    @Test
+    void intakeIntentLocksReadyKnowledgeBaseBeforeCreatingJob() throws Exception {
+        MarkdownImportPlan plan = plan("same-key", "a.md", "a");
+        OperationJobRepository jobs = mock(OperationJobRepository.class);
+        OperationStepRepository steps = mock(OperationStepRepository.class);
+        KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
+        KnowledgeBase ready = KnowledgeBase.builder().id(plan.knowledgeBaseId()).tenantId("tenant-a")
+                .lifecycleStatus(KnowledgeBaseLifecycleStatus.READY).build();
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(plan.knowledgeBaseId(), "tenant-a"))
+                .thenReturn(Optional.of(ready));
+        when(jobs.saveAndFlush(any())).thenAnswer(call -> call.getArgument(0));
+
+        new MarkdownImportIntakeWriteService(jobs, steps, knowledgeBases)
+                .insert("tenant-a", "same-key", "alice", plan);
+
+        var order = inOrder(knowledgeBases, jobs);
+        order.verify(knowledgeBases).findByIdAndTenantIdForUpdateAnyStatus(plan.knowledgeBaseId(), "tenant-a");
+        order.verify(jobs).saveAndFlush(argThat(job -> job.getStatus() == OperationStatus.PREPARED
+                && !job.getRunnable()));
+    }
+
+    @Test
+    void deletionFirstPreventsMarkdownIntakeCreation() throws Exception {
+        MarkdownImportPlan plan = plan("same-key", "a.md", "a");
+        OperationJobRepository jobs = mock(OperationJobRepository.class);
+        OperationStepRepository steps = mock(OperationStepRepository.class);
+        KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
+        KnowledgeBase deleting = KnowledgeBase.builder().id(plan.knowledgeBaseId()).tenantId("tenant-a")
+                .lifecycleStatus(KnowledgeBaseLifecycleStatus.DELETING).build();
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(plan.knowledgeBaseId(), "tenant-a"))
+                .thenReturn(Optional.of(deleting));
+
+        assertThatThrownBy(() -> new MarkdownImportIntakeWriteService(jobs, steps, knowledgeBases)
+                .insert("tenant-a", "same-key", "alice", plan))
+                .isInstanceOf(OperationConflictException.class);
+        verifyNoInteractions(jobs, steps);
+    }
 
     @Test
     void jobStaysNonRunnableUntilEveryDeterministicStageIsDurable() throws Exception {
@@ -144,7 +185,7 @@ class MarkdownImportIntakeServiceTest {
             return job;
         });
         MarkdownImportIntakeService intake = new MarkdownImportIntakeService(
-                jobs, new MarkdownImportIntakeWriteService(jobs, steps), storage);
+                jobs, new MarkdownImportIntakeWriteService(jobs, steps, mock(KnowledgeBaseRepository.class)), storage);
         var executor = Executors.newFixedThreadPool(2, runnable -> {
             Thread thread = new Thread(runnable);
             thread.setName("delayed-intake");

@@ -15,6 +15,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 class DocumentAssetServiceTest {
@@ -23,7 +24,8 @@ class DocumentAssetServiceTest {
     void storesAndReadsAnAssetOnlyWithinItsKnowledgeBase() {
         DocumentAssetRepository repository = mock(DocumentAssetRepository.class);
         MinioStorageService storage = mock(MinioStorageService.class);
-        DocumentAssetService service = new DocumentAssetService(repository, storage);
+        KnowledgeBaseService knowledgeBases = mock(KnowledgeBaseService.class);
+        DocumentAssetService service = new DocumentAssetService(repository, storage, knowledgeBases);
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         Document document = Document.builder().id(docId).kbId(kbId).build();
@@ -41,5 +43,23 @@ class DocumentAssetServiceTest {
         assertThat(service.download(kbId, docId, "../image/diagram.png").fileName()).isEqualTo("diagram.png");
         assertThatThrownBy(() -> service.download(UUID.randomUUID(), docId, "../image/diagram.png"))
                 .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    void downloadChecksKnowledgeBaseLifecycleBeforeReadingAssetOrObject() {
+        DocumentAssetRepository repository = mock(DocumentAssetRepository.class);
+        MinioStorageService storage = mock(MinioStorageService.class);
+        KnowledgeBaseService knowledgeBases = mock(KnowledgeBaseService.class);
+        DocumentAssetService service = new DocumentAssetService(repository, storage, knowledgeBases);
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        when(knowledgeBases.findOrThrow(kbId)).thenThrow(
+                new com.dupi.rag.exception.OperationConflictException("deletion in progress"));
+
+        assertThatThrownBy(() -> service.download(kbId, docId, "image.png"))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class);
+
+        verify(repository, never()).findByDocIdAndRelativePath(any(), any());
+        verify(storage, never()).download(any());
     }
 }

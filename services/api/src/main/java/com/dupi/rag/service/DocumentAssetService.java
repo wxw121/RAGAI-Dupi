@@ -22,6 +22,7 @@ public class DocumentAssetService {
 
     private final DocumentAssetRepository repository;
     private final MinioStorageService storageService;
+    private final KnowledgeBaseService knowledgeBaseService;
 
     @Transactional
     public DocumentAsset register(
@@ -59,6 +60,7 @@ public class DocumentAssetService {
     }
 
     public AssetDownload download(UUID kbId, UUID docId, String relativePath) {
+        knowledgeBaseService.findOrThrow(kbId);
         String reference = normalizeReference(relativePath);
         DocumentAsset asset = repository.findByDocIdAndRelativePath(docId, reference)
                 .filter(candidate -> kbId.equals(candidate.getKbId()))

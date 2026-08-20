@@ -33,7 +33,6 @@ class KnowledgeBaseDeletionPersistenceServiceTest {
     private final DocumentRepository documents = mock(DocumentRepository.class);
     private final DocumentAssetRepository assets = mock(DocumentAssetRepository.class);
     private final RetrievalProfileRepository profiles = mock(RetrievalProfileRepository.class);
-    private final SparseMigrationRepository sparseMigrations = mock(SparseMigrationRepository.class);
     private final RecoveryArchiveRepository archives = mock(RecoveryArchiveRepository.class);
     private final RecoveryRestoreJobRepository restores = mock(RecoveryRestoreJobRepository.class);
     private final OperationJobRepository jobs = mock(OperationJobRepository.class);
@@ -49,7 +48,7 @@ class KnowledgeBaseDeletionPersistenceServiceTest {
 
     @BeforeEach
     void setUp() {
-        persistence = new KnowledgeBaseDeletionPersistenceService(knowledgeBases, documents, assets, profiles, sparseMigrations,
+        persistence = new KnowledgeBaseDeletionPersistenceService(knowledgeBases, documents, assets, profiles,
                 archives, restores, jobs, steps, vectorTasks, tombstones, notifications, guard, audit,
                 List.of(activity));
         when(jobs.saveAndFlush(any())).thenAnswer(invocation -> invocation.getArgument(0));
@@ -57,7 +56,7 @@ class KnowledgeBaseDeletionPersistenceServiceTest {
     }
 
     @Test
-    void submitLocksLifecycleAndPersistsCompleteOrderedInventoryBeforeRunnableJob() {
+    void submitInventoriesEveryPersistedSparseProfileIncludingRestoredProfilesWithoutMigrationRows() {
         UUID kbId = UUID.randomUUID();
         UUID docA = new UUID(0, 10);
         UUID docB = new UUID(0, 20);
@@ -75,9 +74,6 @@ class KnowledgeBaseDeletionPersistenceServiceTest {
         when(profiles.findByKbIdOrderByVersionDesc(kbId)).thenReturn(List.of(
                 RetrievalProfile.builder().id(sparseProfile).kbId(kbId).version(7).build(),
                 RetrievalProfile.builder().id(denseOnlyProfile).kbId(kbId).version(3).build()));
-        when(sparseMigrations.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(
-                com.dupi.rag.domain.entity.SparseMigration.builder().id(UUID.randomUUID()).kbId(kbId)
-                        .profileId(sparseProfile).build()));
 
         UUID jobId = persistence.submit(kbId, "tenant-a", "alice");
 
@@ -94,14 +90,14 @@ class KnowledgeBaseDeletionPersistenceServiceTest {
         ArgumentCaptor<List<OperationStep>> inventory = ArgumentCaptor.forClass(List.class);
         verify(steps).saveAll(inventory.capture());
         assertThat(inventory.getValue()).extracting(OperationStep::getSequenceNumber)
-                .containsExactly(1, 2, 3, 4, 5, 6, 7);
+                .containsExactly(1, 2, 3, 4, 5, 6, 7, 8);
         assertThat(inventory.getValue()).extracting(OperationStep::getStepType)
                 .containsExactly("DELETE_OBJECT", "DELETE_OBJECT", "DELETE_OBJECT",
                         "DELETE_PROFILE_VECTORS", "DELETE_LEGACY_VECTORS",
-                        "DELETE_SPARSE_VECTORS", "FINALIZE_DELETE");
+                        "DELETE_SPARSE_VECTORS", "DELETE_SPARSE_VECTORS", "FINALIZE_DELETE");
         assertThat(inventory.getValue()).extracting(OperationStep::getResourceRef)
                 .containsExactly("asset/a.png", "source/a.md", "source/b.md", kbId.toString(), kbId.toString(),
-                        kbId + ":7", kbId.toString());
+                        kbId + ":3", kbId + ":7", kbId.toString());
         verify(audit).recordSuccessInCurrentTransactionForTenant(eq("tenant-a"),
                 eq("KNOWLEDGE_BASE_DELETE_SUBMIT"), eq("KNOWLEDGE_BASE"), eq(kbId), contains(jobId.toString()));
     }

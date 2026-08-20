@@ -135,14 +135,14 @@ class KnowledgeBaseServiceTest {
                 .name("KB")
                 .retrievalProfile(RetrievalProfile.QA_ASSISTED)
                 .build();
-        when(repository.findByIdAndTenantIdForUpdate(id, "default")).thenReturn(Optional.of(kb));
+        when(repository.findByIdAndTenantIdForUpdateAnyStatus(id, "default")).thenReturn(Optional.of(kb));
         when(repository.save(any(KnowledgeBase.class))).thenAnswer(inv -> inv.getArgument(0));
 
         var response = service.updateRetrievalProfile(id, RetrievalProfile.CLASSIC);
 
         assertThat(response.getRetrievalProfile()).isEqualTo(RetrievalProfile.CLASSIC);
         verify(retrievalProfileGateService, never()).assertCanActivate(any(), any());
-        verify(repository).findByIdAndTenantIdForUpdate(id, "default");
+        verify(repository).findByIdAndTenantIdForUpdateAnyStatus(id, "default");
         verify(repository).save(argThat(saved -> saved.getRetrievalProfile() == RetrievalProfile.CLASSIC));
     }
 
@@ -154,14 +154,14 @@ class KnowledgeBaseServiceTest {
                 .name("KB")
                 .retrievalProfile(RetrievalProfile.CLASSIC)
                 .build();
-        when(repository.findByIdAndTenantIdForUpdate(id, "default")).thenReturn(Optional.of(kb));
+        when(repository.findByIdAndTenantIdForUpdateAnyStatus(id, "default")).thenReturn(Optional.of(kb));
         when(repository.save(any(KnowledgeBase.class))).thenAnswer(inv -> inv.getArgument(0));
 
         var response = service.updateRetrievalProfile(id, RetrievalProfile.PARENT_CHILD);
 
         assertThat(response.getRetrievalProfile()).isEqualTo(RetrievalProfile.PARENT_CHILD);
         verify(retrievalProfileGateService).assertCanActivate(id, RetrievalProfile.PARENT_CHILD);
-        verify(repository).findByIdAndTenantIdForUpdate(id, "default");
+        verify(repository).findByIdAndTenantIdForUpdateAnyStatus(id, "default");
         verify(repository).save(argThat(saved -> saved.getRetrievalProfile() == RetrievalProfile.PARENT_CHILD));
         verify(maintenanceService).assertMutationAllowed(id);
         verify(auditLogService).recordSuccessInCurrentTransaction(
@@ -298,5 +298,20 @@ class KnowledgeBaseServiceTest {
         assertThatThrownBy(() -> service.get(id))
                 .isInstanceOf(OperationConflictException.class)
                 .hasMessageContaining("deletion");
+    }
+
+    @Test
+    void lockedAndSystemLookupsAlsoReportDeletingAsConflictInsteadOfNotFoundOrUsable() {
+        UUID id = UUID.randomUUID();
+        KnowledgeBase deleting = KnowledgeBase.builder().id(id).tenantId("default")
+                .lifecycleStatus(KnowledgeBaseLifecycleStatus.DELETING).build();
+        when(repository.findByIdAndTenantIdForUpdateAnyStatus(id, "default"))
+                .thenReturn(Optional.of(deleting));
+        when(repository.findById(id)).thenReturn(Optional.of(deleting));
+
+        assertThatThrownBy(() -> service.findForUpdateOrThrow(id))
+                .isInstanceOf(OperationConflictException.class);
+        assertThatThrownBy(() -> service.findSystemOrThrow(id))
+                .isInstanceOf(OperationConflictException.class);
     }
 }

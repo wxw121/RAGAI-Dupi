@@ -11,6 +11,7 @@ import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.OperationJobRepository;
 import com.dupi.rag.repository.OperationStepRepository;
+import com.dupi.rag.repository.KnowledgeBaseRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -26,10 +27,16 @@ class RecoveryArchiveImportIntakeWriteService {
     static final String STAGE_STEP = "stage-zip";
     private final OperationJobRepository jobs;
     private final OperationStepRepository steps;
+    private final KnowledgeBaseRepository knowledgeBases;
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     OperationJob insert(String tenant, RecoveryArchiveImportPlan plan, String key,
                         String createdBy, String stagingKey) {
+        var knowledgeBase = knowledgeBases
+                .findByIdAndTenantIdForUpdateAnyStatus(plan.knowledgeBaseId(), tenant)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Knowledge base not found: " + plan.knowledgeBaseId()));
+        KnowledgeBaseLifecyclePolicy.requireReady(knowledgeBase, plan.knowledgeBaseId());
         UUID jobId = UUID.randomUUID();
         String actualStagingKey = stagingKey == null
                 ? "recovery-staging/" + plan.zipSha256() + "/" + jobId + ".zip"

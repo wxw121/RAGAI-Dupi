@@ -4,7 +4,6 @@ import com.dupi.rag.config.LlmProperties;
 import com.dupi.rag.config.SecurityContext;
 import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.KnowledgeBase;
-import com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus;
 import com.dupi.rag.domain.enums.RagEvalGateStatus;
 import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.CreateKnowledgeBaseRequest;
@@ -12,7 +11,6 @@ import com.dupi.rag.dto.KnowledgeBaseResponse;
 import com.dupi.rag.dto.OperationJobResponse;
 import com.dupi.rag.dto.RagEvalGateDecisionResponse;
 import com.dupi.rag.exception.ResourceNotFoundException;
-import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.exception.RetrievalProfileConflictException;
 import com.dupi.rag.repository.KnowledgeBaseRepository;
 import lombok.RequiredArgsConstructor;
@@ -112,24 +110,20 @@ public class KnowledgeBaseService {
     public KnowledgeBase findOrThrow(UUID id) {
         KnowledgeBase knowledgeBase = repository.findByIdAndTenantIdAnyStatus(id, TenantContext.getTenantId())
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found: " + id));
-        if (knowledgeBase.getLifecycleStatus() == KnowledgeBaseLifecycleStatus.DELETING) {
-            throw new OperationConflictException(
-                    "Knowledge base deletion is in progress; inspect the deletion operation status");
-        }
-        if (knowledgeBase.getLifecycleStatus() != KnowledgeBaseLifecycleStatus.READY) {
-            throw new ResourceNotFoundException("Knowledge base not found: " + id);
-        }
-        return knowledgeBase;
+        return KnowledgeBaseLifecyclePolicy.requireReady(knowledgeBase, id);
     }
 
     public KnowledgeBase findForUpdateOrThrow(UUID id) {
-        return repository.findByIdAndTenantIdForUpdate(id, TenantContext.getTenantId())
+        KnowledgeBase knowledgeBase = repository
+                .findByIdAndTenantIdForUpdateAnyStatus(id, TenantContext.getTenantId())
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found: " + id));
+        return KnowledgeBaseLifecyclePolicy.requireReady(knowledgeBase, id);
     }
 
     public KnowledgeBase findSystemOrThrow(UUID id) {
-        return repository.findById(id)
+        KnowledgeBase knowledgeBase = repository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found: " + id));
+        return KnowledgeBaseLifecyclePolicy.requireReady(knowledgeBase, id);
     }
 
     private KnowledgeBaseResponse toResponse(KnowledgeBase kb) {

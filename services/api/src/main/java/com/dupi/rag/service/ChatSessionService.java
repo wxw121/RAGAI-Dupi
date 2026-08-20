@@ -125,6 +125,7 @@ public class ChatSessionService {
 
     @Transactional(readOnly = true)
     public ChatSession findOrThrow(UUID kbId, UUID sessionId, String tenantId) {
+        knowledgeBaseService.findOrThrow(kbId);
         return sessionRepository.findByIdAndKbIdAndTenantId(sessionId, kbId, tenantId)
                 .orElseThrow(() -> new ResourceNotFoundException("Chat session not found: " + sessionId));
     }
@@ -148,6 +149,7 @@ public class ChatSessionService {
     }
 
     private ChatSession findForUpdateOrThrow(UUID kbId, UUID sessionId, String tenantId) {
+        knowledgeBaseService.findOrThrow(kbId);
         return sessionRepository.findByIdAndKbIdAndTenantIdForUpdate(sessionId, kbId, tenantId)
                 .orElseThrow(() -> new ResourceNotFoundException("Chat session not found: " + sessionId));
     }
