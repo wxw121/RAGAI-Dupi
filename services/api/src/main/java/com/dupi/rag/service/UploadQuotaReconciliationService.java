@@ -4,12 +4,10 @@ import com.dupi.rag.config.UploadQuotaProperties;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.IngestOutboxEvent;
-import com.dupi.rag.domain.entity.UploadQuotaReservation;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
 import com.dupi.rag.domain.enums.IngestOutboxStatus;
 import com.dupi.rag.domain.enums.IngestStage;
-import com.dupi.rag.domain.enums.UploadQuotaReservationStatus;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
 import com.dupi.rag.repository.IngestOutboxEventRepository;
@@ -17,6 +15,7 @@ import com.dupi.rag.repository.UploadQuotaReservationRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -35,10 +34,13 @@ public class UploadQuotaReconciliationService {
     private final MinioStorageService minioStorageService;
     private final UploadQuotaProperties properties;
     private final UploadIntentCleanupService intentCleanup;
+    private final UploadQuotaReconciliationPersistenceService persistence;
+    private final AbandonedUploadCleanupService abandonedUploads;
 
     @Scheduled(cron = "${dupi.upload-quota.reconciliation-cron:0 */5 * * * *}")
     public void reconcileStalePendingReservationsOnSchedule() {
         int reconciled = reconcileStalePendingReservationsInternal();
+        reconciled += abandonedUploads.cleanup(Math.max(1, properties.getReconciliationBatchSize()));
         if (reconciled > 0) {
             log.info("Reconciled {} stale upload quota reservation(s)", reconciled);
         }
@@ -50,12 +52,11 @@ public class UploadQuotaReconciliationService {
 
     private int reconcileStalePendingReservationsInternal() {
         int limit = Math.max(1, properties.getReconciliationBatchSize());
-        List<UploadQuotaReservation> reservations = reservationRepository
-                .findStalePendingAttempts(Instant.now(), limit);
+        List<UploadQuotaAttemptCandidate> reservations = reservationRepository
+                .findStalePendingAttempts(Instant.now(), PageRequest.of(0, limit));
         int reconciled = 0;
-        for (UploadQuotaReservation reservation : reservations) {
-            if (reservation.getAttemptId() == null
-                    || reservation.getStatus() != UploadQuotaReservationStatus.PENDING) {
+        for (UploadQuotaAttemptCandidate reservation : reservations) {
+            if (reservation.attemptId() == null) {
                 continue;
             }
             if (reconcile(reservation)) {
@@ -65,11 +66,11 @@ public class UploadQuotaReconciliationService {
         return reconciled;
     }
 
-    private boolean reconcile(UploadQuotaReservation reservation) {
-        Optional<Document> maybeDoc = documentRepository.findById(reservation.getAttemptId());
+    private boolean reconcile(UploadQuotaAttemptCandidate reservation) {
+        Optional<Document> maybeDoc = documentRepository.findById(reservation.attemptId());
         if (maybeDoc.isEmpty()) {
-            release(reservation, "Released stale upload attempt without durable document");
-            return true;
+            return persistence.releaseMissing(
+                    reservation, "Released stale upload attempt without durable document");
         }
 
         Document doc = maybeDoc.get();
@@ -80,8 +81,7 @@ public class UploadQuotaReconciliationService {
         if (job != null && job.getStatus() == IngestJobStatus.UPLOAD_INTENT) {
             UploadIntentCleanupDecision decision = intentCleanup.claim(reservation, Instant.now());
             if (decision.state() == UploadIntentCleanupDecision.State.PUBLISHED) {
-                commit(reservation, doc);
-                return true;
+                return persistence.commitPublished(reservation, doc.getId(), job.getId());
             }
             if (decision.state() != UploadIntentCleanupDecision.State.CLAIMED) {
                 return false;
@@ -94,26 +94,19 @@ public class UploadQuotaReconciliationService {
             return true;
         }
         if (job != null && hasPublishedOutbox(job, doc)) {
-            commit(reservation, doc);
-            return true;
+            return persistence.commitPublished(reservation, doc.getId(), job.getId());
         }
 
-        if (!cleanupObject(doc, reservation)) {
-            reservation.setReleaseReason("stale upload attempt object cleanup failed; retaining reservation");
-            reservationRepository.save(reservation);
+        Optional<UploadLegacyCleanupClaim> claim = persistence.claimLegacyCleanup(
+                reservation, doc.getId(), job == null ? null : job.getId(), Instant.now());
+        if (claim.isEmpty()) {
             return false;
         }
-
-        if (job != null) {
-            outboxRepository.deleteByJobId(job.getId());
-            ingestJobRepository.delete(job);
+        if (!cleanupObject(claim.get().objectKey(), reservation)) {
+            return false;
         }
-        doc.setStatus(DocumentStatus.FAILED);
-        doc.setErrorMessage("Upload attempt expired before ingest dispatch became durable");
-        doc.setQuotaReservationId(null);
-        documentRepository.save(doc);
-        release(reservation, "Released stale upload attempt after cleanup");
-        return true;
+        return persistence.completeLegacyCleanup(
+                claim.get(), "Released stale upload attempt after cleanup");
     }
 
     private boolean hasPublishedOutbox(IngestJob job, Document doc) {
@@ -127,37 +120,16 @@ public class UploadQuotaReconciliationService {
                 || event.getStatus() == IngestOutboxStatus.FAILED);
     }
 
-    private boolean cleanupObject(Document doc, UploadQuotaReservation reservation) {
-        return cleanupObject(doc.getObjectKey(), reservation);
-    }
-
-    private boolean cleanupObject(String objectKey, UploadQuotaReservation reservation) {
+    private boolean cleanupObject(String objectKey, UploadQuotaAttemptCandidate reservation) {
         if (objectKey == null || objectKey.isBlank()) {
             return true;
         }
         boolean deleted = minioStorageService.delete(objectKey);
         if (!deleted) {
             log.warn("Retaining stale upload reservation {} because object cleanup failed for {}",
-                    reservation.getId(), objectKey);
+                    reservation.reservationId(), objectKey);
         }
         return deleted;
     }
 
-    private void commit(UploadQuotaReservation reservation, Document doc) {
-        reservation.setDocId(doc.getId());
-        reservation.setAttemptId(null);
-        reservation.setAttemptExpiresAt(null);
-        reservation.setStatus(UploadQuotaReservationStatus.COMMITTED);
-        reservation.setReleaseReason(null);
-        reservationRepository.save(reservation);
-    }
-
-    private void release(UploadQuotaReservation reservation, String reason) {
-        reservation.setDocId(null);
-        reservation.setAttemptId(null);
-        reservation.setAttemptExpiresAt(null);
-        reservation.setStatus(UploadQuotaReservationStatus.RELEASED);
-        reservation.setReleaseReason(reason);
-        reservationRepository.save(reservation);
-    }
 }

@@ -26,6 +26,7 @@ import java.util.UUID;
 public class UploadQuotaService {
 
     private static final String ANONYMOUS_USER = "anonymous";
+    private static final String WRITER_OWNER_PREFIX = "upload-writer:";
     public static final String LEGACY_MIGRATION_USER = "legacy-migration";
 
     private final UploadQuotaReservationRepository reservationRepository;
@@ -136,7 +137,11 @@ public class UploadQuotaService {
                 .orElseThrow(() -> new UploadIdempotencyConflictException(
                         "Upload attempt no longer owns its quota reservation"));
         if (current.getStatus() != UploadQuotaReservationStatus.PENDING
-                || !doc.getId().equals(current.getAttemptId())) {
+                || !doc.getId().equals(current.getAttemptId())
+                || reservation.getReleaseReason() == null
+                || !reservation.getReleaseReason().equals(current.getReleaseReason())
+                || current.getAttemptExpiresAt() == null
+                || !current.getAttemptExpiresAt().isAfter(Instant.now())) {
             throw new UploadIdempotencyConflictException(
                     "Upload attempt no longer owns its quota reservation");
         }
@@ -206,18 +211,97 @@ public class UploadQuotaService {
     }
 
     @Transactional(propagation = Propagation.MANDATORY)
-    public void claimCleanupInCurrentTransaction(
-            UploadQuotaReservation reservation, UUID documentId, String owner, Instant expiresAt) {
+    public void releaseCommittedInCurrentTransaction(UUID reservationId, String reason) {
+        if (reservationId == null) {
+            return;
+        }
+        reservationRepository.findById(reservationId).ifPresent(reservation -> {
+            if (reservation.getStatus() != UploadQuotaReservationStatus.COMMITTED) {
+                return;
+            }
+            reservation.setStatus(UploadQuotaReservationStatus.RELEASED);
+            reservation.setAttemptId(null);
+            reservation.setAttemptExpiresAt(null);
+            reservation.setReleaseReason(reason);
+            reservationRepository.save(reservation);
+        });
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public UploadAttemptLease acquireWriterLease(UploadQuotaReservation reservation) {
+        if (reservation == null || reservation.getId() == null || reservation.getAttemptId() == null) {
+            throw new UploadIdempotencyConflictException("Upload writer reservation is missing");
+        }
         UploadQuotaReservation current = reservationRepository.findById(reservation.getId())
-                .orElseThrow(() -> new UploadIdempotencyConflictException("Upload cleanup reservation is missing"));
+                .orElseThrow(() -> new UploadIdempotencyConflictException(
+                        "Upload attempt no longer owns its quota reservation"));
         if (current.getStatus() != UploadQuotaReservationStatus.PENDING
-                || !documentId.equals(current.getAttemptId())) {
-            throw new UploadIdempotencyConflictException("Upload cleanup no longer owns its reservation");
+                || !reservation.getAttemptId().equals(current.getAttemptId())) {
+            throw new UploadIdempotencyConflictException(
+                    "Upload attempt no longer owns its quota reservation");
+        }
+        String owner = WRITER_OWNER_PREFIX + UUID.randomUUID();
+        current.setReleaseReason(owner);
+        current.setAttemptExpiresAt(attemptExpiresAt());
+        reservation.setReleaseReason(owner);
+        reservation.setAttemptExpiresAt(current.getAttemptExpiresAt());
+        reservationRepository.save(current);
+        return new UploadAttemptLease(current.getId(), current.getAttemptId(), owner);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public boolean renewWriterLease(UploadAttemptLease lease) {
+        UploadQuotaReservation current = ownedWriterReservation(lease);
+        if (current == null) {
+            return false;
+        }
+        current.setAttemptExpiresAt(attemptExpiresAt());
+        reservationRepository.save(current);
+        return true;
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public boolean ownsWriterLease(UploadAttemptLease lease) {
+        return ownedWriterReservation(lease) != null;
+    }
+
+    private UploadQuotaReservation ownedWriterReservation(UploadAttemptLease lease) {
+        if (lease == null || lease.reservationId() == null || lease.attemptId() == null
+                || lease.ownerToken() == null) {
+            return null;
+        }
+        return reservationRepository.findById(lease.reservationId())
+                .filter(current -> current.getStatus() == UploadQuotaReservationStatus.PENDING)
+                .filter(current -> lease.attemptId().equals(current.getAttemptId()))
+                .filter(current -> lease.ownerToken().equals(current.getReleaseReason()))
+                .filter(current -> current.getAttemptExpiresAt() != null
+                        && current.getAttemptExpiresAt().isAfter(Instant.now()))
+                .orElse(null);
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public boolean claimCleanupInCurrentTransaction(
+            UploadQuotaAttemptCandidate candidate, UUID documentId, String owner,
+            Instant expiresAt, Instant now) {
+        if (candidate == null || candidate.reservationId() == null || candidate.attemptId() == null) {
+            return false;
+        }
+        UploadQuotaReservation current = reservationRepository.findById(candidate.reservationId()).orElse(null);
+        if (current == null
+                || current.getStatus() != UploadQuotaReservationStatus.PENDING
+                || !documentId.equals(current.getAttemptId())
+                || !candidate.attemptId().equals(current.getAttemptId())
+                || !java.util.Objects.equals(candidate.ownerToken(), current.getReleaseReason())
+                || current.getAttemptExpiresAt() == null
+                || current.getAttemptExpiresAt().isAfter(now)) {
+            return false;
         }
         current.setAttemptExpiresAt(expiresAt);
         current.setReleaseReason(owner);
         reservationRepository.save(current);
+        return true;
     }
+
 
     @Transactional(propagation = Propagation.MANDATORY)
     public void releaseCleanupInCurrentTransaction(

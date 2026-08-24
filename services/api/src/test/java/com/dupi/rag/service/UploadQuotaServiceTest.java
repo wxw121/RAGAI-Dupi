@@ -221,6 +221,8 @@ class UploadQuotaServiceTest {
         UUID docId = UUID.randomUUID();
         UploadQuotaReservation reservation = reservation(kbId, null, "key-1", "a.md:10:text/markdown");
         reservation.setAttemptId(docId);
+        reservation.setReleaseReason("upload-writer:test");
+        reservation.setAttemptExpiresAt(Instant.now().plusSeconds(30));
         Document doc = Document.builder().id(docId).kbId(kbId).fileSize(10L).build();
         lenient().when(reservationRepository.findById(reservation.getId())).thenReturn(Optional.of(reservation));
 
@@ -357,6 +359,46 @@ class UploadQuotaServiceTest {
         service.refreshAttemptLease(stale);
 
         assertThat(current.getStatus()).isEqualTo(UploadQuotaReservationStatus.PENDING);
+        verify(reservationRepository, never()).save(any());
+    }
+
+    @Test
+    void cleanupCannotClaimWhileWriterHeartbeatHasRenewedTheCurrentAttempt() {
+        UUID attemptId = UUID.randomUUID();
+        UploadQuotaReservation current = reservation(UUID.randomUUID(), attemptId, "key", "sha256:file");
+        current.setStatus(UploadQuotaReservationStatus.PENDING);
+        current.setReleaseReason("upload-writer:live");
+        current.setAttemptExpiresAt(Instant.now().plusSeconds(30));
+        when(reservationRepository.findById(current.getId())).thenReturn(Optional.of(current));
+        UploadQuotaAttemptCandidate staleDiscovery = new UploadQuotaAttemptCandidate(
+                current.getId(), attemptId, "upload-writer:live");
+
+        boolean claimed = service().claimCleanupInCurrentTransaction(
+                staleDiscovery, attemptId, "upload-cleanup:test",
+                Instant.now().plusSeconds(60), Instant.now());
+
+        assertThat(claimed).isFalse();
+        assertThat(current.getReleaseReason()).isEqualTo("upload-writer:live");
+        verify(reservationRepository, never()).save(any());
+    }
+
+    @Test
+    void expiredWriterCannotRenewOwnOrCommitTheAttempt() {
+        UUID attemptId = UUID.randomUUID();
+        UploadQuotaReservation current = reservation(UUID.randomUUID(), null, "key", "sha256:file");
+        current.setAttemptId(attemptId);
+        current.setReleaseReason("upload-writer:expired");
+        current.setAttemptExpiresAt(Instant.now().minusSeconds(1));
+        when(reservationRepository.findById(current.getId())).thenReturn(Optional.of(current));
+        UploadAttemptLease lease = new UploadAttemptLease(
+                current.getId(), attemptId, "upload-writer:expired");
+
+        assertThat(service().ownsWriterLease(lease)).isFalse();
+        assertThat(service().renewWriterLease(lease)).isFalse();
+        assertThatThrownBy(() -> service().commit(
+                current, Document.builder().id(attemptId).kbId(current.getKbId()).build()))
+                .isInstanceOf(UploadIdempotencyConflictException.class)
+                .hasMessageContaining("no longer owns");
         verify(reservationRepository, never()).save(any());
     }
 

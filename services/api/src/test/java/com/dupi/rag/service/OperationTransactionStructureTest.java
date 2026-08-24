@@ -43,6 +43,57 @@ import static org.mockito.Mockito.*;
 
 class OperationTransactionStructureTest {
     @Test
+    void documentDeletionUsesTwoProxiedShortTransactionsAroundUnlockedObjectIo() throws Exception {
+        var documents = mock(com.dupi.rag.repository.DocumentRepository.class);
+        var knowledgeBases = mock(KnowledgeBaseService.class);
+        var tombstones = mock(DocumentTombstoneService.class);
+        var vectorTasks = mock(VectorCleanupTaskService.class);
+        var profiles = mock(com.dupi.rag.repository.RetrievalProfileRepository.class);
+        var chunks = mock(com.dupi.rag.repository.ChunkRepository.class);
+        var assets = mock(DocumentAssetService.class);
+        var quota = mock(UploadQuotaService.class);
+        var profileState = mock(ProfileIndexStateService.class);
+        var audit = mock(AuditLogService.class);
+        TrackingTransactionManager transactions = new TrackingTransactionManager();
+        UUID kbId = UUID.randomUUID();
+        Document document = Document.builder()
+                .id(UUID.randomUUID()).kbId(kbId).status(DocumentStatus.PENDING)
+                .objectKey("objects/a.md").fileName("a.md").build();
+        when(knowledgeBases.findForUpdateOrThrow(kbId))
+                .thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(documents.findByIdForUpdate(document.getId())).thenReturn(Optional.of(document));
+
+        assertThat(DocumentService.class.getMethod("delete", UUID.class, UUID.class)
+                .getAnnotation(org.springframework.transaction.annotation.Transactional.class)).isNull();
+        try (AnnotationConfigApplicationContext spring = transactionalContext(transactions)) {
+            spring.registerBean(DocumentDeletionPersistenceService.class,
+                    () -> new DocumentDeletionPersistenceService(
+                            documents, knowledgeBases, tombstones, vectorTasks, profiles,
+                            chunks, assets, quota, profileState, audit));
+            spring.refresh();
+
+            DocumentDeletionPersistenceService persistence =
+                    spring.getBean(DocumentDeletionPersistenceService.class);
+            assertThat(AopUtils.isAopProxy(persistence)).isTrue();
+            DocumentDeletionClaim claim = persistence.begin(kbId, document.getId());
+
+            assertThat(transactions.isActive()).isFalse();
+            Runnable externalObjectIo = mock(Runnable.class);
+            doAnswer(call -> {
+                assertThat(transactions.isActive()).isFalse();
+                return null;
+            }).when(externalObjectIo).run();
+            externalObjectIo.run();
+
+            persistence.complete(claim);
+
+            assertThat(transactions.begins).isEqualTo(2);
+            assertThat(transactions.commits).isEqualTo(2);
+            assertThat(transactions.rollbacks).isZero();
+        }
+    }
+
+    @Test
     void proxiedUploadPublicationRollsBackQuotaMetadataAndOutboxAsOneTransaction() {
         var knowledgeBases = mock(com.dupi.rag.repository.KnowledgeBaseRepository.class);
         var documents = mock(com.dupi.rag.repository.DocumentRepository.class);
@@ -355,6 +406,10 @@ class OperationTransactionStructureTest {
 
         void loseNextCommitAcknowledgement() {
             loseNextCommitAcknowledgement = true;
+        }
+
+        boolean isActive() {
+            return active.get();
         }
 
         @Override

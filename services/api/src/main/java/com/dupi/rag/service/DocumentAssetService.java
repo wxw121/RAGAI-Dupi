@@ -90,6 +90,17 @@ public class DocumentAssetService {
         repository.deleteByDocId(docId);
     }
 
+    /** External replay-safe cleanup. Metadata remains until the caller's fenced final transaction. */
+    public void deleteObjectsByDocument(UUID docId) {
+        repository.findByDocIdOrderByCreatedAtAsc(docId)
+                .forEach(asset -> storageService.deleteChecked(asset.getObjectKey()));
+    }
+
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)
+    public void deleteMetadataInCurrentTransaction(UUID docId) {
+        repository.deleteByDocId(docId);
+    }
+
     public String normalizeReference(String value) {
         if (value == null) {
             return "";

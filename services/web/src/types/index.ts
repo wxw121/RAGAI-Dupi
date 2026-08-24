@@ -73,7 +73,7 @@ export interface Document {
   fileName: string
   mimeType: string
   fileSize: number
-  status: 'UPLOADING' | 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+  status: 'UPLOADING' | 'DELETING' | 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
   errorMessage: string | null
   currentJob?: IngestJob | null
   createdAt: string

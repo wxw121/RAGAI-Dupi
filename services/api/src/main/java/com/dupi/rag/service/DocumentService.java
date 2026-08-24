@@ -4,7 +4,6 @@ import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.IngestJob;
-import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.entity.UploadQuotaReservation;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
@@ -16,14 +15,11 @@ import com.dupi.rag.dto.DocumentResponse;
 import com.dupi.rag.dto.IngestJobResponse;
 import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.exception.ResourceNotFoundException;
-import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
-import com.dupi.rag.repository.RetrievalProfileRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -43,7 +39,6 @@ public class DocumentService {
 
     private final DocumentRepository documentRepository;
     private final IngestJobRepository ingestJobRepository;
-    private final ChunkRepository chunkRepository;
     private final KnowledgeBaseService knowledgeBaseService;
     private final MinioStorageService minioStorageService;
     private final MilvusVectorService milvusVectorService;
@@ -51,12 +46,12 @@ public class DocumentService {
     private final DocumentTombstoneService documentTombstoneService;
     private final VectorCleanupTaskService vectorCleanupTaskService;
     private final AuditLogService auditLogService;
-    private final RetrievalProfileRepository retrievalProfileRepository;
     private final KnowledgeBaseMaintenanceService maintenanceService;
     private final UploadQuotaService uploadQuotaService;
-    private final ProfileIndexStateService profileIndexStateService;
     private final DocumentAssetService documentAssetService;
     private final DocumentUploadIntentService uploadIntents;
+    private final UploadAttemptLeaseCoordinator uploadLeases;
+    private final DocumentDeletionPersistenceService documentDeletions;
 
     public DocumentResponse upload(UUID kbId, MultipartFile file) {
         return upload(kbId, file, null);
@@ -149,10 +144,16 @@ public class DocumentService {
         try {
             uploadIntents.prepare(TenantContext.getTenantId(), doc, job);
             intentPrepared = true;
-            uploadQuotaService.refreshAttemptLease(reservation);
-            objectWriteAttempted = true;
-            minioStorageService.upload(objectKey, file.getInputStream(), file.getSize(), doc.getMimeType());
-            uploadQuotaService.refreshAttemptLease(reservation);
+            UploadAttemptLease writerLease = uploadLeases.acquire(reservation);
+            try (UploadAttemptHeartbeat heartbeat = uploadLeases.start(writerLease)) {
+                objectWriteAttempted = true;
+                minioStorageService.upload(objectKey, file.getInputStream(), file.getSize(), doc.getMimeType());
+                if (heartbeat.ownershipLost() || !uploadLeases.owns(writerLease)) {
+                    documentTombstoneService.recordAbandonedUpload(doc);
+                    throw new OperationConflictException(
+                            "Upload writer ownership was lost; object cleanup was scheduled");
+                }
+            }
 
             DocumentUploadPublication publication = uploadIntents.publish(
                     TenantContext.getTenantId(), doc, job, reservation);
@@ -270,15 +271,9 @@ public class DocumentService {
         return toResponse(doc, job);
     }
 
-    @Transactional
     public void delete(UUID kbId, UUID docId) {
         maintenanceService.assertMutationAllowed(kbId);
-        KnowledgeBase kb = knowledgeBaseService.findForUpdateOrThrow(kbId);
-        Document doc = findOrThrow(kbId, docId);
-        UploadIntentLifecyclePolicy.requireDocumentMutationAllowed(doc);
-        documentTombstoneService.recordDeleted(doc);
-        vectorCleanupTaskService.enqueueProfileDocument(docId);
-        vectorCleanupTaskService.enqueueLegacyDocument(docId);
+        DocumentDeletionClaim claim = documentDeletions.begin(kbId, docId);
         try {
             if (milvusVectorService.deleteProfileByDocId(docId)) {
                 vectorCleanupTaskService.completePendingProfileDocument(docId);
@@ -288,31 +283,17 @@ public class DocumentService {
         }
         try {
             boolean legacyDeleted = milvusVectorService.deleteByDocId(docId);
-            milvusVectorService.deleteSparseByDocId(kbId, docId,
-                    retrievalProfileRepository.findByKbIdOrderByVersionDesc(kbId).stream()
-                            .map(profile -> profile.getVersion()).toList());
+            milvusVectorService.deleteSparseByDocId(
+                    kbId, docId, claim.sparseProfileVersions());
             if (legacyDeleted) {
                 vectorCleanupTaskService.completePendingLegacyDocument(docId);
             }
         } catch (Exception e) {
             log.warn("Failed to delete Milvus vectors for doc {}", docId, e);
         }
-        chunkRepository.deleteByDocId(docId);
-        try {
-            minioStorageService.delete(doc.getObjectKey());
-        } catch (Exception e) {
-            log.warn("Failed to delete object {} for doc {}", doc.getObjectKey(), docId, e);
-        }
-        documentAssetService.deleteByDocument(docId);
-        uploadQuotaService.releaseCommitted(doc.getQuotaReservationId(), "Document deleted");
-        documentRepository.delete(doc);
-        profileIndexStateService.bumpRevision(kb);
-        auditLogService.recordSuccess(
-                "DOCUMENT_DELETE",
-                "DOCUMENT",
-                docId,
-                "Deleted document " + doc.getFileName()
-        );
+        minioStorageService.deleteChecked(claim.objectKey());
+        documentAssetService.deleteObjectsByDocument(docId);
+        documentDeletions.complete(claim);
     }
 
     public Document findOrThrow(UUID kbId, UUID docId) {

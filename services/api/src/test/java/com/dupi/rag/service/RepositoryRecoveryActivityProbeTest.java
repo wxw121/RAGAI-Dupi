@@ -1,6 +1,8 @@
 package com.dupi.rag.service;
 
 import com.dupi.rag.domain.enums.IngestJobStatus;
+import com.dupi.rag.domain.enums.DocumentStatus;
+import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
 import com.dupi.rag.repository.RagEvalRunRepository;
 import com.dupi.rag.repository.SparseMigrationRepository;
@@ -19,7 +21,9 @@ class RepositoryRecoveryActivityProbeTest {
         IngestJobRepository ingest = mock(IngestJobRepository.class);
         RagEvalRunRepository eval = mock(RagEvalRunRepository.class);
         SparseMigrationRepository sparse = mock(SparseMigrationRepository.class);
-        RepositoryRecoveryActivityProbe probe = new RepositoryRecoveryActivityProbe(ingest, eval, sparse);
+        DocumentRepository documents = mock(DocumentRepository.class);
+        RepositoryRecoveryActivityProbe probe = new RepositoryRecoveryActivityProbe(
+                ingest, eval, sparse, documents);
         UUID kbId = UUID.randomUUID();
 
         when(ingest.existsByKbIdAndStatusIn(eq(kbId), anyList())).thenReturn(true);
@@ -35,5 +39,19 @@ class RepositoryRecoveryActivityProbeTest {
         assertThat(probe.hasActiveWork(kbId)).isTrue();
         reset(sparse);
         assertThat(probe.hasActiveWork(kbId)).isFalse();
+    }
+
+    @Test
+    void deletingDocumentBlocksKnowledgeBaseDeletionUntilFinalized() {
+        IngestJobRepository ingest = mock(IngestJobRepository.class);
+        RagEvalRunRepository eval = mock(RagEvalRunRepository.class);
+        SparseMigrationRepository sparse = mock(SparseMigrationRepository.class);
+        DocumentRepository documents = mock(DocumentRepository.class);
+        RepositoryRecoveryActivityProbe probe = new RepositoryRecoveryActivityProbe(
+                ingest, eval, sparse, documents);
+        UUID kbId = UUID.randomUUID();
+        when(documents.existsByKbIdAndStatus(kbId, DocumentStatus.DELETING)).thenReturn(true);
+
+        assertThat(probe.hasActiveWork(kbId)).isTrue();
     }
 }

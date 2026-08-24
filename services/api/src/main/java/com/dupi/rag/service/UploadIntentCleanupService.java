@@ -51,11 +51,11 @@ class UploadIntentCleanupService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    UploadIntentCleanupDecision claim(UploadQuotaReservation candidate, Instant now) {
-        if (candidate == null || candidate.getAttemptId() == null) {
+    UploadIntentCleanupDecision claim(UploadQuotaAttemptCandidate candidate, Instant now) {
+        if (candidate == null || candidate.attemptId() == null) {
             return UploadIntentCleanupDecision.skipped();
         }
-        Document observed = documents.findById(candidate.getAttemptId()).orElse(null);
+        Document observed = documents.findById(candidate.attemptId()).orElse(null);
         if (observed == null || observed.getImportJobId() != null || observed.getStatus() == DocumentStatus.IMPORTING) {
             return UploadIntentCleanupDecision.skipped();
         }
@@ -64,7 +64,7 @@ class UploadIntentCleanupService {
             return UploadIntentCleanupDecision.skipped();
         }
         IngestJob job = jobs.findByIdForUpdate(observedJob.getId()).orElse(null);
-        Document document = documents.findById(observed.getId()).orElse(null);
+        Document document = documents.findByIdForUpdate(observed.getId()).orElse(null);
         if (job == null || document == null) {
             return UploadIntentCleanupDecision.skipped();
         }
@@ -83,15 +83,18 @@ class UploadIntentCleanupService {
 
         String owner = OWNER_PREFIX + UUID.randomUUID();
         Instant expiresAt = now.plusSeconds(leaseSeconds);
+        if (!quota.claimCleanupInCurrentTransaction(
+                candidate, document.getId(), owner, expiresAt, now)) {
+            return UploadIntentCleanupDecision.skipped();
+        }
         job.setStatus(IngestJobStatus.UPLOAD_INTENT);
         job.setStage(IngestStage.UPLOAD_CLEANUP);
         job.setClaimedBy(owner);
         job.setLeaseExpiresAt(expiresAt);
         job.setErrorMessage("Cleaning up expired upload intent");
-        quota.claimCleanupInCurrentTransaction(candidate, document.getId(), owner, expiresAt);
         jobs.saveAndFlush(job);
         return UploadIntentCleanupDecision.claimed(new UploadIntentCleanupClaim(
-                candidate.getId(), document.getId(), job.getId(), document.getObjectKey(), owner));
+                candidate.reservationId(), document.getId(), job.getId(), document.getObjectKey(), owner));
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -103,7 +106,7 @@ class UploadIntentCleanupService {
                 || !claim.owner().equals(job.getClaimedBy())) {
             throw new IllegalStateException("Upload cleanup claim is stale");
         }
-        Document document = documents.findById(claim.documentId())
+        Document document = documents.findByIdForUpdate(claim.documentId())
                 .orElseThrow(() -> new IllegalStateException("Upload cleanup document is missing"));
         String error = limit(diagnostic);
         outbox.cancelPendingForJob(job.getId(), "Upload attempt expired");

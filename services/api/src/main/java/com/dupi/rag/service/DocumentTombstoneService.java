@@ -17,6 +17,15 @@ public class DocumentTombstoneService {
 
     @Transactional
     public void recordDeleted(Document document) {
+        record(document, "DOCUMENT_DELETE");
+    }
+
+    @Transactional
+    public void recordAbandonedUpload(Document document) {
+        record(document, "UPLOAD_ABANDONED");
+    }
+
+    private void record(Document document, String reason) {
         if (document == null || document.getId() == null) {
             return;
         }
@@ -28,7 +37,7 @@ public class DocumentTombstoneService {
                 .kbId(document.getKbId())
                 .objectKey(document.getObjectKey())
                 .fileName(document.getFileName())
-                .reason("DOCUMENT_DELETE")
+                .reason(reason)
                 .build());
     }
 

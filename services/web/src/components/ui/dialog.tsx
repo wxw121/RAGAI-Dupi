@@ -64,6 +64,7 @@ export function statusBadgeVariant(
     case 'PROCESSING':
     case 'RUNNING':
     case 'UPLOADING':
+    case 'DELETING':
     case 'UPLOAD_INTENT':
       return 'warning'
     case 'PENDING':

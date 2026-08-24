@@ -4,7 +4,6 @@ import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.KnowledgeBase;
-import com.dupi.rag.domain.entity.RetrievalProfile;
 import com.dupi.rag.domain.entity.UploadQuotaReservation;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
@@ -93,6 +92,9 @@ class DocumentServiceTest {
     @Mock ProfileIndexStateService profileIndexStateService;
     @Mock DocumentAssetService documentAssetService;
     @Mock DocumentUploadIntentService uploadIntents;
+    @Mock UploadAttemptLeaseCoordinator uploadLeases;
+    @Mock UploadAttemptHeartbeat uploadHeartbeat;
+    @Mock DocumentDeletionPersistenceService documentDeletions;
 
     @BeforeEach
     void persistIntentThroughLegacyRepositoryMocks() {
@@ -106,6 +108,13 @@ class DocumentServiceTest {
             ingestJobRepository.save(job);
             return null;
         }).when(uploadIntents).prepare(anyString(), any(), any());
+        lenient().when(uploadLeases.acquire(any())).thenAnswer(call -> {
+            UploadQuotaReservation reservation = call.getArgument(0);
+            return new UploadAttemptLease(
+                    reservation.getId(), reservation.getAttemptId(), "upload-writer:test");
+        });
+        lenient().when(uploadLeases.start(any())).thenReturn(uploadHeartbeat);
+        lenient().when(uploadLeases.owns(any())).thenReturn(true);
         lenient().when(uploadIntents.publish(anyString(), any(), any(), any())).thenAnswer(call -> {
             Document document = call.getArgument(1);
             IngestJob job = call.getArgument(2);
@@ -130,7 +139,6 @@ class DocumentServiceTest {
         return new DocumentService(
                 documentRepository,
                 ingestJobRepository,
-                chunkRepository,
                 knowledgeBaseService,
                 minioStorageService,
                 milvusVectorService,
@@ -138,12 +146,12 @@ class DocumentServiceTest {
                 documentTombstoneService,
                 vectorCleanupTaskService,
                 auditLogService,
-                retrievalProfileRepository,
                 maintenanceService,
                 uploadQuotaService,
-                profileIndexStateService,
                 documentAssetService,
-                uploadIntents
+                uploadIntents,
+                uploadLeases,
+                documentDeletions
         );
     }
 
@@ -317,6 +325,31 @@ class DocumentServiceTest {
     }
 
     @Test
+    void completedObjectWriteWithLostOwnershipSchedulesDurableCleanupInsteadOfPublishing() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId))
+                .thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(uploadQuotaService.reserveForUpload(
+                eq(kbId), any(UUID.class), eq("key"), eq("a.md"),
+                eq("text/markdown"), eq(5L), anyString()))
+                .thenAnswer(invocation -> reservation(
+                        kbId, invocation.getArgument(1), "key", 5L));
+        when(uploadLeases.owns(any())).thenReturn(false);
+
+        assertThatThrownBy(() -> service().upload(
+                kbId,
+                new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes()),
+                "key"))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
+                .hasMessageContaining("ownership");
+
+        ArgumentCaptor<Document> document = ArgumentCaptor.forClass(Document.class);
+        verify(documentTombstoneService).recordAbandonedUpload(document.capture());
+        assertThat(document.getValue().getObjectKey()).contains("a.md");
+        verify(uploadIntents, never()).publish(anyString(), any(), any(), any());
+    }
+
+    @Test
     void uploadReleasesQuotaReservationWhenInitialDocumentSaveFails() {
         UUID kbId = UUID.randomUUID();
         when(knowledgeBaseService.findOrThrow(kbId))
@@ -434,21 +467,15 @@ class DocumentServiceTest {
     void deletingUploadingDocumentConflictsBeforeAnyCleanupSideEffect() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
-        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
-        Document uploading = doc(kbId, docId);
-        uploading.setStatus(DocumentStatus.UPLOADING);
-        when(knowledgeBaseService.findForUpdateOrThrow(kbId)).thenReturn(kb);
-        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(uploading));
+        when(documentDeletions.begin(kbId, docId)).thenThrow(
+                new com.dupi.rag.exception.OperationConflictException("upload is in progress"));
 
         assertThatThrownBy(() -> service().delete(kbId, docId))
                 .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
                 .hasMessageContaining("upload");
 
-        verifyNoInteractions(documentTombstoneService, vectorCleanupTaskService,
-                milvusVectorService, documentAssetService);
-        verify(minioStorageService, never()).delete(anyString());
-        verify(documentRepository, never()).delete(any());
+        verifyNoInteractions(milvusVectorService, minioStorageService, documentAssetService);
+        verify(documentDeletions, never()).complete(any());
     }
 
     @Test
@@ -621,29 +648,23 @@ class DocumentServiceTest {
     }
 
     @Test
-    void deleteContinuesWhenExternalStoresFail() throws IOException {
+    void deleteRetainsMetadataForRetryWhenObjectCleanupFails() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         Document doc = doc(kbId, docId);
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
-        doThrow(new IllegalStateException("profile milvus")).when(milvusVectorService).deleteProfileByDocId(docId);
-        doThrow(new IllegalStateException("milvus")).when(milvusVectorService).deleteByDocId(docId);
-        doThrow(new IllegalStateException("minio")).when(minioStorageService).delete(doc.getObjectKey());
+        DocumentDeletionClaim claim = new DocumentDeletionClaim(
+                kbId, docId, doc.getObjectKey(), null, doc.getFileName(), List.of());
+        when(documentDeletions.begin(kbId, docId)).thenReturn(claim);
+        doThrow(new IllegalStateException("minio"))
+                .when(minioStorageService).deleteChecked(doc.getObjectKey());
 
-        service().delete(kbId, docId);
+        assertThatThrownBy(() -> service().delete(kbId, docId))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("minio");
 
-        verify(documentTombstoneService).recordDeleted(doc);
-        verify(vectorCleanupTaskService).enqueueProfileDocument(docId);
-        verify(vectorCleanupTaskService).enqueueLegacyDocument(docId);
         verify(milvusVectorService).deleteProfileByDocId(docId);
-        verify(chunkRepository).deleteByDocId(docId);
-        verify(documentRepository).delete(doc);
-        verify(auditLogService).recordSuccess(
-                eq("DOCUMENT_DELETE"),
-                eq("DOCUMENT"),
-                eq(docId),
-                contains(doc.getFileName())
-        );
+        verify(documentDeletions, never()).complete(any());
+        verify(documentAssetService, never()).deleteMetadataInCurrentTransaction(any());
     }
 
     @Test
@@ -651,34 +672,27 @@ class DocumentServiceTest {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         UUID quotaReservationId = UUID.randomUUID();
-        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).name("KB").build();
         Document doc = doc(kbId, docId);
         doc.setQuotaReservationId(quotaReservationId);
-        when(knowledgeBaseService.findForUpdateOrThrow(kbId)).thenReturn(kb);
-        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
-        when(retrievalProfileRepository.findByKbIdOrderByVersionDesc(kbId)).thenReturn(List.of(
-                RetrievalProfile.builder().kbId(kbId).version(3).build(),
-                RetrievalProfile.builder().kbId(kbId).version(1).build()
-        ));
+        DocumentDeletionClaim claim = new DocumentDeletionClaim(
+                kbId, docId, doc.getObjectKey(), quotaReservationId,
+                doc.getFileName(), List.of(3, 1));
+        when(documentDeletions.begin(kbId, docId)).thenReturn(claim);
         when(milvusVectorService.deleteProfileByDocId(docId)).thenReturn(true);
         when(milvusVectorService.deleteByDocId(docId)).thenReturn(true);
 
         service().delete(kbId, docId);
 
         verify(maintenanceService).assertMutationAllowed(kbId);
-        verify(documentTombstoneService).recordDeleted(doc);
-        verify(vectorCleanupTaskService).enqueueProfileDocument(docId);
-        verify(vectorCleanupTaskService).enqueueLegacyDocument(docId);
+        verify(documentDeletions).begin(kbId, docId);
         verify(milvusVectorService).deleteProfileByDocId(docId);
         verify(milvusVectorService).deleteByDocId(docId);
         verify(vectorCleanupTaskService).completePendingProfileDocument(docId);
         verify(vectorCleanupTaskService).completePendingLegacyDocument(docId);
         verify(milvusVectorService).deleteSparseByDocId(kbId, docId, List.of(3, 1));
-        verify(minioStorageService).delete(doc.getObjectKey());
-        verify(uploadQuotaService).releaseCommitted(quotaReservationId, "Document deleted");
-        verify(documentRepository).delete(doc);
-        verify(profileIndexStateService).bumpRevision(kb);
+        verify(minioStorageService).deleteChecked(doc.getObjectKey());
+        verify(documentAssetService).deleteObjectsByDocument(docId);
+        verify(documentDeletions).complete(claim);
     }
 
     private static Document doc(UUID kbId, UUID docId) {
