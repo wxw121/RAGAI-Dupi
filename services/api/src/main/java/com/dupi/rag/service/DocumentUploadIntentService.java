@@ -85,6 +85,34 @@ class DocumentUploadIntentService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
+    DocumentUploadPublicationResolution reconcilePublication(
+            String tenantId, Document intentDocument, IngestJob intentJob) {
+        knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(intentDocument.getKbId(), tenantId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Knowledge base not found: " + intentDocument.getKbId()));
+        IngestJob job = jobs.findByIdForUpdate(intentJob.getId())
+                .filter(candidate -> intentDocument.getKbId().equals(candidate.getKbId())
+                        && intentDocument.getId().equals(candidate.getDocId()))
+                .orElseThrow(() -> new IllegalStateException("Upload intent ingest job is missing"));
+        Document document = documents.findById(intentDocument.getId())
+                .filter(candidate -> intentDocument.getKbId().equals(candidate.getKbId()))
+                .orElseThrow(() -> new IllegalStateException("Upload intent document is missing"));
+
+        boolean exactIntent = job.getStatus() == IngestJobStatus.UPLOAD_INTENT
+                && job.getStage() == IngestStage.UPLOAD_PENDING
+                && document.getStatus() == DocumentStatus.UPLOADING;
+        if (exactIntent) {
+            return DocumentUploadPublicationResolution.retained();
+        }
+        if (job.getStatus() != IngestJobStatus.UPLOAD_INTENT
+                && document.getStatus() != DocumentStatus.UPLOADING
+                && outbox.hasDurableRecord(job.getId())) {
+            return DocumentUploadPublicationResolution.published(document, job);
+        }
+        return DocumentUploadPublicationResolution.retained();
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     void fail(Document document, IngestJob job, String diagnostic) {
         Instant now = Instant.now();
         String error = limit(diagnostic);

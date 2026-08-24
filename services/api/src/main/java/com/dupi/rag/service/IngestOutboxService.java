@@ -115,6 +115,11 @@ public class IngestOutboxService {
         return dispatched;
     }
 
+    @Transactional(readOnly = true)
+    public boolean hasDurableRecord(UUID jobId) {
+        return !outboxRepository.findByJobId(jobId).isEmpty();
+    }
+
     private boolean isDispatchable(IngestJob job, Document doc) {
         return job.getStatus() == IngestJobStatus.PENDING
                 && job.getStage() == IngestStage.QUEUED

@@ -38,9 +38,8 @@ public interface UploadQuotaReservationRepository extends JpaRepository<UploadQu
               )
             order by updated_at asc
             limit :limit
-            for update skip locked
             """, nativeQuery = true)
-    List<UploadQuotaReservation> findStalePendingAttemptsForUpdate(
+    List<UploadQuotaReservation> findStalePendingAttempts(
             @Param("now") Instant now,
             @Param("limit") int limit
     );

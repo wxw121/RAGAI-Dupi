@@ -73,7 +73,7 @@ export interface Document {
   fileName: string
   mimeType: string
   fileSize: number
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+  status: 'UPLOADING' | 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
   errorMessage: string | null
   currentJob?: IngestJob | null
   createdAt: string
@@ -106,7 +106,7 @@ export interface IngestJob {
   docId: string
   documentFileName?: string | null
   documentStatus?: Document['status'] | null
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'DEAD_LETTER' | 'CANCEL_REQUESTED' | 'CANCELLED'
+  status: 'UPLOAD_INTENT' | 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'DEAD_LETTER' | 'CANCEL_REQUESTED' | 'CANCELLED'
   stage: string | null
   retryCount: number
   errorMessage: string | null

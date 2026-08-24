@@ -39,10 +39,11 @@ class UploadQuotaReconciliationServiceTest {
     @Mock IngestJobRepository ingestJobRepository;
     @Mock IngestOutboxEventRepository outboxRepository;
     @Mock MinioStorageService minioStorageService;
+    @Mock UploadIntentCleanupService intentCleanup;
 
     @Test
     void activeAttemptLeaseIsNotClaimedByStaleReconciler() {
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
+        when(reservationRepository.findStalePendingAttempts(any(Instant.class), anyInt()))
                 .thenReturn(List.of());
 
         assertThat(service().reconcileStalePendingReservations()).isZero();
@@ -54,7 +55,7 @@ class UploadQuotaReconciliationServiceTest {
     void stalePendingReservationWithoutDocumentIsReleased() {
         UUID attemptId = UUID.randomUUID();
         UploadQuotaReservation reservation = pendingReservation(attemptId);
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
+        when(reservationRepository.findStalePendingAttempts(any(Instant.class), anyInt()))
                 .thenReturn(List.of(reservation));
         when(documentRepository.findById(attemptId)).thenReturn(Optional.empty());
 
@@ -71,7 +72,7 @@ class UploadQuotaReconciliationServiceTest {
     void scheduledReconcileProcessesStalePendingReservation() {
         UUID attemptId = UUID.randomUUID();
         UploadQuotaReservation reservation = pendingReservation(attemptId);
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
+        when(reservationRepository.findStalePendingAttempts(any(Instant.class), anyInt()))
                 .thenReturn(List.of(reservation));
         when(documentRepository.findById(attemptId)).thenReturn(Optional.empty());
 
@@ -88,7 +89,7 @@ class UploadQuotaReconciliationServiceTest {
         Document doc = document(reservation.getKbId(), attemptId);
         IngestJob job = job(reservation.getKbId(), attemptId);
         IngestOutboxEvent outbox = outbox(job.getId(), reservation.getKbId(), attemptId, IngestOutboxStatus.PENDING);
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
+        when(reservationRepository.findStalePendingAttempts(any(Instant.class), anyInt()))
                 .thenReturn(List.of(reservation));
         when(documentRepository.findById(attemptId)).thenReturn(Optional.of(doc));
         when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(attemptId)).thenReturn(Optional.of(job));
@@ -110,7 +111,7 @@ class UploadQuotaReconciliationServiceTest {
         UploadQuotaReservation reservation = pendingReservation(attemptId);
         Document doc = document(reservation.getKbId(), attemptId);
         IngestJob job = job(reservation.getKbId(), attemptId);
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
+        when(reservationRepository.findStalePendingAttempts(any(Instant.class), anyInt()))
                 .thenReturn(List.of(reservation));
         when(documentRepository.findById(attemptId)).thenReturn(Optional.of(doc));
         when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(attemptId)).thenReturn(Optional.of(job));
@@ -136,7 +137,7 @@ class UploadQuotaReconciliationServiceTest {
         UploadQuotaReservation reservation = pendingReservation(attemptId);
         Document doc = document(reservation.getKbId(), attemptId);
         IngestJob job = job(reservation.getKbId(), attemptId);
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
+        when(reservationRepository.findStalePendingAttempts(any(Instant.class), anyInt()))
                 .thenReturn(List.of(reservation));
         when(documentRepository.findById(attemptId)).thenReturn(Optional.of(doc));
         when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(attemptId)).thenReturn(Optional.of(job));
@@ -163,18 +164,21 @@ class UploadQuotaReconciliationServiceTest {
         IngestJob job = job(reservation.getKbId(), attemptId);
         job.setStatus(IngestJobStatus.UPLOAD_INTENT);
         job.setStage(IngestStage.UPLOAD_PENDING);
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
+        when(reservationRepository.findStalePendingAttempts(any(Instant.class), anyInt()))
                 .thenReturn(List.of(reservation));
         when(documentRepository.findById(attemptId)).thenReturn(Optional.of(doc));
         when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(attemptId)).thenReturn(Optional.of(job));
+        UploadIntentCleanupClaim claim = new UploadIntentCleanupClaim(
+                reservation.getId(), doc.getId(), job.getId(), doc.getObjectKey(), "upload-cleanup:test");
+        when(intentCleanup.claim(eq(reservation), any(Instant.class)))
+                .thenReturn(UploadIntentCleanupDecision.claimed(claim));
         when(minioStorageService.delete(doc.getObjectKey())).thenReturn(true);
 
         assertThat(service().reconcileStalePendingReservations()).isEqualTo(1);
 
-        verify(outboxRepository).deleteByJobId(job.getId());
-        verify(ingestJobRepository).delete(job);
-        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.FAILED);
-        assertThat(reservation.getStatus()).isEqualTo(UploadQuotaReservationStatus.RELEASED);
+        verify(intentCleanup).complete(claim, "Upload attempt expired after object cleanup");
+        verify(outboxRepository, never()).deleteByJobId(job.getId());
+        verify(ingestJobRepository, never()).delete(job);
     }
 
     @Test
@@ -186,7 +190,7 @@ class UploadQuotaReconciliationServiceTest {
         IngestJob job = job(reservation.getKbId(), attemptId);
         job.setStatus(IngestJobStatus.FAILED);
         job.setStage(IngestStage.FAILED);
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
+        when(reservationRepository.findStalePendingAttempts(any(Instant.class), anyInt()))
                 .thenReturn(List.of(reservation));
         when(documentRepository.findById(attemptId)).thenReturn(Optional.of(doc));
         when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(attemptId)).thenReturn(Optional.of(job));
@@ -206,7 +210,7 @@ class UploadQuotaReconciliationServiceTest {
         Document doc = document(reservation.getKbId(), attemptId);
         doc.setImportJobId(UUID.randomUUID());
         doc.setStatus(DocumentStatus.IMPORTING);
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
+        when(reservationRepository.findStalePendingAttempts(any(Instant.class), anyInt()))
                 .thenReturn(List.of(reservation));
         when(documentRepository.findById(attemptId)).thenReturn(Optional.of(doc));
 
@@ -221,9 +225,9 @@ class UploadQuotaReconciliationServiceTest {
     }
 
     @Test
-    void staleClaimQueryUsesBoundedSkipLockedLeasePredicate() throws Exception {
+    void staleDiscoveryQueryIsBoundedAndDoesNotHoldReservationLocksAcrossCleanup() throws Exception {
         Method method = UploadQuotaReservationRepository.class.getMethod(
-                "findStalePendingAttemptsForUpdate", Instant.class, int.class);
+                "findStalePendingAttempts", Instant.class, int.class);
         Query query = method.getAnnotation(Query.class);
 
         assertThat(query).isNotNull();
@@ -231,7 +235,7 @@ class UploadQuotaReconciliationServiceTest {
         assertThat(query.value().toLowerCase())
                 .contains("attempt_expires_at")
                 .contains("import_job_id")
-                .contains("for update skip locked")
+                .doesNotContain("for update")
                 .contains("limit");
     }
 
@@ -244,7 +248,8 @@ class UploadQuotaReconciliationServiceTest {
                 ingestJobRepository,
                 outboxRepository,
                 minioStorageService,
-                properties);
+                properties,
+                intentCleanup);
     }
 
     private static UploadQuotaReservation pendingReservation(UUID attemptId) {

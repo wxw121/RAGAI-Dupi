@@ -18,6 +18,7 @@ const documentApi = vi.hoisted(() => ({
   deleteDocument: vi.fn(),
   getDocumentIndexDetail: vi.fn(),
   getIngestJob: vi.fn(),
+  getUploadQuota: vi.fn(),
   listDocuments: vi.fn(),
   uploadDocuments: vi.fn(),
 }))
@@ -54,6 +55,7 @@ describe('KbDetailPage', () => {
     root = null
     container = null
     vi.clearAllMocks()
+    vi.useRealTimers()
   })
 
   it('updates the knowledge base retrieval profile from settings', async () => {
@@ -155,6 +157,45 @@ describe('KbDetailPage', () => {
       .map((badge) => badge.textContent?.trim())
     expect(tabBadges).toEqual(['5', '3'])
     expect(chatSessionApi.listChatSessions).toHaveBeenCalledWith('kb-1')
+  })
+
+  it('polls an initial upload intent until it becomes a failed durable job', async () => {
+    vi.useFakeTimers()
+    api.getKnowledgeBase.mockResolvedValue({
+      id: 'kb-1', name: 'Slow upload KB', retrievalProfile: 'CLASSIC', embeddingConfigCurrent: true,
+    })
+    api.listOpsMetadata.mockResolvedValue({ guardrails: null })
+    api.listKnowledgeBaseVectorCleanupTasks.mockResolvedValue([])
+    chatSessionApi.listChatSessions.mockResolvedValue([])
+    documentApi.getUploadQuota.mockResolvedValue(null)
+    documentApi.listDocuments
+      .mockResolvedValueOnce([{ id: 'doc-1', status: 'UPLOADING' }])
+      .mockResolvedValueOnce([{ id: 'doc-1', status: 'FAILED' }])
+    api.listIngestJobs
+      .mockResolvedValueOnce([{ id: 'job-1', docId: 'doc-1', status: 'UPLOAD_INTENT', stage: 'UPLOAD_PENDING' }])
+      .mockResolvedValueOnce([{ id: 'job-1', docId: 'doc-1', status: 'FAILED', stage: 'FAILED' }])
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(<KbDetailPage />)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    const reindexButton = Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('重建索引'))
+    expect(reindexButton?.disabled).toBe(true)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000)
+    })
+
+    expect(documentApi.listDocuments).toHaveBeenCalledTimes(2)
+    expect(api.listIngestJobs).toHaveBeenCalledTimes(2)
+    expect(reindexButton?.disabled).toBe(false)
   })
 })
 

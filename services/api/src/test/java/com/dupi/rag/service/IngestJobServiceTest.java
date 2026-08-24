@@ -478,6 +478,32 @@ class IngestJobServiceTest {
     }
 
     @Test
+    void cancelRejectsUploadIntentWithoutHidingItFromActivityProbe() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setStatus(IngestJobStatus.UPLOAD_INTENT);
+        job.setStage(IngestStage.UPLOAD_PENDING);
+        Document doc = doc(kbId, docId);
+        doc.setStatus(DocumentStatus.UPLOADING);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+
+        assertThatThrownBy(() -> service().cancelForKnowledgeBase(kbId, jobId))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
+                .hasMessageContaining("upload");
+
+        assertThat(job.getStatus()).isEqualTo(IngestJobStatus.UPLOAD_INTENT);
+        assertThat(job.getStage()).isEqualTo(IngestStage.UPLOAD_PENDING);
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.UPLOADING);
+        verify(ingestJobRepository, never()).save(any());
+        verify(documentRepository, never()).save(any());
+        verify(ingestOutboxService, never()).cancelPendingForJob(any(), anyString());
+    }
+
+    @Test
     void retryLocksJobAndRejectsNonTerminalExecution() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
@@ -1057,6 +1083,24 @@ class IngestJobServiceTest {
                 eq(kbId),
                 contains("2 document")
         );
+    }
+
+    @Test
+    void reindexRejectsUploadingDocumentBeforeResetOrOutboxPublication() {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
+        Document uploading = doc(kbId, UUID.randomUUID());
+        uploading.setStatus(DocumentStatus.UPLOADING);
+        when(profileIndexStateService.lockForReindex(kbId, "default", "new", 256)).thenReturn(kb);
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(uploading));
+
+        assertThatThrownBy(() -> service().reindexKnowledgeBase(kbId, "new", 256))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
+                .hasMessageContaining("upload");
+
+        verify(profileIndexStateService, never()).resetForReindex(any(), anyList());
+        verify(ingestJobRepository, never()).save(any());
+        verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
     }
 
     @Test

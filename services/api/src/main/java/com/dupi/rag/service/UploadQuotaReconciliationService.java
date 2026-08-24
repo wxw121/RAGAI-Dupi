@@ -18,7 +18,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
@@ -35,9 +34,9 @@ public class UploadQuotaReconciliationService {
     private final IngestOutboxEventRepository outboxRepository;
     private final MinioStorageService minioStorageService;
     private final UploadQuotaProperties properties;
+    private final UploadIntentCleanupService intentCleanup;
 
     @Scheduled(cron = "${dupi.upload-quota.reconciliation-cron:0 */5 * * * *}")
-    @Transactional
     public void reconcileStalePendingReservationsOnSchedule() {
         int reconciled = reconcileStalePendingReservationsInternal();
         if (reconciled > 0) {
@@ -45,7 +44,6 @@ public class UploadQuotaReconciliationService {
         }
     }
 
-    @Transactional
     public int reconcileStalePendingReservations() {
         return reconcileStalePendingReservationsInternal();
     }
@@ -53,7 +51,7 @@ public class UploadQuotaReconciliationService {
     private int reconcileStalePendingReservationsInternal() {
         int limit = Math.max(1, properties.getReconciliationBatchSize());
         List<UploadQuotaReservation> reservations = reservationRepository
-                .findStalePendingAttemptsForUpdate(Instant.now(), limit);
+                .findStalePendingAttempts(Instant.now(), limit);
         int reconciled = 0;
         for (UploadQuotaReservation reservation : reservations) {
             if (reservation.getAttemptId() == null
@@ -79,6 +77,22 @@ public class UploadQuotaReconciliationService {
             return false;
         }
         IngestJob job = ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(doc.getId()).orElse(null);
+        if (job != null && job.getStatus() == IngestJobStatus.UPLOAD_INTENT) {
+            UploadIntentCleanupDecision decision = intentCleanup.claim(reservation, Instant.now());
+            if (decision.state() == UploadIntentCleanupDecision.State.PUBLISHED) {
+                commit(reservation, doc);
+                return true;
+            }
+            if (decision.state() != UploadIntentCleanupDecision.State.CLAIMED) {
+                return false;
+            }
+            if (!cleanupObject(decision.claim().objectKey(), reservation)) {
+                return false;
+            }
+            intentCleanup.complete(decision.claim(),
+                    "Upload attempt expired after object cleanup");
+            return true;
+        }
         if (job != null && hasPublishedOutbox(job, doc)) {
             commit(reservation, doc);
             return true;
@@ -114,7 +128,10 @@ public class UploadQuotaReconciliationService {
     }
 
     private boolean cleanupObject(Document doc, UploadQuotaReservation reservation) {
-        String objectKey = doc.getObjectKey();
+        return cleanupObject(doc.getObjectKey(), reservation);
+    }
+
+    private boolean cleanupObject(String objectKey, UploadQuotaReservation reservation) {
         if (objectKey == null || objectKey.isBlank()) {
             return true;
         }

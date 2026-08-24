@@ -278,6 +278,7 @@ public class IngestJobService {
         }
         Document doc = documentRepository.findById(job.getDocId())
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
+        UploadIntentLifecyclePolicy.requireJobCancellationAllowed(job);
         if (job.getStatus() == IngestJobStatus.PENDING) {
             job.setStatus(IngestJobStatus.CANCELLED);
             job.setStage(IngestStage.CANCELLED);
@@ -363,6 +364,7 @@ public class IngestJobService {
         KnowledgeBase kb = profileIndexStateService.lockForReindex(
                 kbId, TenantContext.getTenantId(), embeddingModel, embeddingDimension);
         List<Document> documents = documentRepository.findByKbIdOrderByCreatedAtDesc(kbId);
+        UploadIntentLifecyclePolicy.requireReindexAllowed(documents);
         profileIndexStateService.resetForReindex(kb, documents);
         vectorCleanupTaskService.completePendingProfileKnowledgeBase(kbId);
         List<IngestJobResponse> responses = documents.stream()

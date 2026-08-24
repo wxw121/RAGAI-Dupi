@@ -144,14 +144,14 @@ public class DocumentService {
                 .updatedAt(now)
                 .build();
         boolean intentPrepared = false;
-        boolean objectUploaded = false;
+        boolean objectWriteAttempted = false;
         DocumentResponse response;
         try {
             uploadIntents.prepare(TenantContext.getTenantId(), doc, job);
             intentPrepared = true;
             uploadQuotaService.refreshAttemptLease(reservation);
+            objectWriteAttempted = true;
             minioStorageService.upload(objectKey, file.getInputStream(), file.getSize(), doc.getMimeType());
-            objectUploaded = true;
             uploadQuotaService.refreshAttemptLease(reservation);
 
             DocumentUploadPublication publication = uploadIntents.publish(
@@ -161,14 +161,25 @@ public class DocumentService {
 
             response = toResponse(doc, job);
         } catch (Exception e) {
-            if (objectUploaded) {
+            if (objectWriteAttempted && intentPrepared) {
                 try {
-                    minioStorageService.delete(objectKey);
-                } catch (Exception objectCleanupFailure) {
-                    if (objectCleanupFailure != e) {
-                        e.addSuppressed(objectCleanupFailure);
+                    DocumentUploadPublicationResolution resolution = uploadIntents.reconcilePublication(
+                            TenantContext.getTenantId(), doc, job);
+                    if (resolution.isPublished()) {
+                        doc = resolution.document();
+                        job = resolution.job();
+                        response = toResponse(doc, job);
+                        auditLogService.recordSuccess(
+                                "DOCUMENT_UPLOAD", "DOCUMENT", doc.getId(),
+                                "Uploaded document " + doc.getFileName());
+                        return response;
+                    }
+                } catch (Exception reconciliationFailure) {
+                    if (reconciliationFailure != e) {
+                        e.addSuppressed(reconciliationFailure);
                     }
                 }
+                throw uploadFailure(e);
             }
             if (intentPrepared) {
                 try {
@@ -186,16 +197,7 @@ public class DocumentService {
                     e.addSuppressed(releaseFailure);
                 }
             }
-            if (e instanceof OperationConflictException conflict) {
-                throw conflict;
-            }
-            if (e instanceof ResourceNotFoundException notFound) {
-                throw notFound;
-            }
-            if (e.getMessage() != null && e.getMessage().contains("database down")) {
-                throw new IllegalStateException(e.getMessage(), e);
-            }
-            throw new IllegalStateException("Upload failed", e);
+            throw uploadFailure(e);
         }
         auditLogService.recordSuccess(
                 "DOCUMENT_UPLOAD",
@@ -204,6 +206,19 @@ public class DocumentService {
                 "Uploaded document " + doc.getFileName()
         );
         return response;
+    }
+
+    private RuntimeException uploadFailure(Exception error) {
+        if (error instanceof OperationConflictException conflict) {
+            return conflict;
+        }
+        if (error instanceof ResourceNotFoundException notFound) {
+            return notFound;
+        }
+        if (error.getMessage() != null && error.getMessage().contains("database down")) {
+            return new IllegalStateException(error.getMessage(), error);
+        }
+        return new IllegalStateException("Upload failed", error);
     }
 
     String fileFingerprint(MultipartFile file) {
@@ -258,8 +273,9 @@ public class DocumentService {
     @Transactional
     public void delete(UUID kbId, UUID docId) {
         maintenanceService.assertMutationAllowed(kbId);
-        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
+        KnowledgeBase kb = knowledgeBaseService.findForUpdateOrThrow(kbId);
         Document doc = findOrThrow(kbId, docId);
+        UploadIntentLifecyclePolicy.requireDocumentMutationAllowed(doc);
         documentTombstoneService.recordDeleted(doc);
         vectorCleanupTaskService.enqueueProfileDocument(docId);
         vectorCleanupTaskService.enqueueLegacyDocument(docId);

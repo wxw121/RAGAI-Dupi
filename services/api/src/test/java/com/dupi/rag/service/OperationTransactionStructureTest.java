@@ -97,6 +97,56 @@ class OperationTransactionStructureTest {
     }
 
     @Test
+    void lostCommitAcknowledgementIsReconciledAsPublishedBeforeAnyCompensation() {
+        var knowledgeBases = mock(com.dupi.rag.repository.KnowledgeBaseRepository.class);
+        var documents = mock(com.dupi.rag.repository.DocumentRepository.class);
+        var jobs = mock(com.dupi.rag.repository.IngestJobRepository.class);
+        var quota = mock(UploadQuotaService.class);
+        var outbox = mock(IngestOutboxService.class);
+        TrackingTransactionManager transactions = new TrackingTransactionManager();
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).tenantId("tenant-a")
+                .lifecycleStatus(KnowledgeBaseLifecycleStatus.READY).build();
+        Document document = Document.builder().id(UUID.randomUUID()).kbId(kbId)
+                .objectKey("objects/a.md").fileName("a.md").mimeType("text/markdown")
+                .status(DocumentStatus.UPLOADING).build();
+        IngestJob job = IngestJob.builder().id(UUID.randomUUID()).kbId(kbId).docId(document.getId())
+                .status(IngestJobStatus.UPLOAD_INTENT).stage(IngestStage.UPLOAD_PENDING).build();
+        UploadQuotaReservation reservation = UploadQuotaReservation.builder().id(UUID.randomUUID()).build();
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a"))
+                .thenReturn(Optional.of(kb));
+        when(jobs.findByIdForUpdate(job.getId())).thenReturn(Optional.of(job));
+        when(documents.findById(document.getId())).thenReturn(Optional.of(document));
+        when(outbox.hasDurableRecord(job.getId())).thenReturn(true);
+
+        try (AnnotationConfigApplicationContext spring = transactionalContext(transactions)) {
+            spring.registerBean(com.dupi.rag.repository.KnowledgeBaseRepository.class, () -> knowledgeBases);
+            spring.registerBean(com.dupi.rag.repository.DocumentRepository.class, () -> documents);
+            spring.registerBean(com.dupi.rag.repository.IngestJobRepository.class, () -> jobs);
+            spring.registerBean(UploadQuotaService.class, () -> quota);
+            spring.registerBean(IngestOutboxService.class, () -> outbox);
+            spring.registerBean(DocumentUploadIntentService.class,
+                    () -> new DocumentUploadIntentService(knowledgeBases, documents, jobs, quota, outbox));
+            spring.refresh();
+
+            DocumentUploadIntentService publisher = spring.getBean(DocumentUploadIntentService.class);
+            transactions.loseNextCommitAcknowledgement();
+            assertThatThrownBy(() -> publisher.publish("tenant-a", document, job, reservation))
+                    .isInstanceOf(org.springframework.transaction.TransactionSystemException.class)
+                    .hasMessageContaining("acknowledgement");
+
+            DocumentUploadPublicationResolution resolution = publisher.reconcilePublication(
+                    "tenant-a", document, job);
+            assertThat(resolution.isPublished()).isTrue();
+            assertThat(document.getStatus()).isEqualTo(DocumentStatus.PENDING);
+            assertThat(job.getStatus()).isEqualTo(IngestJobStatus.PENDING);
+            assertThat(transactions.commits).isEqualTo(2);
+            assertThat(transactions.rollbacks).isZero();
+            verify(outbox, never()).cancelPendingForJob(any(), anyString());
+        }
+    }
+
+    @Test
     void proxiedReindexLocksBeforeMutatingManagedKnowledgeBase() {
         var documents = mock(com.dupi.rag.repository.DocumentRepository.class);
         var knowledgeBases = mock(com.dupi.rag.repository.KnowledgeBaseRepository.class);
@@ -301,6 +351,11 @@ class OperationTransactionStructureTest {
         int begins;
         int commits;
         int rollbacks;
+        boolean loseNextCommitAcknowledgement;
+
+        void loseNextCommitAcknowledgement() {
+            loseNextCommitAcknowledgement = true;
+        }
 
         @Override
         protected Object doGetTransaction() {
@@ -321,6 +376,11 @@ class OperationTransactionStructureTest {
         @Override
         protected void doCommit(DefaultTransactionStatus status) {
             commits++;
+            if (loseNextCommitAcknowledgement) {
+                loseNextCommitAcknowledgement = false;
+                throw new org.springframework.transaction.TransactionSystemException(
+                        "commit acknowledgement lost after durable commit");
+            }
         }
 
         @Override

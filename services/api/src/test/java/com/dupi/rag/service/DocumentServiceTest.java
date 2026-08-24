@@ -295,7 +295,7 @@ class DocumentServiceTest {
     }
 
     @Test
-    void uploadReleasesQuotaReservationWhenMinioUploadFails() {
+    void uploadRetainsIntentWhenObjectWriteOutcomeIsUnknown() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         UploadQuotaReservation reservation = reservation(kbId, docId, "key", 5L);
@@ -304,17 +304,16 @@ class DocumentServiceTest {
                 .thenReturn(reservation);
         doThrow(new IllegalStateException("minio down"))
                 .when(minioStorageService).upload(any(), any(), anyLong(), any());
+        when(uploadIntents.reconcilePublication(anyString(), any(), any()))
+                .thenReturn(DocumentUploadPublicationResolution.retained());
 
         assertThatThrownBy(() -> service().upload(kbId, new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes()), "key"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Upload failed");
 
-        verify(uploadQuotaService).release(reservation, "Upload failed");
+        verify(uploadQuotaService, never()).release(any(), anyString());
+        verify(uploadIntents, never()).fail(any(), any(), any());
         verify(uploadIntents, never()).publish(anyString(), any(), any(), any());
-        ArgumentCaptor<Document> savedDocument = ArgumentCaptor.forClass(Document.class);
-        verify(documentRepository, atLeast(2)).save(savedDocument.capture());
-        assertThat(savedDocument.getAllValues().get(savedDocument.getAllValues().size() - 1)
-                .getQuotaReservationId()).isNull();
     }
 
     @Test
@@ -341,7 +340,7 @@ class DocumentServiceTest {
     }
 
     @Test
-    void uploadDeletesStoredObjectWhenLaterPersistenceFails() {
+    void uploadRetainsStoredObjectAndDurableIntentWhenPublicationOutcomeIsNotVisible() {
         UUID kbId = UUID.randomUUID();
         when(knowledgeBaseService.findOrThrow(kbId))
                 .thenReturn(KnowledgeBase.builder().id(kbId).build());
@@ -352,6 +351,8 @@ class DocumentServiceTest {
                         kbId, invocation.getArgument(1), "key", 5L));
         doThrow(new IllegalStateException("publication database down"))
                 .when(uploadIntents).publish(anyString(), any(), any(), any());
+        when(uploadIntents.reconcilePublication(anyString(), any(), any()))
+                .thenReturn(DocumentUploadPublicationResolution.retained());
 
         assertThatThrownBy(() -> service().upload(
                 kbId,
@@ -360,13 +361,44 @@ class DocumentServiceTest {
                 .isInstanceOf(IllegalStateException.class);
 
         verify(minioStorageService).upload(contains("a.md"), any(), eq(5L), eq("text/markdown"));
-        verify(minioStorageService).delete(contains("a.md"));
-        verify(uploadQuotaService).release(any(UploadQuotaReservation.class), eq("Upload failed"));
+        verify(minioStorageService, never()).delete(anyString());
+        verify(uploadQuotaService, never()).release(any(), anyString());
+        verify(uploadIntents, never()).fail(any(), any(), any());
         verify(uploadIntents).publish(anyString(), any(), any(), any());
     }
 
     @Test
-    void uploadStillReleasesQuotaWhenStoredObjectCleanupFails() {
+    void uploadRetainsObjectWhenPublicationOutcomeCannotBeRead() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId))
+                .thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(uploadQuotaService.reserveForUpload(
+                eq(kbId), any(UUID.class), eq("key"), eq("a.md"),
+                eq("text/markdown"), eq(5L), anyString()))
+                .thenAnswer(invocation -> reservation(
+                        kbId, invocation.getArgument(1), "key", 5L));
+        doThrow(new IllegalStateException("commit acknowledgement unavailable"))
+                .when(uploadIntents).publish(anyString(), any(), any(), any());
+        doThrow(new IllegalStateException("database unavailable"))
+                .when(uploadIntents).reconcilePublication(anyString(), any(), any());
+
+        assertThatThrownBy(() -> service().upload(
+                kbId,
+                new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes()),
+                "key"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Upload failed")
+                .satisfies(error -> assertThat(error.getCause().getSuppressed())
+                        .anySatisfy(suppressed -> assertThat(suppressed.getMessage())
+                                .contains("database unavailable")));
+
+        verify(minioStorageService, never()).delete(anyString());
+        verify(uploadQuotaService, never()).release(any(), anyString());
+        verify(uploadIntents, never()).fail(any(), any(), any());
+    }
+
+    @Test
+    void uploadReplaysSuccessWhenPublicationCommittedButAcknowledgementWasLost() {
         UUID kbId = UUID.randomUUID();
         when(knowledgeBaseService.findOrThrow(kbId))
                 .thenReturn(KnowledgeBase.builder().id(kbId).build());
@@ -377,18 +409,46 @@ class DocumentServiceTest {
                         kbId, invocation.getArgument(1), "key", 5L));
         doThrow(new IllegalStateException("publication database down"))
                 .when(uploadIntents).publish(anyString(), any(), any(), any());
-        doThrow(new IllegalStateException("object cleanup down"))
-                .when(minioStorageService).delete(anyString());
+        when(uploadIntents.reconcilePublication(anyString(), any(), any())).thenAnswer(call -> {
+            Document document = call.getArgument(1);
+            IngestJob job = call.getArgument(2);
+            document.setStatus(DocumentStatus.PENDING);
+            job.setStatus(IngestJobStatus.PENDING);
+            job.setStage(IngestStage.QUEUED);
+            return DocumentUploadPublicationResolution.published(document, job);
+        });
 
-        assertThatThrownBy(() -> service().upload(
+        DocumentResponse response = service().upload(
                 kbId,
                 new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes()),
-                "key"))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("database down");
+                "key");
 
-        verify(minioStorageService).delete(contains("a.md"));
-        verify(uploadQuotaService).release(any(UploadQuotaReservation.class), eq("Upload failed"));
+        assertThat(response.getStatus()).isEqualTo(DocumentStatus.PENDING);
+        assertThat(response.getCurrentJob().getStatus()).isEqualTo(IngestJobStatus.PENDING);
+        verify(minioStorageService, never()).delete(anyString());
+        verify(uploadQuotaService, never()).release(any(), anyString());
+        verify(uploadIntents, never()).fail(any(), any(), any());
+    }
+
+    @Test
+    void deletingUploadingDocumentConflictsBeforeAnyCleanupSideEffect() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
+        Document uploading = doc(kbId, docId);
+        uploading.setStatus(DocumentStatus.UPLOADING);
+        when(knowledgeBaseService.findForUpdateOrThrow(kbId)).thenReturn(kb);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(uploading));
+
+        assertThatThrownBy(() -> service().delete(kbId, docId))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
+                .hasMessageContaining("upload");
+
+        verifyNoInteractions(documentTombstoneService, vectorCleanupTaskService,
+                milvusVectorService, documentAssetService);
+        verify(minioStorageService, never()).delete(anyString());
+        verify(documentRepository, never()).delete(any());
     }
 
     @Test
@@ -456,13 +516,15 @@ class DocumentServiceTest {
     }
 
     @Test
-    void uploadMarksDocumentFailedWhenMinioUploadFails() {
+    void uploadRetainsIntentForDurableCleanupWhenMinioWriteOutcomeIsUnknown() {
         UUID kbId = UUID.randomUUID();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
         when(uploadQuotaService.reserveForUpload(eq(kbId), any(UUID.class), isNull(), eq("a.md"), eq("text/markdown"), eq(5L), anyString()))
                 .thenAnswer(invocation -> reservation(kbId, invocation.getArgument(1), null, 5L));
         doThrow(new IllegalStateException("minio down"))
                 .when(minioStorageService).upload(any(), any(), anyLong(), any());
+        when(uploadIntents.reconcilePublication(anyString(), any(), any()))
+                .thenReturn(DocumentUploadPublicationResolution.retained());
 
         MockMultipartFile file = new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes());
 
@@ -471,9 +533,11 @@ class DocumentServiceTest {
                 .hasMessageContaining("Upload failed");
 
         ArgumentCaptor<Document> captor = ArgumentCaptor.forClass(Document.class);
-        verify(documentRepository, atLeast(2)).save(captor.capture());
-        assertThat(captor.getAllValues().get(captor.getAllValues().size() - 1).getStatus())
-                .isEqualTo(DocumentStatus.FAILED);
+        verify(documentRepository).save(captor.capture());
+        assertThat(captor.getValue().getStatus()).isEqualTo(DocumentStatus.UPLOADING);
+        verify(uploadIntents).reconcilePublication(anyString(), any(), any());
+        verify(uploadIntents, never()).fail(any(), any(), any());
+        verify(uploadQuotaService, never()).release(any(), anyString());
     }
 
     @Test
@@ -590,6 +654,7 @@ class DocumentServiceTest {
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).name("KB").build();
         Document doc = doc(kbId, docId);
         doc.setQuotaReservationId(quotaReservationId);
+        when(knowledgeBaseService.findForUpdateOrThrow(kbId)).thenReturn(kb);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
         when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
         when(retrievalProfileRepository.findByKbIdOrderByVersionDesc(kbId)).thenReturn(List.of(

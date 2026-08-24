@@ -129,6 +129,65 @@ class DocumentUploadIntentServiceTest {
         assertThat(publication.job().getStage()).isEqualTo(IngestStage.QUEUED);
     }
 
+    @Test
+    void reconcileUnknownCommitReturnsFreshPublishedStateWithoutCompensation() {
+        KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
+        DocumentRepository documents = mock(DocumentRepository.class);
+        IngestJobRepository jobs = mock(IngestJobRepository.class);
+        IngestOutboxService outbox = mock(IngestOutboxService.class);
+        UUID kbId = UUID.randomUUID();
+        Document detachedIntent = document(kbId);
+        detachedIntent.setStatus(DocumentStatus.UPLOADING);
+        IngestJob detachedJob = IngestJob.builder().id(UUID.randomUUID()).kbId(kbId)
+                .docId(detachedIntent.getId()).status(IngestJobStatus.UPLOAD_INTENT)
+                .stage(IngestStage.UPLOAD_PENDING).build();
+        Document published = document(kbId);
+        published.setId(detachedIntent.getId());
+        published.setStatus(DocumentStatus.PROCESSING);
+        IngestJob currentJob = IngestJob.builder().id(detachedJob.getId()).kbId(kbId)
+                .docId(published.getId()).status(IngestJobStatus.PENDING).stage(IngestStage.QUEUED).build();
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a"))
+                .thenReturn(Optional.of(KnowledgeBase.builder().id(kbId).build()));
+        when(jobs.findByIdForUpdate(detachedJob.getId())).thenReturn(Optional.of(currentJob));
+        when(documents.findById(detachedIntent.getId())).thenReturn(Optional.of(published));
+        when(outbox.hasDurableRecord(currentJob.getId())).thenReturn(true);
+
+        DocumentUploadPublicationResolution resolution = new DocumentUploadIntentService(
+                knowledgeBases, documents, jobs, mock(UploadQuotaService.class), outbox)
+                .reconcilePublication("tenant-a", detachedIntent, detachedJob);
+
+        assertThat(resolution.isPublished()).isTrue();
+        assertThat(resolution.document()).isSameAs(published);
+        assertThat(resolution.job()).isSameAs(currentJob);
+        verify(outbox, never()).cancelPendingForJob(any(), anyString());
+    }
+
+    @Test
+    void reconcileRolledBackPublicationRetainsExactIntentForLeaseCleanup() {
+        KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
+        DocumentRepository documents = mock(DocumentRepository.class);
+        IngestJobRepository jobs = mock(IngestJobRepository.class);
+        IngestOutboxService outbox = mock(IngestOutboxService.class);
+        UUID kbId = UUID.randomUUID();
+        Document intent = document(kbId);
+        intent.setStatus(DocumentStatus.UPLOADING);
+        IngestJob job = IngestJob.builder().id(UUID.randomUUID()).kbId(kbId).docId(intent.getId())
+                .status(IngestJobStatus.UPLOAD_INTENT).stage(IngestStage.UPLOAD_PENDING).build();
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a"))
+                .thenReturn(Optional.of(KnowledgeBase.builder().id(kbId).build()));
+        when(jobs.findByIdForUpdate(job.getId())).thenReturn(Optional.of(job));
+        when(documents.findById(intent.getId())).thenReturn(Optional.of(intent));
+
+        DocumentUploadPublicationResolution resolution = new DocumentUploadIntentService(
+                knowledgeBases, documents, jobs, mock(UploadQuotaService.class), outbox)
+                .reconcilePublication("tenant-a", intent, job);
+
+        assertThat(resolution.isPublished()).isFalse();
+        assertThat(intent.getStatus()).isEqualTo(DocumentStatus.UPLOADING);
+        assertThat(job.getStatus()).isEqualTo(IngestJobStatus.UPLOAD_INTENT);
+        verifyNoInteractions(outbox);
+    }
+
     private Document document(UUID kbId) {
         UUID id = UUID.randomUUID();
         return Document.builder().id(id).kbId(kbId).objectKey(kbId + "/" + id + "/a.md")

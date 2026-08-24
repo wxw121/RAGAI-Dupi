@@ -83,7 +83,7 @@ export function DocTable({
                         <Button
                           variant="ghost"
                           size="sm"
-                          disabled={deletingId === doc.id}
+                          disabled={deletingId === doc.id || doc.status === 'UPLOADING'}
                           onClick={() => onDelete(doc)}
                           aria-label={`删除 ${doc.fileName}`}
                         >

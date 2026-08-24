@@ -205,6 +205,38 @@ public class UploadQuotaService {
         });
     }
 
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void claimCleanupInCurrentTransaction(
+            UploadQuotaReservation reservation, UUID documentId, String owner, Instant expiresAt) {
+        UploadQuotaReservation current = reservationRepository.findById(reservation.getId())
+                .orElseThrow(() -> new UploadIdempotencyConflictException("Upload cleanup reservation is missing"));
+        if (current.getStatus() != UploadQuotaReservationStatus.PENDING
+                || !documentId.equals(current.getAttemptId())) {
+            throw new UploadIdempotencyConflictException("Upload cleanup no longer owns its reservation");
+        }
+        current.setAttemptExpiresAt(expiresAt);
+        current.setReleaseReason(owner);
+        reservationRepository.save(current);
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void releaseCleanupInCurrentTransaction(
+            UploadQuotaReservation reservation, UUID documentId, String owner, String reason) {
+        UploadQuotaReservation current = reservationRepository.findById(reservation.getId())
+                .orElseThrow(() -> new UploadIdempotencyConflictException("Upload cleanup reservation is missing"));
+        if (current.getStatus() != UploadQuotaReservationStatus.PENDING
+                || !documentId.equals(current.getAttemptId())
+                || !owner.equals(current.getReleaseReason())) {
+            throw new UploadIdempotencyConflictException("Upload cleanup claim is stale");
+        }
+        current.setStatus(UploadQuotaReservationStatus.RELEASED);
+        current.setDocId(null);
+        current.setAttemptId(null);
+        current.setAttemptExpiresAt(null);
+        current.setReleaseReason(reason);
+        reservationRepository.save(current);
+    }
+
     /** Joins a fenced domain transaction; Markdown import publication must not cross REQUIRES_NEW. */
     @Transactional(propagation = Propagation.MANDATORY)
     public UploadQuotaReservation reserveForImport(UUID reservationId, String tenantId, String userId,

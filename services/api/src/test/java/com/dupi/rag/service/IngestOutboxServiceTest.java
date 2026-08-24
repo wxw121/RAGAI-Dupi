@@ -198,6 +198,33 @@ class IngestOutboxServiceTest {
     }
 
     @Test
+    void cleanupClaimWinnerIsCancelledByDispatcherWithoutExternalEnqueue() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestOutboxEvent event = event(kbId, docId, jobId);
+        IngestJob cleanup = job(kbId, docId, jobId);
+        cleanup.setStatus(IngestJobStatus.UPLOAD_INTENT);
+        cleanup.setStage(IngestStage.UPLOAD_CLEANUP);
+        cleanup.setClaimedBy("upload-cleanup:owner");
+        cleanup.setLeaseExpiresAt(Instant.now().plusSeconds(30));
+        Document uploading = doc(kbId, docId);
+        uploading.setStatus(DocumentStatus.UPLOADING);
+        when(outboxRepository.findTop50ByStatusInAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
+                eq(List.of(IngestOutboxStatus.PENDING, IngestOutboxStatus.FAILED)), any(Instant.class)))
+                .thenReturn(List.of(event));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(cleanup));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(uploading));
+
+        assertThat(service().dispatchPending()).isZero();
+
+        assertThat(event.getStatus()).isEqualTo(IngestOutboxStatus.CANCELLED);
+        assertThat(cleanup.getStage()).isEqualTo(IngestStage.UPLOAD_CLEANUP);
+        verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
+        verify(ingestJobRepository).findByIdForUpdate(jobId);
+    }
+
+    @Test
     void dispatchDueEventsUsesExceptionClassNameWhenRedisFailureMessageIsBlank() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();

@@ -98,4 +98,32 @@ describe('DocTable', () => {
     })
     expect(onInspect).toHaveBeenCalledWith(doc)
   })
+
+  it('keeps upload intent visible but disables document deletion', () => {
+    const onDelete = vi.fn()
+    const doc: Document = {
+      id: 'doc-uploading',
+      kbId: 'kb-1',
+      fileName: 'slow.md',
+      mimeType: 'text/markdown',
+      fileSize: 1024,
+      status: 'UPLOADING',
+      errorMessage: null,
+      createdAt: '2026-07-12T00:00:00Z',
+      updatedAt: '2026-07-12T00:00:00Z',
+    }
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    act(() => {
+      root?.render(<DocTable documents={[doc]} jobStages={{}} onDelete={onDelete} />)
+    })
+
+    const deleteButton = container.querySelector<HTMLButtonElement>('[aria-label="删除 slow.md"]')
+    expect(deleteButton?.disabled).toBe(true)
+    act(() => deleteButton?.click())
+    expect(onDelete).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('UPLOADING')
+  })
 })

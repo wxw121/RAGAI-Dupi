@@ -207,10 +207,11 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
 
   useEffect(() => {
     const hasPending = documents.some(
-      (d) => d.status === 'PENDING' || d.status === 'PROCESSING',
+      (d) => d.status === 'UPLOADING' || d.status === 'PENDING' || d.status === 'PROCESSING',
     )
     const hasRunningJob = ingestJobs.some(
-      (job) => job.status === 'PENDING'
+      (job) => job.status === 'UPLOAD_INTENT'
+        || job.status === 'PENDING'
         || job.status === 'PROCESSING'
         || job.status === 'CANCEL_REQUESTED',
     )
@@ -547,7 +548,8 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
               <Button
                 variant={!kb.embeddingConfigCurrent ? 'default' : 'outline'}
                 size="sm"
-                disabled={reindexing || documents.length === 0}
+                disabled={reindexing || documents.length === 0
+                  || documents.some((document) => document.status === 'UPLOADING')}
                 onClick={handleReindex}
               >
                 {reindexing ? (
