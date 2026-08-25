@@ -18,7 +18,7 @@ vi.mock('@/components/Toast', () => ({
 }))
 vi.mock('@/components/OperationProgress', () => ({
   OperationProgress: ({ initialJob, onCompleted }: { initialJob: { id: string }; onCompleted: () => void }) => (
-    <button data-testid="operation-progress" onClick={onCompleted}>{initialJob.id}</button>
+    <button data-testid="operation-progress" onClick={() => { void Promise.resolve(onCompleted()).catch(() => undefined) }}>{initialJob.id}</button>
   ),
 }))
 vi.mock('react-router-dom', () => ({ useNavigate: () => navigation.navigate }))
@@ -114,7 +114,7 @@ describe('KbListPage', () => {
         { id: 'kb-1', name: '测试一', createdAt: '2026-01-01', chunkSize: 512, chunkOverlap: 64, topK: 5 },
         { id: 'kb-2', name: '测试二', createdAt: '2026-01-01', chunkSize: 512, chunkOverlap: 64, topK: 5 },
       ])
-      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('refresh unavailable'))
     api.deleteKnowledgeBase
       .mockResolvedValueOnce(operationJob('delete-job-1', 'kb-1'))
       .mockResolvedValueOnce(operationJob('delete-job-2', 'kb-2'))
@@ -155,6 +155,14 @@ describe('KbListPage', () => {
     expect(container.textContent).toContain('delete-job-1')
     expect(container.textContent).toContain('delete-job-2')
     expect(api.listKnowledgeBases).toHaveBeenCalledTimes(1)
+    const deletingCheckboxes = Array.from(container.querySelectorAll<HTMLInputElement>('input[aria-label^="选择知识库"]'))
+    expect(deletingCheckboxes.every((checkbox) => checkbox.disabled)).toBe(true)
+    await act(async () => {
+      selectAll?.click()
+      batchButton?.click()
+      await Promise.resolve()
+    })
+    expect(api.deleteKnowledgeBase).toHaveBeenCalledTimes(2)
     await act(async () => {
       Array.from(container!.querySelectorAll<HTMLElement>('.group')).find((card) => card.textContent?.includes('测试一'))?.click()
     })
@@ -163,8 +171,11 @@ describe('KbListPage', () => {
     await act(async () => {
       container!.querySelectorAll<HTMLButtonElement>('[data-testid="operation-progress"]')[0]?.click()
       await Promise.resolve()
+      await Promise.resolve()
     })
     expect(api.listKnowledgeBases).toHaveBeenCalledTimes(2)
+    expect(container.textContent).toContain('delete-job-1')
+    expect(toast.showSuccess).not.toHaveBeenCalledWith('知识库已删除')
   })
 })
 

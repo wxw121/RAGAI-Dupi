@@ -392,6 +392,47 @@ describe('RagEvalPanel', () => {
     }))
   })
 
+  it('normalizes primary plus additional sources into one ordered multi-document id shape', async () => {
+    api.getRagQualityPolicy.mockResolvedValue(null)
+    api.listRagEvalCases.mockResolvedValue([])
+    api.listRagEvalRuns.mockResolvedValue([])
+    api.listRetrievalProfiles.mockResolvedValue([])
+    documentApi.listDocuments.mockResolvedValue([
+      { id: 'doc-1', kbId: 'kb-1', fileName: 'guide.md', status: 'COMPLETED' },
+      { id: 'doc-2', kbId: 'kb-1', fileName: 'guide.md', status: 'COMPLETED' },
+    ])
+    api.createRagEvalCase.mockResolvedValue({ id: 'case-1' })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    await act(async () => { root?.render(<RagEvalPanel kbId="kb-1" />); await Promise.resolve() })
+
+    await act(async () => {
+      setInput('caseKey', 'multi-source')
+      setInput('query', 'Compare guides')
+      setInput('minHits', '2')
+      setSelect('category', 'MULTI_DOCUMENT')
+      setSelect('expectedDocumentId', 'doc-1')
+    })
+    await act(async () => {
+      const additional = container?.querySelector<HTMLSelectElement>('select[name="expectedDocumentIds"]')
+      if (!additional) throw new Error('Missing additional document selector')
+      Array.from(additional.options).forEach((option) => { option.selected = option.value === 'doc-2' })
+      additional.dispatchEvent(new Event('change', { bubbles: true }))
+      setInput('expectedFileName', 'spoofed.md')
+      setInput('expectedFileNames', 'also-spoofed.md')
+    })
+    await act(async () => { button('保存用例')?.click(); await Promise.resolve() })
+
+    const request = api.createRagEvalCase.mock.calls[0][1]
+    expect(request).not.toHaveProperty('expectedDocumentId')
+    expect(request).not.toHaveProperty('expectedFileName')
+    expect(request).toEqual(expect.objectContaining({
+      expectedDocumentIds: ['doc-1', 'doc-2'],
+      expectedFileNames: ['guide.md', 'guide.md'],
+    }))
+  })
+
   it('runs a selected retrieval configuration without experimental overrides', async () => {
     api.getRagQualityPolicy.mockResolvedValue(null)
     api.listRagEvalCases.mockResolvedValue([

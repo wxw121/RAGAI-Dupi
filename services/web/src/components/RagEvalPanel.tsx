@@ -443,17 +443,35 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
   const saveCase = async () => {
     if (!canSave) return
     setSaving(true)
+    const selectedDocumentIds = Array.from(new Set([
+      form.expectedDocumentId,
+      ...(form.expectedDocumentIds ?? []),
+    ].filter((id): id is string => Boolean(id))))
+    const selectedDocuments = selectedDocumentIds
+      .map((id) => sourceDocuments.find((document) => document.id === id))
+      .filter((document): document is Document => Boolean(document))
+    if (selectedDocuments.length !== selectedDocumentIds.length) {
+      setSaving(false)
+      showError('所选来源文档已不可用，请重新选择')
+      return
+    }
     const request: RagEvalCaseRequest = {
       caseKey: form.caseKey.trim(),
       query: form.query.trim(),
       minHits: Math.max(0, Number(form.minHits) || 0),
       topK: Math.max(1, Number(form.topK) || 5),
       category: form.category ?? 'REAL_QUERY',
-      expectedFileName: form.expectedFileName?.trim() || undefined,
-      expectedFileNames: expectedFileNamesInput.split(',').map((fileName) => fileName.trim()).filter(Boolean),
       mustContainAny: mustContainAnyInput.split(',').map((token) => token.trim()).filter(Boolean),
-      ...(form.expectedDocumentId ? { expectedDocumentId: form.expectedDocumentId } : {}),
-      ...(form.expectedDocumentIds?.length ? { expectedDocumentIds: form.expectedDocumentIds } : {}),
+      ...(selectedDocuments.length === 1 ? {
+        expectedDocumentId: selectedDocuments[0].id,
+        expectedFileName: selectedDocuments[0].fileName,
+      } : selectedDocuments.length > 1 ? {
+        expectedDocumentIds: selectedDocuments.map((document) => document.id),
+        expectedFileNames: selectedDocuments.map((document) => document.fileName),
+      } : {
+        expectedFileName: form.expectedFileName?.trim() || undefined,
+        expectedFileNames: expectedFileNamesInput.split(',').map((fileName) => fileName.trim()).filter(Boolean),
+      }),
     }
     try {
       const saved = editingId
@@ -1040,7 +1058,7 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
             </label>
             <label className="space-y-1 text-xs text-muted-foreground">
               <span>主要来源文件（可选）</span>
-              <Input name="expectedFileName" value={form.expectedFileName ?? ''} onChange={(event) => updateForm('expectedFileName', event.target.value)} placeholder="例如：教程.md" />
+              <Input name="expectedFileName" readOnly={Boolean(form.expectedDocumentId)} value={form.expectedFileName ?? ''} onChange={(event) => updateForm('expectedFileName', event.target.value)} placeholder="例如：教程.md" />
             </label>
             <label className="space-y-1 text-xs text-muted-foreground">
               <span>主要来源文档（稳定 ID）</span>
@@ -1063,7 +1081,7 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
             </label>
             <label className="space-y-1 text-xs text-muted-foreground md:col-span-2">
               <span>附加来源文件（可选）</span>
-              <Input name="expectedFileNames" value={expectedFileNamesInput} onChange={(event) => setExpectedFileNamesInput(normalizeCommaSeparatedInput(event.target.value))} placeholder="多个文件请用逗号分隔" />
+              <Input name="expectedFileNames" readOnly={Boolean(form.expectedDocumentIds?.length)} value={expectedFileNamesInput} onChange={(event) => setExpectedFileNamesInput(normalizeCommaSeparatedInput(event.target.value))} placeholder="多个文件请用逗号分隔" />
             </label>
             <label className="space-y-1 text-xs text-muted-foreground md:col-span-2">
               <span>附加来源文档（稳定 ID，可多选）</span>

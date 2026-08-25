@@ -32,14 +32,16 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
   const [retrievalMode, setRetrievalMode] = useState<'VECTOR' | 'HYBRID'>('VECTOR')
   const { showError, showSuccess } = useToast()
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  const load = useCallback(async (showLoading = true) => {
+    if (showLoading) setLoading(true)
     try {
       setKbs(await listKnowledgeBases())
+      return true
     } catch (e) {
       showError(e instanceof Error ? e.message : '加载失败')
+      return false
     } finally {
-      setLoading(false)
+      if (showLoading) setLoading(false)
     }
   }, [showError])
 
@@ -52,6 +54,7 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
     if (!query) return kbs
     return kbs.filter((kb) => kb.name.toLocaleLowerCase().includes(query))
   }, [kbs, searchQuery])
+  const selectableFilteredKbs = filteredKbs.filter((kb) => !deleteOperations[kb.id])
 
   const handleCreate = async () => {
     if (!name.trim()) return
@@ -86,6 +89,11 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
     try {
       const job = await deleteKnowledgeBase(kb.id)
       setDeleteOperations((current) => ({ ...current, [kb.id]: job }))
+      setSelectedIds((current) => {
+        const next = new Set(current)
+        next.delete(kb.id)
+        return next
+      })
       showSuccess('删除任务已提交')
     } catch (e) {
       showError(e instanceof Error ? e.message : '删除失败')
@@ -93,6 +101,7 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
   }
 
   const toggleSelection = (kbId: string) => {
+    if (deleteOperations[kbId]) return
     setSelectedIds((current) => {
       const next = new Set(current)
       if (next.has(kbId)) next.delete(kbId)
@@ -102,12 +111,13 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
   }
 
   const toggleSelectAll = () => {
-    const allFilteredSelected = filteredKbs.every((kb) => selectedIds.has(kb.id))
-    setSelectedIds(allFilteredSelected ? new Set() : new Set(filteredKbs.map((kb) => kb.id)))
+    const allFilteredSelected = selectableFilteredKbs.length > 0
+      && selectableFilteredKbs.every((kb) => selectedIds.has(kb.id))
+    setSelectedIds(allFilteredSelected ? new Set() : new Set(selectableFilteredKbs.map((kb) => kb.id)))
   }
 
   const handleBatchDelete = async () => {
-    const selected = kbs.filter((kb) => selectedIds.has(kb.id))
+    const selected = kbs.filter((kb) => selectedIds.has(kb.id) && !deleteOperations[kb.id])
     if (selected.length === 0) return
 
     setBatchConfirmOpen(false)
@@ -136,7 +146,7 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
       next.delete(kbId)
       return next
     })
-    await load()
+    if (!await load(false)) throw new Error('Knowledge base refresh failed')
     setDeleteOperations((current) => {
       const next = { ...current }
       delete next[kbId]
@@ -254,8 +264,9 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
               <label className="mb-3 inline-flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
                 <input
                   type="checkbox"
-                  checked={filteredKbs.every((kb) => selectedIds.has(kb.id))}
+                  checked={selectableFilteredKbs.length > 0 && selectableFilteredKbs.every((kb) => selectedIds.has(kb.id))}
                   onChange={toggleSelectAll}
+                  disabled={selectableFilteredKbs.length === 0}
                   className="h-4 w-4 rounded border-input accent-primary"
                 />
                 全选
@@ -275,6 +286,7 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
                     type="checkbox"
                     checked={selectedIds.has(kb.id)}
                     onChange={() => toggleSelection(kb.id)}
+                    disabled={Boolean(deleteOperations[kb.id])}
                     aria-label={`选择知识库 ${kb.name}`}
                     className="h-4 w-4 rounded border-input accent-primary"
                   />

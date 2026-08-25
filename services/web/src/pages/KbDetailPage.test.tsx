@@ -39,13 +39,13 @@ vi.mock('@/components/DocTable', () => ({ DocTable: () => null }))
 vi.mock('@/components/DocumentIndexDetailPanel', () => ({ DocumentIndexDetailPanel: () => null }))
 vi.mock('@/components/RagEvalPanel', () => ({ RagEvalPanel: () => null }))
 vi.mock('@/components/UploadZone', () => ({
-  UploadZone: ({ onPackageUpload }: { onPackageUpload?: (file: File) => Promise<void> }) => (
-    <button data-testid="markdown-package" onClick={() => void onPackageUpload?.(new File(['zip'], 'docs.zip'))}>package</button>
+  UploadZone: ({ onPackageUpload, disabled }: { onPackageUpload?: (file: File) => Promise<void>; disabled?: boolean }) => (
+    <button data-testid="markdown-package" disabled={disabled} onClick={() => void onPackageUpload?.(new File(['zip'], 'docs.zip'))}>package</button>
   ),
 }))
 vi.mock('@/components/OperationProgress', () => ({
   OperationProgress: ({ initialJob, onCompleted }: { initialJob: { id: string }; onCompleted: () => void }) => (
-    <button data-testid="operation-progress" onClick={onCompleted}>{initialJob.id}</button>
+    <button data-testid="operation-progress" onClick={() => { void Promise.resolve(onCompleted()).catch(() => undefined) }}>{initialJob.id}</button>
   ),
 }))
 vi.mock('@/components/Toast', () => ({ useToast: () => toast }))
@@ -264,6 +264,53 @@ describe('KbDetailPage', () => {
       await Promise.resolve()
     })
     expect(documentApi.listDocuments.mock.calls.length).toBeGreaterThan(documentCallsBeforeUpload)
+  })
+
+  it('blocks a second Markdown package while the first operation is retained', async () => {
+    api.getKnowledgeBase.mockResolvedValue({ id: 'kb-1', name: 'Markdown KB', retrievalProfile: 'CLASSIC', embeddingConfigCurrent: true })
+    api.listOpsMetadata.mockResolvedValue({ guardrails: null })
+    api.listKnowledgeBaseVectorCleanupTasks.mockResolvedValue([])
+    api.listIngestJobs.mockResolvedValue([])
+    chatSessionApi.listChatSessions.mockResolvedValue([])
+    documentApi.getUploadQuota.mockResolvedValue(null)
+    documentApi.listDocuments.mockResolvedValue([])
+    documentApi.uploadMarkdownPackage.mockResolvedValue(operationJob('markdown-job'))
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    await act(async () => { root?.render(<KbDetailPage />); await Promise.resolve(); await Promise.resolve() })
+
+    const upload = container.querySelector<HTMLButtonElement>('[data-testid="markdown-package"]')
+    await act(async () => { upload?.click(); await Promise.resolve() })
+    expect(upload?.disabled).toBe(true)
+    await act(async () => { upload?.click(); await Promise.resolve() })
+    expect(documentApi.uploadMarkdownPackage).toHaveBeenCalledTimes(1)
+  })
+
+  it('retains completed Markdown import evidence when document refresh fails', async () => {
+    api.getKnowledgeBase.mockResolvedValue({ id: 'kb-1', name: 'Markdown KB', retrievalProfile: 'CLASSIC', embeddingConfigCurrent: true })
+    api.listOpsMetadata.mockResolvedValue({ guardrails: null })
+    api.listKnowledgeBaseVectorCleanupTasks.mockResolvedValue([])
+    api.listIngestJobs.mockResolvedValue([])
+    chatSessionApi.listChatSessions.mockResolvedValue([])
+    documentApi.getUploadQuota.mockResolvedValue(null)
+    documentApi.listDocuments.mockResolvedValue([])
+    documentApi.uploadMarkdownPackage.mockResolvedValue(operationJob('markdown-job'))
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    await act(async () => { root?.render(<KbDetailPage />); await Promise.resolve(); await Promise.resolve() })
+    await act(async () => { container?.querySelector<HTMLButtonElement>('[data-testid="markdown-package"]')?.click(); await Promise.resolve() })
+    toast.showSuccess.mockClear()
+    documentApi.listDocuments.mockRejectedValueOnce(new Error('refresh unavailable'))
+    await act(async () => {
+      container?.querySelector<HTMLButtonElement>('[data-testid="operation-progress"]')?.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(container?.textContent).toContain('markdown-job')
+    expect(toast.showSuccess).not.toHaveBeenCalledWith('Markdown 资源包导入完成')
   })
 })
 

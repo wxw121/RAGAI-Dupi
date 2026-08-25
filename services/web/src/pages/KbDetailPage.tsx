@@ -112,7 +112,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   }, [kbId, showError])
 
   const loadDocs = useCallback(async (signal?: AbortSignal) => {
-    if (!kbId) return
+    if (!kbId) return false
     try {
       const docs = await listDocuments(kbId, signal)
       setDocuments(docs)
@@ -120,14 +120,16 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       setJobStages(Object.fromEntries(
         docs.map((document) => [document.id, document.currentJob?.stage ?? null]),
       ))
+      return true
     } catch (e) {
-      if (isAbortError(e)) return
+      if (isAbortError(e)) return false
       showError(e instanceof Error ? e.message : '加载文档失败')
+      return false
     }
   }, [kbId, showError])
 
   const loadJobs = useCallback(async (signal?: AbortSignal) => {
-    if (!kbId) return
+    if (!kbId) return false
     try {
       const jobs = await listIngestJobs(kbId, signal)
       setIngestJobs(jobs)
@@ -144,9 +146,11 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
             showError(job.errorMessage ?? `Ingest job ${job.id.slice(0, 8)} failed`)
           }
         })
+      return true
     } catch (e) {
-      if (isAbortError(e)) return
+      if (isAbortError(e)) return false
       showError(e instanceof Error ? e.message : '加载摄入任务失败')
+      return false
     }
   }, [kbId, showError])
 
@@ -180,9 +184,11 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const loadUploadQuota = useCallback(async (signal?: AbortSignal) => {
     try {
       setUploadQuota(await getUploadQuota(signal))
+      return true
     } catch (e) {
-      if (isAbortError(e)) return
+      if (isAbortError(e)) return false
       setUploadQuota(null)
+      return false
     }
   }, [])
 
@@ -290,7 +296,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   }
 
   const handleMarkdownPackageUpload = async (file: File) => {
-    if (!kbId) return
+    if (!kbId || markdownImportOperation) return
     try {
       setMarkdownImportOperation(await uploadMarkdownPackage(kbId, file))
       showSuccess('Markdown 资源包导入已提交')
@@ -693,6 +699,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
           <UploadZone
             onUpload={handleUpload}
             onPackageUpload={handleMarkdownPackageUpload}
+            disabled={Boolean(markdownImportOperation)}
             guardrails={guardrails}
             quota={uploadQuota}
           />
@@ -701,7 +708,8 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
               <OperationProgress
                 initialJob={markdownImportOperation}
                 onCompleted={async () => {
-                  await Promise.all([loadDocs(), loadJobs(), loadUploadQuota()])
+                  const refreshed = await Promise.all([loadDocs(), loadJobs(), loadUploadQuota()])
+                  if (refreshed.some((result) => !result)) throw new Error('Markdown import refresh failed')
                   setMarkdownImportOperation(null)
                   showSuccess('Markdown 资源包导入完成')
                 }}

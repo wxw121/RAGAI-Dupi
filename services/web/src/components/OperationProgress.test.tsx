@@ -2,6 +2,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OperationProgress } from './OperationProgress'
+import type { OperationJobResponse } from '@/types'
 
 const operationApi = vi.hoisted(() => ({
   getOperation: vi.fn(),
@@ -10,7 +11,7 @@ const operationApi = vi.hoisted(() => ({
 
 vi.mock('@/api/operations', () => operationApi)
 
-const runningJob = {
+const runningJob: OperationJobResponse = {
   id: 'job-1',
   operationType: 'MARKDOWN_PACKAGE_IMPORT' as const,
   aggregateType: 'KNOWLEDGE_BASE',
@@ -96,6 +97,39 @@ describe('OperationProgress', () => {
     act(() => root?.unmount())
     root = null
     expect(signals[1].aborted).toBe(true)
+  })
+
+  it('ignores a superseded job response that settles after the job id changes', async () => {
+    vi.useFakeTimers()
+    let resolveOld: ((job: typeof runningJob) => void) | undefined
+    operationApi.getOperation.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve }))
+    const onCompleted = vi.fn()
+    render(<OperationProgress initialJob={runningJob} onCompleted={onCompleted} />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+
+    const nextJob = {
+      ...runningJob,
+      id: 'job-2',
+      steps: [{ ...runningJob.steps[0], id: 'job-2-step', stepKey: 'new-job-step' }],
+    }
+    act(() => root?.render(<OperationProgress initialJob={nextJob} onCompleted={onCompleted} />))
+    await act(async () => { resolveOld?.({ ...runningJob, status: 'COMPLETED', completedAt: '2026-08-25T00:01:00Z' }); await Promise.resolve() })
+
+    expect(container?.textContent).toContain('new-job-step')
+    expect(container?.textContent).not.toContain('store-assets')
+    expect(onCompleted).not.toHaveBeenCalled()
+  })
+
+  it('retains completed evidence and offers refresh retry when completion reconciliation fails', async () => {
+    const completedJob = { ...runningJob, status: 'COMPLETED' as const, completedAt: '2026-08-25T00:01:00Z' }
+    const onCompleted = vi.fn().mockRejectedValueOnce(new Error('refresh failed')).mockResolvedValueOnce(undefined)
+    render(<OperationProgress initialJob={completedJob} onCompleted={onCompleted} />)
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+    expect(container?.textContent).toContain('刷新失败')
+    const retryRefresh = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent === '重试刷新')
+    await act(async () => { retryRefresh?.click(); await Promise.resolve(); await Promise.resolve() })
+    expect(onCompleted).toHaveBeenCalledTimes(2)
   })
 
   function render(node: React.ReactNode) {
