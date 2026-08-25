@@ -37,6 +37,16 @@ import static org.mockito.Mockito.*;
 class MarkdownImportPersistenceServiceTest {
 
     @Test
+    void atomicPublishAuditsCompletionInTheDomainTransaction() throws Exception {
+        Fixture fixture = fixture();
+
+        fixture.persistence.publish(fixture.context, fixture.plan, "publish");
+
+        verify(fixture.audit).recordOperationInCurrentTransaction(
+                "tenant-a", AuditLogService.OPERATION_COMPLETE, fixture.context.jobId(), "Operation completed");
+    }
+
+    @Test
     void prepareRejectsDeletingKnowledgeBaseBeforeCreatingImportRowsOrQuota() throws Exception {
         UUID jobId = UUID.randomUUID();
         UUID kbId = UUID.randomUUID();
@@ -149,14 +159,20 @@ class MarkdownImportPersistenceServiceTest {
         IngestOutboxEventRepository outbox = mock(IngestOutboxEventRepository.class);
         UploadQuotaService quotas = mock(UploadQuotaService.class);
         KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
+        AuditLogService audit = mock(AuditLogService.class);
         when(guard.assertActive(context)).thenReturn(operation);
         when(documents.findByImportJobIdOrderByCreatedAtAsc(jobId)).thenReturn(List.of(document));
         when(assets.findByDocIdOrderByCreatedAtAsc(plannedDocument.documentId())).thenReturn(List.of(asset));
+        when(ingest.save(any(com.dupi.rag.domain.entity.IngestJob.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
         when(steps.findByJobIdAndStepKey(jobId, "publish")).thenReturn(Optional.of(OperationStep.builder()
                 .jobId(jobId).stepKey("publish").status(OperationStepStatus.RUNNING).build()));
+        when(knowledgeBases.findByIdForUpdate(kbId)).thenReturn(Optional.of(
+                com.dupi.rag.domain.entity.KnowledgeBase.builder().id(kbId).tenantId("tenant-a")
+                        .indexRevision(0L).build()));
         MarkdownImportPersistenceService persistence = new MarkdownImportPersistenceService(
-                guard, jobs, steps, documents, assets, ingest, outbox, quotas, knowledgeBases);
-        return new Fixture(plan, context, document, asset, jobs, documents, ingest, outbox, quotas, persistence);
+                guard, jobs, steps, documents, assets, ingest, outbox, quotas, knowledgeBases, audit);
+        return new Fixture(plan, context, document, asset, jobs, documents, ingest, outbox, quotas, audit, persistence);
     }
 
     private static NamedDocumentMutation mutation(String name, BiConsumer<Document, MarkdownImportPlan> change) {
@@ -184,5 +200,6 @@ class MarkdownImportPersistenceServiceTest {
     private record Fixture(MarkdownImportPlan plan, OperationExecutionContext context, Document document,
                            DocumentAsset asset, OperationJobRepository jobs, DocumentRepository documents,
                            IngestJobRepository ingest, IngestOutboxEventRepository outbox, UploadQuotaService quotas,
+                           AuditLogService audit,
                            MarkdownImportPersistenceService persistence) { }
 }

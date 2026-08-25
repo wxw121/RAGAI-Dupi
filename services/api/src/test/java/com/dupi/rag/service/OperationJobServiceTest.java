@@ -43,7 +43,8 @@ class OperationJobServiceTest {
     private final OperationStepRepository steps = mock(OperationStepRepository.class);
     private final OperationJobWriteService writes = mock(OperationJobWriteService.class);
     private final OperationStepWriteService stepWrites = mock(OperationStepWriteService.class);
-    private final OperationJobService service = new OperationJobService(jobs, steps, writes, stepWrites);
+    private final AuditLogService audit = mock(AuditLogService.class);
+    private final OperationJobService service = new OperationJobService(jobs, steps, writes, stepWrites, audit);
 
     @AfterEach
     void clearContexts() {
@@ -98,6 +99,8 @@ class OperationJobServiceTest {
         assertThat(job.getNextAttemptAt()).isBefore(Instant.now().plusSeconds(1));
         assertThat(job.getLastError()).isNull();
         verify(jobs).save(job);
+        verify(audit).recordOperationInCurrentTransaction(
+                "tenant-a", AuditLogService.OPERATION_RETRY, jobId, "Operator retried operation");
     }
 
     @Test

@@ -7,6 +7,7 @@ import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.OperationJobRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -19,11 +20,21 @@ import java.util.UUID;
 
 /** Short, fenced transactions around external workflow execution. */
 @Service
-@RequiredArgsConstructor
 public class OperationJobClaimService {
 
     private static final int MAX_ERROR_LENGTH = 2_000;
     private final OperationJobRepository operationJobRepository;
+    private final AuditLogService auditLogService;
+
+    @Autowired
+    public OperationJobClaimService(OperationJobRepository operationJobRepository, AuditLogService auditLogService) {
+        this.operationJobRepository = operationJobRepository;
+        this.auditLogService = auditLogService;
+    }
+
+    OperationJobClaimService(OperationJobRepository operationJobRepository) {
+        this(operationJobRepository, null);
+    }
 
     @Value("${dupi.operations.lease-seconds:60}")
     private int configuredLeaseSeconds;
@@ -52,7 +63,9 @@ public class OperationJobClaimService {
             job.setLastError("operation_attempt_budget_exhausted");
             job.setNextAttemptAt(null);
             clearLease(job);
-            return OperationClaimResult.terminalized(operationJobRepository.saveAndFlush(job));
+            operationJobRepository.saveAndFlush(job);
+            audit(job, AuditLogService.OPERATION_FAIL, job.getLastError());
+            return OperationClaimResult.terminalized(job);
         }
         job.setStatus(OperationStatus.RUNNING);
         job.setClaimToken(UUID.randomUUID());
@@ -72,6 +85,7 @@ public class OperationJobClaimService {
         job.setNextAttemptAt(null);
         clearLease(job);
         operationJobRepository.save(job);
+        audit(job, AuditLogService.OPERATION_COMPLETE, "Operation completed");
     }
 
     /** Verifies a domain-owned atomic publish already committed the terminal operation row. */
@@ -103,6 +117,10 @@ public class OperationJobClaimService {
         }
         clearLease(job);
         operationJobRepository.save(job);
+        audit(job,
+                job.getStatus() == OperationStatus.FAILED
+                        ? AuditLogService.OPERATION_FAIL : AuditLogService.OPERATION_RETRY,
+                job.getLastError());
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -114,6 +132,7 @@ public class OperationJobClaimService {
         job.setNextAttemptAt(null);
         clearLease(job);
         operationJobRepository.save(job);
+        audit(job, AuditLogService.OPERATION_FAIL, job.getLastError());
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -126,6 +145,7 @@ public class OperationJobClaimService {
         job.setNextAttemptAt(Instant.now());
         clearLease(job);
         operationJobRepository.save(job);
+        audit(job, AuditLogService.OPERATION_COMPENSATE, job.getLastError());
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -205,5 +225,12 @@ public class OperationJobClaimService {
             return "operation_failed";
         }
         return error.length() <= MAX_ERROR_LENGTH ? error : error.substring(0, MAX_ERROR_LENGTH);
+    }
+
+    private void audit(OperationJob job, String action, String message) {
+        if (auditLogService != null) {
+            auditLogService.recordOperationInCurrentTransaction(
+                    job.getTenantId(), action, job.getId(), message);
+        }
     }
 }

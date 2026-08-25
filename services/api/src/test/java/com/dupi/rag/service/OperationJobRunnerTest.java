@@ -5,6 +5,7 @@ import com.dupi.rag.domain.enums.OperationPhase;
 import com.dupi.rag.domain.enums.OperationStatus;
 import com.dupi.rag.domain.enums.OperationType;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Instant;
 import java.util.List;
@@ -112,6 +113,23 @@ class OperationJobRunnerTest {
 
         verify(workflow, times(2)).executeForward(any(OperationExecutionContext.class));
         verify(claimService, times(3)).claimNext();
+    }
+
+    @Test
+    void zeroCleanupLimitIsNormalizedToOneBoundedCleanup() {
+        when(workflow.type()).thenReturn(OperationType.RECOVERY_ARCHIVE_IMPORT);
+        when(claimService.claimNext()).thenReturn(
+                OperationClaimResult.terminalized(job(OperationPhase.FORWARD)),
+                OperationClaimResult.claimed(job(OperationPhase.FORWARD)));
+        OperationJobRunner runner = new OperationJobRunner(
+                claimService, List.of(workflow), 2, 0, true);
+        clearInvocations(workflow);
+
+        runner.runScheduled();
+
+        assertThat(ReflectionTestUtils.getField(runner, "cleanupLimit")).isEqualTo(1);
+        verify(claimService, times(1)).claimNext();
+        verifyNoInteractions(workflow);
     }
 
     @Test

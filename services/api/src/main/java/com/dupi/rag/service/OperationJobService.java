@@ -15,6 +15,7 @@ import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.OperationJobRepository;
 import com.dupi.rag.repository.OperationStepRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,12 +27,30 @@ import java.util.UUID;
 
 /** Public operation API plus context-only workflow step mutations. */
 @Service
-@RequiredArgsConstructor
 public class OperationJobService {
     private final OperationJobRepository operationJobRepository;
     private final OperationStepRepository operationStepRepository;
     private final OperationJobWriteService writeService;
     private final OperationStepWriteService stepWriteService;
+    private final AuditLogService auditLogService;
+
+    @Autowired
+    public OperationJobService(OperationJobRepository operationJobRepository,
+                               OperationStepRepository operationStepRepository,
+                               OperationJobWriteService writeService,
+                               OperationStepWriteService stepWriteService,
+                               AuditLogService auditLogService) {
+        this.operationJobRepository = operationJobRepository;
+        this.operationStepRepository = operationStepRepository;
+        this.writeService = writeService;
+        this.stepWriteService = stepWriteService;
+        this.auditLogService = auditLogService;
+    }
+
+    OperationJobService(OperationJobRepository jobs, OperationStepRepository steps,
+                        OperationJobWriteService writes, OperationStepWriteService stepWrites) {
+        this(jobs, steps, writes, stepWrites, null);
+    }
 
     public OperationJobResponse create(OperationType type, String aggregateType, UUID aggregateId,
                                        String idempotencyKey, Map<String, Object> input, String createdBy) {
@@ -75,6 +94,11 @@ public class OperationJobService {
             operationStepRepository.save(step);
         });
         operationJobRepository.save(job);
+        if (auditLogService != null) {
+            auditLogService.recordOperationInCurrentTransaction(
+                    job.getTenantId(), AuditLogService.OPERATION_RETRY, job.getId(),
+                    "Operator retried operation");
+        }
         return toResponse(job);
     }
 

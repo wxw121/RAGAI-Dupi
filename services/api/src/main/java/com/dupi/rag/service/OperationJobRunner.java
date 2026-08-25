@@ -34,7 +34,9 @@ public class OperationJobRunner {
         this.claimService = claimService;
         this.workflows = registry(workflows);
         this.batchSize = Math.max(0, batchSize);
-        this.cleanupLimit = Math.max(0, cleanupLimit);
+        // Claiming discovers an exhausted row by terminalizing it, so cleanup cannot be disabled
+        // before the first claim. Normalize invalid values to one and keep every run bounded.
+        this.cleanupLimit = Math.max(1, cleanupLimit);
         this.enabled = enabled;
     }
 

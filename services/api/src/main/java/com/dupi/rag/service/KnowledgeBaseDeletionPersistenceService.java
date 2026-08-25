@@ -114,6 +114,8 @@ class KnowledgeBaseDeletionPersistenceService {
         audit.recordSuccessInCurrentTransactionForTenant(tenantId,
                 "KNOWLEDGE_BASE_DELETE_SUBMIT", AGGREGATE_TYPE, knowledgeBaseId,
                 "Submitted durable knowledge-base deletion " + jobId);
+        audit.recordOperationInCurrentTransaction(tenantId,
+                AuditLogService.OPERATION_SUBMIT, jobId, "Operation submitted");
         return jobId;
     }
 
@@ -171,6 +173,8 @@ class KnowledgeBaseDeletionPersistenceService {
         job.setClaimToken(null);
         job.setLeaseExpiresAt(null);
         jobs.saveAndFlush(job);
+        audit.recordOperationInCurrentTransaction(job.getTenantId(),
+                AuditLogService.OPERATION_COMPLETE, job.getId(), "Operation completed");
     }
 
     private void validateRecoveryConstraints(UUID knowledgeBaseId, String tenantId) {

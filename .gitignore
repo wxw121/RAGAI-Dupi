@@ -42,6 +42,7 @@ Thumbs.db
 
 # Logs & local runtime artifacts
 *.log
+.diagnostics/
 scripts/e2e-last-run.json
 scripts/e2e-chat-session-history-last-run.json
 artifacts/

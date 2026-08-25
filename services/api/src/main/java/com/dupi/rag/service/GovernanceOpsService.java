@@ -3,6 +3,9 @@ package com.dupi.rag.service;
 import com.dupi.rag.domain.enums.IngestFailureNotificationStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
 import com.dupi.rag.domain.enums.IngestOutboxStatus;
+import com.dupi.rag.domain.enums.OperationPhase;
+import com.dupi.rag.domain.enums.OperationStatus;
+import com.dupi.rag.domain.enums.OperationType;
 import com.dupi.rag.domain.enums.UploadQuotaReservationStatus;
 import com.dupi.rag.domain.enums.VectorCleanupStatus;
 import com.dupi.rag.dto.AuditAlertResponse;
@@ -10,11 +13,14 @@ import com.dupi.rag.dto.GovernanceSummaryResponse;
 import com.dupi.rag.repository.IngestFailureNotificationRepository;
 import com.dupi.rag.repository.IngestJobRepository;
 import com.dupi.rag.repository.IngestOutboxEventRepository;
+import com.dupi.rag.repository.OperationJobRepository;
 import com.dupi.rag.repository.UploadQuotaReservationRepository;
 import com.dupi.rag.repository.VectorCleanupTaskRepository;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -29,6 +35,7 @@ public class GovernanceOpsService {
     private final IngestOutboxEventRepository ingestOutboxEventRepository;
     private final IngestFailureNotificationRepository notificationRepository;
     private final VectorCleanupTaskRepository vectorCleanupTaskRepository;
+    private final OperationJobRepository operationJobRepository;
     private final AuditLogService auditLogService;
     private final IngestJobService ingestJobService;
     private final VectorCleanupTaskService vectorCleanupTaskService;
@@ -41,6 +48,7 @@ public class GovernanceOpsService {
             IngestOutboxEventRepository ingestOutboxEventRepository,
             IngestFailureNotificationRepository notificationRepository,
             VectorCleanupTaskRepository vectorCleanupTaskRepository,
+            OperationJobRepository operationJobRepository,
             AuditLogService auditLogService,
             IngestJobService ingestJobService,
             VectorCleanupTaskService vectorCleanupTaskService
@@ -51,6 +59,7 @@ public class GovernanceOpsService {
                 ingestOutboxEventRepository,
                 notificationRepository,
                 vectorCleanupTaskRepository,
+                operationJobRepository,
                 auditLogService,
                 ingestJobService,
                 vectorCleanupTaskService,
@@ -64,6 +73,7 @@ public class GovernanceOpsService {
             IngestOutboxEventRepository ingestOutboxEventRepository,
             IngestFailureNotificationRepository notificationRepository,
             VectorCleanupTaskRepository vectorCleanupTaskRepository,
+            OperationJobRepository operationJobRepository,
             AuditLogService auditLogService,
             IngestJobService ingestJobService,
             VectorCleanupTaskService vectorCleanupTaskService,
@@ -74,6 +84,7 @@ public class GovernanceOpsService {
         this.ingestOutboxEventRepository = ingestOutboxEventRepository;
         this.notificationRepository = notificationRepository;
         this.vectorCleanupTaskRepository = vectorCleanupTaskRepository;
+        this.operationJobRepository = operationJobRepository;
         this.auditLogService = auditLogService;
         this.ingestJobService = ingestJobService;
         this.vectorCleanupTaskService = vectorCleanupTaskService;
@@ -111,6 +122,22 @@ public class GovernanceOpsService {
 
         long pendingVectorCleanupTasks = vectorCleanupTaskRepository.countByStatusIn(List.of(VectorCleanupStatus.PENDING));
         long failedVectorCleanupTasks = vectorCleanupTaskRepository.countByStatusIn(List.of(VectorCleanupStatus.FAILED));
+
+        EnumMap<OperationType, Long> operationCountsByType = zeroCounts(OperationType.class);
+        operationJobRepository.countGroupedByType().forEach(row -> {
+            if (row.getType() != null) operationCountsByType.put(row.getType(), row.getCount());
+        });
+        EnumMap<OperationStatus, Long> operationCountsByStatus = zeroCounts(OperationStatus.class);
+        operationJobRepository.countGroupedByStatus().forEach(row -> {
+            if (row.getStatus() != null) operationCountsByStatus.put(row.getStatus(), row.getCount());
+        });
+        long dueOperations = operationJobRepository.countDueBefore(now);
+        long oldestDueAgeSeconds = operationJobRepository.findOldestDueAt(now)
+                .map(dueAt -> Math.max(0L, Duration.between(dueAt, now).getSeconds()))
+                .orElse(0L);
+        long operationRetryCount = operationJobRepository.sumRetryCount();
+        long compensationFailures = operationJobRepository.countByPhaseAndStatus(
+                OperationPhase.COMPENSATION, OperationStatus.FAILED);
 
         List<AuditAlertResponse> alerts = new ArrayList<>();
         alerts.addAll(auditLogService.summarizeAlerts());
@@ -162,8 +189,22 @@ public class GovernanceOpsService {
                         .failedTasks(failedVectorCleanupTasks)
                         .openTasks(pendingVectorCleanupTasks + failedVectorCleanupTasks)
                         .build())
+                .operations(GovernanceSummaryResponse.Operations.builder()
+                        .countsByType(operationCountsByType)
+                        .countsByStatus(operationCountsByStatus)
+                        .due(dueOperations)
+                        .oldestDueAgeSeconds(oldestDueAgeSeconds)
+                        .retryCount(operationRetryCount)
+                        .compensationFailures(compensationFailures)
+                        .build())
                 .alerts(alerts)
                 .build();
+    }
+
+    private <E extends Enum<E>> EnumMap<E, Long> zeroCounts(Class<E> enumType) {
+        EnumMap<E, Long> counts = new EnumMap<>(enumType);
+        for (E value : enumType.getEnumConstants()) counts.put(value, 0L);
+        return counts;
     }
 
     private void addAlertIfOpen(List<AuditAlertResponse> alerts, String code, long count, String message) {

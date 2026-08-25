@@ -100,6 +100,8 @@ class KnowledgeBaseDeletionPersistenceServiceTest {
                         kbId + ":3", kbId + ":7", kbId.toString());
         verify(audit).recordSuccessInCurrentTransactionForTenant(eq("tenant-a"),
                 eq("KNOWLEDGE_BASE_DELETE_SUBMIT"), eq("KNOWLEDGE_BASE"), eq(kbId), contains(jobId.toString()));
+        verify(audit).recordOperationInCurrentTransaction(
+                "tenant-a", AuditLogService.OPERATION_SUBMIT, jobId, "Operation submitted");
     }
 
     @Test
@@ -195,6 +197,8 @@ class KnowledgeBaseDeletionPersistenceServiceTest {
         order.verify(notifications).deleteByKbId(kbId);
         order.verify(knowledgeBases).delete(kb);
         order.verify(jobs).saveAndFlush(job);
+        verify(audit).recordOperationInCurrentTransaction(
+                "tenant-a", AuditLogService.OPERATION_COMPLETE, jobId, "Operation completed");
     }
 
     @Test

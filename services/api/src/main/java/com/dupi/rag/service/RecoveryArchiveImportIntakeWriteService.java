@@ -13,6 +13,7 @@ import com.dupi.rag.repository.OperationJobRepository;
 import com.dupi.rag.repository.OperationStepRepository;
 import com.dupi.rag.repository.KnowledgeBaseRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,12 +23,26 @@ import java.util.UUID;
 
 /** Recovery-only transactional boundary for immutable intake lifecycle transitions. */
 @Service
-@RequiredArgsConstructor
 class RecoveryArchiveImportIntakeWriteService {
     static final String STAGE_STEP = "stage-zip";
     private final OperationJobRepository jobs;
     private final OperationStepRepository steps;
     private final KnowledgeBaseRepository knowledgeBases;
+    private final AuditLogService audit;
+
+    @Autowired
+    RecoveryArchiveImportIntakeWriteService(OperationJobRepository jobs, OperationStepRepository steps,
+                                            KnowledgeBaseRepository knowledgeBases, AuditLogService audit) {
+        this.jobs = jobs;
+        this.steps = steps;
+        this.knowledgeBases = knowledgeBases;
+        this.audit = audit;
+    }
+
+    RecoveryArchiveImportIntakeWriteService(OperationJobRepository jobs, OperationStepRepository steps,
+                                            KnowledgeBaseRepository knowledgeBases) {
+        this(jobs, steps, knowledgeBases, null);
+    }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     OperationJob insert(String tenant, RecoveryArchiveImportPlan plan, String key,
@@ -50,6 +65,7 @@ class RecoveryArchiveImportIntakeWriteService {
         steps.saveAndFlush(OperationStep.builder().jobId(jobId).sequenceNumber(1).stepKey(STAGE_STEP)
                 .stepType("STAGE_UPLOAD").resourceRef(actualStagingKey).status(OperationStepStatus.PENDING)
                 .attemptCount(0).nextAttemptAt(Instant.now()).build());
+        audit(job, AuditLogService.OPERATION_SUBMIT, "Operation submitted");
         return job;
     }
 
@@ -110,6 +126,7 @@ class RecoveryArchiveImportIntakeWriteService {
         job.setLastError(limit(diagnostic));
         job.setNextAttemptAt(Instant.now());
         jobs.saveAndFlush(job);
+        audit(job, AuditLogService.OPERATION_COMPENSATE, job.getLastError());
     }
 
     @Transactional
@@ -166,6 +183,7 @@ class RecoveryArchiveImportIntakeWriteService {
             }
         }
         jobs.saveAndFlush(job);
+        audit(job, AuditLogService.OPERATION_RETRY, "Operation intake reopened");
         return RecoveryIntakeReopenOutcome.REOPENED;
     }
 
@@ -219,5 +237,10 @@ class RecoveryArchiveImportIntakeWriteService {
     private String limit(String value) {
         if (value == null) return "Recovery stage upload failed";
         return value.length() <= 2000 ? value : value.substring(0, 2000);
+    }
+    private void audit(OperationJob job, String action, String message) {
+        if (audit != null) {
+            audit.recordOperationInCurrentTransaction(job.getTenantId(), action, job.getId(), message);
+        }
     }
 }

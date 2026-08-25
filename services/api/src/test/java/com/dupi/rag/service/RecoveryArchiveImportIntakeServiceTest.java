@@ -38,8 +38,9 @@ class RecoveryArchiveImportIntakeServiceTest {
     private final OperationStepRepository steps = mock(OperationStepRepository.class);
     private final RecoveryStorageService storage = mock(RecoveryStorageService.class);
     private final KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
+    private final AuditLogService audit = mock(AuditLogService.class);
     private final RecoveryArchiveImportIntakeWriteService writes =
-            new RecoveryArchiveImportIntakeWriteService(jobs, steps, knowledgeBases);
+            new RecoveryArchiveImportIntakeWriteService(jobs, steps, knowledgeBases, audit);
     private final RecoveryArchiveImportIntakeService service =
             new RecoveryArchiveImportIntakeService(jobs, steps, writes, storage);
 
@@ -63,6 +64,8 @@ class RecoveryArchiveImportIntakeServiceTest {
         order.verify(knowledgeBases).findByIdAndTenantIdForUpdateAnyStatus(plan.knowledgeBaseId(), "tenant-a");
         order.verify(jobs).saveAndFlush(argThat(job -> job.getStatus() == OperationStatus.PREPARED
                 && !job.getRunnable()));
+        verify(audit).recordOperationInCurrentTransaction(
+                eq("tenant-a"), eq(AuditLogService.OPERATION_SUBMIT), any(UUID.class), eq("Operation submitted"));
     }
 
     @Test
@@ -281,6 +284,8 @@ class RecoveryArchiveImportIntakeServiceTest {
         assertThat(job.getStatus()).isEqualTo(OperationStatus.COMPENSATING);
         assertThat(job.getRunnable()).isTrue();
         assertThat(job.getNextAttemptAt()).isNotNull();
+        verify(audit).recordOperationInCurrentTransaction(
+                "tenant-a", AuditLogService.OPERATION_COMPENSATE, job.getId(), job.getLastError());
     }
 
     @Test

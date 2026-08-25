@@ -28,6 +28,8 @@ import org.springframework.web.filter.CorsFilter;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -38,6 +40,23 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
 
 class ConfigAndExceptionTest {
+
+    @Test
+    void operationRunnerAndStagingPolicyAreEnvironmentConfigurable() throws IOException {
+        String application = Files.readString(Path.of("src/main/resources/application.yml"));
+        String environment = Files.readString(Path.of("../..", "deploy", ".env.example"));
+
+        assertThat(application)
+                .contains("runner-cron: ${OPERATION_RUNNER_CRON:*/5 * * * * *}")
+                .contains("runner-batch-size: ${OPERATION_RUNNER_BATCH_SIZE:10}")
+                .contains("runner-cleanup-limit: ${OPERATION_RUNNER_CLEANUP_LIMIT:10}")
+                .contains("staging-retention-hours: ${OPERATION_STAGING_RETENTION_HOURS:24}");
+        assertThat(environment)
+                .contains("OPERATION_RUNNER_CRON=*/5 * * * * *")
+                .contains("OPERATION_RUNNER_BATCH_SIZE=10")
+                .contains("OPERATION_RUNNER_CLEANUP_LIMIT=10")
+                .contains("OPERATION_STAGING_RETENTION_HOURS=24");
+    }
 
     @Test
     void corsConfigAllowsLocalDevelopmentOriginsAndStandardMethods() {

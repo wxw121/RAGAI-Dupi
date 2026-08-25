@@ -3,6 +3,7 @@ package com.dupi.rag.repository;
 import com.dupi.rag.domain.entity.OperationJob;
 import com.dupi.rag.domain.enums.OperationType;
 import com.dupi.rag.domain.enums.OperationStatus;
+import com.dupi.rag.domain.enums.OperationPhase;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.jpa.repository.Lock;
@@ -15,6 +16,51 @@ import java.util.UUID;
 import jakarta.persistence.LockModeType;
 
 public interface OperationJobRepository extends JpaRepository<OperationJob, UUID> {
+
+    interface TypeCount {
+        OperationType getType();
+        long getCount();
+    }
+
+    interface StatusCount {
+        OperationStatus getStatus();
+        long getCount();
+    }
+
+    @Query("select job.operationType as type, count(job) as count from OperationJob job group by job.operationType")
+    List<TypeCount> countGroupedByType();
+
+    @Query("select job.status as status, count(job) as count from OperationJob job group by job.status")
+    List<StatusCount> countGroupedByStatus();
+
+    @Query("""
+            select count(job) from OperationJob job
+            where job.runnable = true
+              and job.status in (
+                com.dupi.rag.domain.enums.OperationStatus.PREPARED,
+                com.dupi.rag.domain.enums.OperationStatus.RETRY_WAIT,
+                com.dupi.rag.domain.enums.OperationStatus.COMPENSATING
+              )
+              and job.nextAttemptAt <= :now
+            """)
+    long countDueBefore(@Param("now") Instant now);
+
+    @Query("""
+            select min(job.nextAttemptAt) from OperationJob job
+            where job.runnable = true
+              and job.status in (
+                com.dupi.rag.domain.enums.OperationStatus.PREPARED,
+                com.dupi.rag.domain.enums.OperationStatus.RETRY_WAIT,
+                com.dupi.rag.domain.enums.OperationStatus.COMPENSATING
+              )
+              and job.nextAttemptAt <= :now
+            """)
+    Optional<Instant> findOldestDueAt(@Param("now") Instant now);
+
+    @Query("select coalesce(sum(case when job.attemptCount > 1 then job.attemptCount - 1 else 0 end), 0) from OperationJob job")
+    long sumRetryCount();
+
+    long countByPhaseAndStatus(OperationPhase phase, OperationStatus status);
 
     Optional<OperationJob> findByTenantIdAndOperationTypeAndIdempotencyKey(
             String tenantId,

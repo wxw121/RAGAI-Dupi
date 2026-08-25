@@ -42,19 +42,22 @@ class MarkdownImportIntakeServiceTest {
         OperationJobRepository jobs = mock(OperationJobRepository.class);
         OperationStepRepository steps = mock(OperationStepRepository.class);
         KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
+        AuditLogService audit = mock(AuditLogService.class);
         KnowledgeBase ready = KnowledgeBase.builder().id(plan.knowledgeBaseId()).tenantId("tenant-a")
                 .lifecycleStatus(KnowledgeBaseLifecycleStatus.READY).build();
         when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(plan.knowledgeBaseId(), "tenant-a"))
                 .thenReturn(Optional.of(ready));
         when(jobs.saveAndFlush(any())).thenAnswer(call -> call.getArgument(0));
 
-        new MarkdownImportIntakeWriteService(jobs, steps, knowledgeBases)
+        new MarkdownImportIntakeWriteService(jobs, steps, knowledgeBases, audit)
                 .insert("tenant-a", "same-key", "alice", plan);
 
         var order = inOrder(knowledgeBases, jobs);
         order.verify(knowledgeBases).findByIdAndTenantIdForUpdateAnyStatus(plan.knowledgeBaseId(), "tenant-a");
         order.verify(jobs).saveAndFlush(argThat(job -> job.getStatus() == OperationStatus.PREPARED
                 && !job.getRunnable()));
+        verify(audit).recordOperationInCurrentTransaction(
+                "tenant-a", AuditLogService.OPERATION_SUBMIT, plan.jobId(), "Operation submitted");
     }
 
     @Test

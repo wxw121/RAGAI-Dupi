@@ -25,6 +25,13 @@ import java.util.UUID;
 @Service
 public class AuditLogService {
 
+    public static final String OPERATION_SUBMIT = "OPERATION_SUBMIT";
+    public static final String OPERATION_RETRY = "OPERATION_RETRY";
+    public static final String OPERATION_COMPLETE = "OPERATION_COMPLETE";
+    public static final String OPERATION_COMPENSATE = "OPERATION_COMPENSATE";
+    public static final String OPERATION_FAIL = "OPERATION_FAIL";
+    private static final String OPERATION_TARGET = "OPERATION_JOB";
+
     private final AuditLogRepository repository;
     private final AuditProperties auditProperties;
     private final Clock clock;
@@ -135,6 +142,14 @@ public class AuditLogService {
                 .status(AuditLogStatus.SUCCESS)
                 .message(message)
                 .build());
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void recordOperationInCurrentTransaction(
+            String tenantId, String action, UUID operationId, String message
+    ) {
+        recordSuccessInCurrentTransactionForTenant(
+                tenantId, action, OPERATION_TARGET, operationId, message);
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)

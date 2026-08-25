@@ -12,6 +12,7 @@ import com.dupi.rag.repository.OperationJobRepository;
 import com.dupi.rag.repository.OperationStepRepository;
 import com.dupi.rag.repository.KnowledgeBaseRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,11 +21,25 @@ import java.time.Instant;
 
 /** Markdown-owned transactions that keep intake non-runnable until every staged entry is durable. */
 @Service
-@RequiredArgsConstructor
 class MarkdownImportIntakeWriteService {
     private final OperationJobRepository jobs;
     private final OperationStepRepository steps;
     private final KnowledgeBaseRepository knowledgeBases;
+    private final AuditLogService audit;
+
+    @Autowired
+    MarkdownImportIntakeWriteService(OperationJobRepository jobs, OperationStepRepository steps,
+                                     KnowledgeBaseRepository knowledgeBases, AuditLogService audit) {
+        this.jobs = jobs;
+        this.steps = steps;
+        this.knowledgeBases = knowledgeBases;
+        this.audit = audit;
+    }
+
+    MarkdownImportIntakeWriteService(OperationJobRepository jobs, OperationStepRepository steps,
+                                     KnowledgeBaseRepository knowledgeBases) {
+        this(jobs, steps, knowledgeBases, null);
+    }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     OperationJob insert(String tenant, String key, String createdBy, MarkdownImportPlan plan) {
@@ -45,6 +60,7 @@ class MarkdownImportIntakeWriteService {
                     .status(OperationStepStatus.PENDING).attemptCount(0).nextAttemptAt(Instant.now()).build());
         }
         steps.flush();
+        audit(job, AuditLogService.OPERATION_SUBMIT, "Operation submitted");
         return job;
     }
 
@@ -87,6 +103,7 @@ class MarkdownImportIntakeWriteService {
         job.setPhase(OperationPhase.COMPENSATION); job.setStatus(OperationStatus.COMPENSATING);
         job.setRunnable(true); job.setLastError(limit(diagnostic)); job.setNextAttemptAt(Instant.now());
         jobs.saveAndFlush(job);
+        audit(job, AuditLogService.OPERATION_COMPENSATE, job.getLastError());
     }
 
     void validatePlan(OperationJob job, MarkdownImportPlan plan) {
@@ -122,5 +139,10 @@ class MarkdownImportIntakeWriteService {
     private String limit(String value) {
         String text = value == null || value.isBlank() ? "Markdown staging failed" : value;
         return text.length() <= 2000 ? text : text.substring(0, 2000);
+    }
+    private void audit(OperationJob job, String action, String message) {
+        if (audit != null) {
+            audit.recordOperationInCurrentTransaction(job.getTenantId(), action, job.getId(), message);
+        }
     }
 }

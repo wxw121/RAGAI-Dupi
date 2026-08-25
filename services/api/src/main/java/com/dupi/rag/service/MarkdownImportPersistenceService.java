@@ -21,6 +21,7 @@ import com.dupi.rag.repository.KnowledgeBaseRepository;
 import com.dupi.rag.repository.OperationJobRepository;
 import com.dupi.rag.repository.OperationStepRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -30,7 +31,6 @@ import java.util.UUID;
 
 /** Fenced metadata/quota transactions for Markdown prepare, atomic publish, and compensation. */
 @Service
-@RequiredArgsConstructor
 class MarkdownImportPersistenceService {
     private final OperationDomainGuard guard;
     private final OperationJobRepository jobs;
@@ -41,6 +41,33 @@ class MarkdownImportPersistenceService {
     private final IngestOutboxEventRepository outbox;
     private final UploadQuotaService quotas;
     private final KnowledgeBaseRepository knowledgeBases;
+    private final AuditLogService audit;
+
+    @Autowired
+    MarkdownImportPersistenceService(OperationDomainGuard guard, OperationJobRepository jobs,
+                                     OperationStepRepository steps, DocumentRepository documents,
+                                     DocumentAssetRepository assets, IngestJobRepository ingestJobs,
+                                     IngestOutboxEventRepository outbox, UploadQuotaService quotas,
+                                     KnowledgeBaseRepository knowledgeBases, AuditLogService audit) {
+        this.guard = guard;
+        this.jobs = jobs;
+        this.steps = steps;
+        this.documents = documents;
+        this.assets = assets;
+        this.ingestJobs = ingestJobs;
+        this.outbox = outbox;
+        this.quotas = quotas;
+        this.knowledgeBases = knowledgeBases;
+        this.audit = audit;
+    }
+
+    MarkdownImportPersistenceService(OperationDomainGuard guard, OperationJobRepository jobs,
+                                     OperationStepRepository steps, DocumentRepository documents,
+                                     DocumentAssetRepository assets, IngestJobRepository ingestJobs,
+                                     IngestOutboxEventRepository outbox, UploadQuotaService quotas,
+                                     KnowledgeBaseRepository knowledgeBases) {
+        this(guard, jobs, steps, documents, assets, ingestJobs, outbox, quotas, knowledgeBases, null);
+    }
 
     @Transactional
     void assertActive(OperationExecutionContext context) { guard.assertActive(context); }
@@ -122,6 +149,10 @@ class MarkdownImportPersistenceService {
         operation.setCompletedAt(now); operation.setLastError(null); operation.setNextAttemptAt(null);
         operation.setClaimToken(null); operation.setLeaseExpiresAt(null);
         jobs.saveAndFlush(operation);
+        if (audit != null) {
+            audit.recordOperationInCurrentTransaction(operation.getTenantId(),
+                    AuditLogService.OPERATION_COMPLETE, operation.getId(), "Operation completed");
+        }
     }
 
     @Transactional

@@ -158,9 +158,14 @@ public class OpsController {
                         "REINDEX",
                         "INGEST_RETRY",
                         "VECTOR_CLEANUP_RETRY",
+                        AuditLogService.OPERATION_SUBMIT,
+                        AuditLogService.OPERATION_RETRY,
+                        AuditLogService.OPERATION_COMPLETE,
+                        AuditLogService.OPERATION_COMPENSATE,
+                        AuditLogService.OPERATION_FAIL,
                         "AUDIT_ALERT_NOTIFY"
                 ))
-                .auditTargetTypes(List.of("ACCOUNT", "ROLE", "DOCUMENT", "KNOWLEDGE_BASE", "INGEST_JOB", "VECTOR_CLEANUP_TASK", "CHAT_SESSION", "AUDIT_ALERT"))
+                .auditTargetTypes(List.of("ACCOUNT", "ROLE", "DOCUMENT", "KNOWLEDGE_BASE", "INGEST_JOB", "OPERATION_JOB", "VECTOR_CLEANUP_TASK", "CHAT_SESSION", "AUDIT_ALERT"))
                 .auditStatuses(List.of("SUCCESS", "FAILED"))
                 .guardrails(guardrails())
                 .build();

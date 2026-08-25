@@ -43,6 +43,41 @@ import static org.mockito.Mockito.*;
 
 class OperationTransactionStructureTest {
     @Test
+    void operationTransitionAndAuditShareOneRollbackBoundary() {
+        OperationJobRepository jobs = mock(OperationJobRepository.class);
+        var auditLogs = mock(com.dupi.rag.repository.AuditLogRepository.class);
+        TrackingTransactionManager transactions = new TrackingTransactionManager();
+        OperationJob job = currentJob();
+        job.setTenantId("tenant-a");
+        OperationExecutionContext execution = context(job);
+        when(jobs.findByIdForUpdate(job.getId())).thenReturn(Optional.of(job));
+        when(auditLogs.save(any())).thenThrow(new IllegalStateException("audit write failed"));
+
+        try (AnnotationConfigApplicationContext spring = new AnnotationConfigApplicationContext()) {
+            spring.registerBean(OperationJobRepository.class, () -> jobs);
+            spring.registerBean(com.dupi.rag.repository.AuditLogRepository.class, () -> auditLogs);
+            spring.registerBean(com.dupi.rag.config.AuditProperties.class,
+                    com.dupi.rag.config.AuditProperties::new);
+            spring.registerBean("transactionManager", PlatformTransactionManager.class, () -> transactions);
+            spring.register(AuditTransactionConfig.class);
+            spring.refresh();
+
+            OperationJobClaimService claims = spring.getBean(OperationJobClaimService.class);
+            assertThatThrownBy(() -> claims.complete(execution))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("audit write failed");
+
+            InOrder order = inOrder(jobs, auditLogs);
+            order.verify(jobs).findByIdForUpdate(job.getId());
+            order.verify(jobs).save(job);
+            order.verify(auditLogs).save(any());
+            assertThat(transactions.begins).isEqualTo(1);
+            assertThat(transactions.commits).isZero();
+            assertThat(transactions.rollbacks).isEqualTo(1);
+        }
+    }
+
+    @Test
     void documentDeletionUsesTwoProxiedShortTransactionsAroundUnlockedObjectIo() throws Exception {
         var documents = mock(com.dupi.rag.repository.DocumentRepository.class);
         var ingestJobs = mock(com.dupi.rag.repository.IngestJobRepository.class);
@@ -380,6 +415,22 @@ class OperationTransactionStructureTest {
         OperationStepWriteService operationStepWriteService(OperationStepRepository steps,
                                                              OperationDomainGuard guard) {
             return new OperationStepWriteService(steps, guard);
+        }
+    }
+
+    @Configuration
+    @EnableTransactionManagement(proxyTargetClass = true)
+    static class AuditTransactionConfig {
+        @Bean
+        AuditLogService auditLogService(com.dupi.rag.repository.AuditLogRepository repository,
+                                        com.dupi.rag.config.AuditProperties properties) {
+            return new AuditLogService(repository, properties);
+        }
+
+        @Bean
+        OperationJobClaimService operationJobClaimService(OperationJobRepository jobs,
+                                                           AuditLogService audit) {
+            return new OperationJobClaimService(jobs, audit);
         }
     }
 

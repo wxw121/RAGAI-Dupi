@@ -21,7 +21,44 @@ import static org.mockito.Mockito.*;
 
 class OperationJobClaimServiceTest {
     private final OperationJobRepository jobs = mock(OperationJobRepository.class);
-    private final OperationJobClaimService service = new OperationJobClaimService(jobs);
+    private final AuditLogService audit = mock(AuditLogService.class);
+    private final OperationJobClaimService service = new OperationJobClaimService(jobs, audit);
+
+    @Test
+    void stateBoundaryAuditsAreRecordedOnceAfterTheFencedTransition() {
+        OperationJob claimed = currentClaim(OperationPhase.FORWARD, 1, 1);
+        OperationExecutionContext context = context(claimed);
+        when(jobs.findByIdForUpdate(claimed.getId())).thenReturn(Optional.of(claimed));
+
+        service.complete(context);
+
+        verify(audit).recordOperationInCurrentTransaction(
+                claimed.getTenantId(), AuditLogService.OPERATION_COMPLETE, claimed.getId(), "Operation completed");
+        assertThatThrownBy(() -> service.complete(context)).isInstanceOf(OperationConflictException.class);
+        verify(audit, times(1)).recordOperationInCurrentTransaction(
+                claimed.getTenantId(), AuditLogService.OPERATION_COMPLETE, claimed.getId(), "Operation completed");
+    }
+
+    @Test
+    void retryCompensationAndFailureAuditTheirActualTransitions() {
+        OperationJob retrying = currentClaim(OperationPhase.FORWARD, 1, 1);
+        when(jobs.findByIdForUpdate(retrying.getId())).thenReturn(Optional.of(retrying));
+        service.scheduleRetry(context(retrying), "temporary");
+        verify(audit).recordOperationInCurrentTransaction(
+                retrying.getTenantId(), AuditLogService.OPERATION_RETRY, retrying.getId(), "temporary");
+
+        OperationJob compensating = currentClaim(OperationPhase.FORWARD, 1, 1);
+        when(jobs.findByIdForUpdate(compensating.getId())).thenReturn(Optional.of(compensating));
+        service.beginCompensation(context(compensating), "undo");
+        verify(audit).recordOperationInCurrentTransaction(
+                compensating.getTenantId(), AuditLogService.OPERATION_COMPENSATE, compensating.getId(), "undo");
+
+        OperationJob failed = currentClaim(OperationPhase.FORWARD, 1, 1);
+        when(jobs.findByIdForUpdate(failed.getId())).thenReturn(Optional.of(failed));
+        service.fail(context(failed), "permanent");
+        verify(audit).recordOperationInCurrentTransaction(
+                failed.getTenantId(), AuditLogService.OPERATION_FAIL, failed.getId(), "permanent");
+    }
 
     @Test
     void exhaustedRowIsTerminalizedInOneShortClaimCall() {
@@ -164,7 +201,7 @@ class OperationJobClaimServiceTest {
 
     private static OperationExecutionContext context(OperationJob job) {
         return new OperationExecutionContext(job.getId(), job.getClaimToken(), job.getClaimEpoch(),
-                job.getRetryEpoch(), job.getPhase());
+                job.getRetryEpoch(), job.getPhase(), job.getTenantId(), job.getCreatedBy());
     }
 
     private static OperationJob currentClaim(OperationPhase phase, int attempts, int phaseAttempts) {
@@ -178,7 +215,8 @@ class OperationJobClaimServiceTest {
     }
 
     private static OperationJob job(OperationStatus status, int attempts, int phaseAttempts) {
-        return OperationJob.builder().id(UUID.randomUUID()).status(status).phase(OperationPhase.FORWARD)
+        return OperationJob.builder().id(UUID.randomUUID()).tenantId("tenant-a")
+                .status(status).phase(OperationPhase.FORWARD)
                 .attemptCount(attempts).phaseAttemptCount(phaseAttempts).runnable(true)
                 .nextAttemptAt(Instant.now()).claimEpoch(0L).retryEpoch(0L).build();
     }
