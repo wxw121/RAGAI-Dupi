@@ -33,6 +33,7 @@ describe('KbListPage', () => {
     root = null
     container = null
     vi.clearAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('sends the selected retrieval mode when creating a knowledge base', async () => {
@@ -177,7 +178,99 @@ describe('KbListPage', () => {
     expect(container.textContent).toContain('delete-job-1')
     expect(toast.showSuccess).not.toHaveBeenCalledWith('知识库已删除')
   })
+
+  it('does not batch-delete a knowledge base while its single delete request is pending', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    const pendingDelete = deferred<ReturnType<typeof operationJob>>()
+    await renderKnowledgeBases()
+    api.deleteKnowledgeBase.mockReturnValueOnce(pendingDelete.promise)
+
+    const card = Array.from(container!.querySelectorAll<HTMLElement>('.group'))
+      .find((node) => node.textContent?.includes('测试一'))!
+    const checkbox = card.querySelector<HTMLInputElement>('input[aria-label="选择知识库 测试一"]')
+    act(() => checkbox?.click())
+    const singleDelete = card.querySelector<HTMLButtonElement>('button.absolute.right-2.top-2')
+    act(() => singleDelete?.click())
+
+    expect(checkbox?.disabled).toBe(true)
+    const batchButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('批量删除'))
+    expect(batchButton?.disabled).toBe(true)
+    act(() => batchButton?.click())
+    const confirmButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('确认删除'))
+    act(() => confirmButton?.click())
+
+    expect(api.deleteKnowledgeBase).toHaveBeenCalledTimes(1)
+    await act(async () => { pendingDelete.resolve(operationJob('delete-job-1', 'kb-1')); await pendingDelete.promise })
+  })
+
+  it('does not single-delete a knowledge base while its batch delete request is pending', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    const firstDelete = deferred<ReturnType<typeof operationJob>>()
+    const secondDelete = deferred<ReturnType<typeof operationJob>>()
+    await renderKnowledgeBases()
+    api.deleteKnowledgeBase.mockReturnValueOnce(firstDelete.promise).mockReturnValueOnce(secondDelete.promise)
+
+    const selectAll = Array.from(container!.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
+      .find((input) => !input.getAttribute('aria-label'))
+    act(() => selectAll?.click())
+    const batchButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('批量删除'))
+    act(() => batchButton?.click())
+    const confirmButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('确认删除'))
+    await act(async () => { confirmButton?.click(); await Promise.resolve() })
+
+    const firstCardDelete = Array.from(container!.querySelectorAll<HTMLElement>('.group'))[0]
+      ?.querySelector<HTMLButtonElement>('button.absolute.right-2.top-2')
+    expect(firstCardDelete?.disabled).toBe(true)
+    act(() => firstCardDelete?.click())
+
+    expect(api.deleteKnowledgeBase).toHaveBeenCalledTimes(2)
+    await act(async () => {
+      firstDelete.resolve(operationJob('delete-job-1', 'kb-1'))
+      secondDelete.resolve(operationJob('delete-job-2', 'kb-2'))
+      await Promise.all([firstDelete.promise, secondDelete.promise])
+    })
+  })
+
+  it('releases the pending deletion guard when a delete request fails', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    await renderKnowledgeBases()
+    api.deleteKnowledgeBase.mockRejectedValueOnce(new Error('delete unavailable'))
+
+    const card = Array.from(container!.querySelectorAll<HTMLElement>('.group'))
+      .find((node) => node.textContent?.includes('测试一'))!
+    const singleDelete = card.querySelector<HTMLButtonElement>('button.absolute.right-2.top-2')
+    await act(async () => { singleDelete?.click(); await Promise.resolve(); await Promise.resolve() })
+
+    expect(singleDelete?.disabled).toBe(false)
+    expect(card.querySelector<HTMLInputElement>('input[aria-label="选择知识库 测试一"]')?.disabled).toBe(false)
+    expect(toast.showError).toHaveBeenCalledWith('delete unavailable')
+  })
+
+  async function renderKnowledgeBases() {
+    api.listKnowledgeBases.mockResolvedValue([
+      { id: 'kb-1', name: '测试一', createdAt: '2026-01-01', chunkSize: 512, chunkOverlap: 64, topK: 5 },
+      { id: 'kb-2', name: '测试二', createdAt: '2026-01-01', chunkSize: 512, chunkOverlap: 64, topK: 5 },
+    ])
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    await act(async () => { root?.render(<KbListPage />); await Promise.resolve() })
+  }
 })
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
 
 function operationJob(id: string, aggregateId: string) {
   return {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { createKnowledgeBase, deleteKnowledgeBase, listKnowledgeBases } from '@/api/knowledgeBase'
 import type { KnowledgeBase, OperationJobResponse } from '@/types'
@@ -22,6 +22,8 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [batchDeleting, setBatchDeleting] = useState(false)
   const [batchConfirmOpen, setBatchConfirmOpen] = useState(false)
+  const [pendingDeleteIds, setPendingDeleteIds] = useState<Set<string>>(new Set())
+  const pendingDeleteIdsRef = useRef<Set<string>>(new Set())
   const [deleteOperations, setDeleteOperations] = useState<Record<string, OperationJobResponse>>({})
   const [searchQuery, setSearchQuery] = useState('')
   const [name, setName] = useState('')
@@ -54,7 +56,22 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
     if (!query) return kbs
     return kbs.filter((kb) => kb.name.toLocaleLowerCase().includes(query))
   }, [kbs, searchQuery])
-  const selectableFilteredKbs = filteredKbs.filter((kb) => !deleteOperations[kb.id])
+  const isDeleteBlocked = (kbId: string) => pendingDeleteIds.has(kbId) || Boolean(deleteOperations[kbId])
+  const selectableFilteredKbs = filteredKbs.filter((kb) => !isDeleteBlocked(kb.id))
+
+  const markDeletesPending = (kbIds: string[]) => {
+    const next = new Set(pendingDeleteIdsRef.current)
+    kbIds.forEach((kbId) => next.add(kbId))
+    pendingDeleteIdsRef.current = next
+    setPendingDeleteIds(next)
+  }
+
+  const clearDeletesPending = (kbIds: string[]) => {
+    const next = new Set(pendingDeleteIdsRef.current)
+    kbIds.forEach((kbId) => next.delete(kbId))
+    pendingDeleteIdsRef.current = next
+    setPendingDeleteIds(next)
+  }
 
   const handleCreate = async () => {
     if (!name.trim()) return
@@ -84,11 +101,18 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
   const handleDelete = async (kb: KnowledgeBase, e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
-    if (deleteOperations[kb.id]) return
+    if (pendingDeleteIdsRef.current.has(kb.id) || deleteOperations[kb.id]) return
     if (!confirm(`确定删除知识库「${kb.name}」？此操作不可恢复。`)) return
+    markDeletesPending([kb.id])
+    setSelectedIds((current) => {
+      const next = new Set(current)
+      next.delete(kb.id)
+      return next
+    })
     try {
       const job = await deleteKnowledgeBase(kb.id)
       setDeleteOperations((current) => ({ ...current, [kb.id]: job }))
+      clearDeletesPending([kb.id])
       setSelectedIds((current) => {
         const next = new Set(current)
         next.delete(kb.id)
@@ -96,12 +120,13 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
       })
       showSuccess('删除任务已提交')
     } catch (e) {
+      clearDeletesPending([kb.id])
       showError(e instanceof Error ? e.message : '删除失败')
     }
   }
 
   const toggleSelection = (kbId: string) => {
-    if (deleteOperations[kbId]) return
+    if (pendingDeleteIdsRef.current.has(kbId) || deleteOperations[kbId]) return
     setSelectedIds((current) => {
       const next = new Set(current)
       if (next.has(kbId)) next.delete(kbId)
@@ -117,12 +142,16 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
   }
 
   const handleBatchDelete = async () => {
-    const selected = kbs.filter((kb) => selectedIds.has(kb.id) && !deleteOperations[kb.id])
+    const selected = kbs.filter((kb) => selectedIds.has(kb.id)
+      && !pendingDeleteIdsRef.current.has(kb.id)
+      && !deleteOperations[kb.id])
     if (selected.length === 0) return
 
+    const selectedKbIds = selected.map((kb) => kb.id)
+    markDeletesPending(selectedKbIds)
     setBatchConfirmOpen(false)
     setBatchDeleting(true)
-    const results = await Promise.allSettled(selected.map((kb) => deleteKnowledgeBase(kb.id)))
+    const results = await Promise.allSettled(selected.map((kb) => Promise.resolve().then(() => deleteKnowledgeBase(kb.id))))
     const failedIds = new Set(
       selected.filter((_, index) => results[index].status === 'rejected').map((kb) => kb.id),
     )
@@ -132,6 +161,7 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
       return current
     }, {})
     setDeleteOperations((current) => ({ ...current, ...jobs }))
+    clearDeletesPending(selectedKbIds)
     const queuedCount = selected.length - failedIds.size
     setSelectedIds(failedIds)
     setBatchDeleting(false)
@@ -276,7 +306,7 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
               <Card
                 key={kb.id}
                 className="group relative cursor-pointer rounded-2xl border-border bg-background transition-colors hover:bg-muted/40"
-                onClick={() => { if (!deleteOperations[kb.id]) navigate(`/kb/${kb.id}`) }}
+                onClick={() => { if (!isDeleteBlocked(kb.id)) navigate(`/kb/${kb.id}`) }}
               >
                 <label
                   className="absolute left-3 top-3 z-10 flex cursor-pointer items-center"
@@ -286,7 +316,7 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
                     type="checkbox"
                     checked={selectedIds.has(kb.id)}
                     onChange={() => toggleSelection(kb.id)}
-                    disabled={Boolean(deleteOperations[kb.id])}
+                    disabled={isDeleteBlocked(kb.id)}
                     aria-label={`选择知识库 ${kb.name}`}
                     className="h-4 w-4 rounded border-input accent-primary"
                   />
@@ -311,11 +341,11 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
                     </div>
                   )}
                   <div className="mt-4 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
-                    <Button variant="outline" size="sm" disabled={Boolean(deleteOperations[kb.id])} onClick={() => navigate(`/kb/${kb.id}`)}>
+                    <Button variant="outline" size="sm" disabled={isDeleteBlocked(kb.id)} onClick={() => navigate(`/kb/${kb.id}`)}>
                       <FileText className="h-3.5 w-3.5" />
                       管理文档
                     </Button>
-                    <Button size="sm" disabled={Boolean(deleteOperations[kb.id])} onClick={() => navigate(`/kb/${kb.id}?tab=chat`)}>
+                    <Button size="sm" disabled={isDeleteBlocked(kb.id)} onClick={() => navigate(`/kb/${kb.id}?tab=chat`)}>
                       <MessageSquare className="h-3.5 w-3.5" />
                       去问答
                     </Button>
@@ -325,7 +355,7 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
                   variant="ghost"
                   size="sm"
                   className="absolute right-2 top-2"
-                  disabled={Boolean(deleteOperations[kb.id])}
+                  disabled={isDeleteBlocked(kb.id)}
                   onClick={(e) => handleDelete(kb, e)}
                 >
                   <Trash2 className="h-4 w-4 text-destructive" />

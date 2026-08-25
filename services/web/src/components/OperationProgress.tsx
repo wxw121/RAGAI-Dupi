@@ -29,6 +29,7 @@ export function OperationProgress({ initialJob, onCompleted, canRetry = true }: 
   const onCompletedRef = useRef(onCompleted)
   const currentJobIdRef = useRef(initialJob.id)
   const requestEpochRef = useRef(0)
+  const activeRef = useRef(true)
   if (currentJobIdRef.current !== initialJob.id) {
     currentJobIdRef.current = initialJob.id
     requestEpochRef.current += 1
@@ -45,26 +46,33 @@ export function OperationProgress({ initialJob, onCompleted, canRetry = true }: 
   }, [initialJob.id])
 
   useEffect(() => {
+    activeRef.current = true
     return () => {
+      activeRef.current = false
       requestEpochRef.current += 1
     }
   }, [])
 
-  const reconcileCompletion = async (completedJob: OperationJobResponse) => {
-    if (completionInFlightJobId.current === completedJob.id || completedJobId.current === completedJob.id) return
+  const reconcileCompletion = async (
+    completedJob: OperationJobResponse,
+    completionCallback = onCompletedRef.current,
+  ) => {
     const epoch = requestEpochRef.current
+    if (!activeRef.current || currentJobIdRef.current !== completedJob.id) return
+    if (completionInFlightJobId.current === completedJob.id || completedJobId.current === completedJob.id) return
     completionInFlightJobId.current = completedJob.id
     setCompletionRefreshing(true)
     setCompletionError(null)
     try {
-      await onCompletedRef.current(completedJob)
-      if (requestEpochRef.current !== epoch || currentJobIdRef.current !== completedJob.id) return
+      if (!activeRef.current || requestEpochRef.current !== epoch || currentJobIdRef.current !== completedJob.id) return
+      await completionCallback(completedJob)
+      if (!activeRef.current || requestEpochRef.current !== epoch || currentJobIdRef.current !== completedJob.id) return
       completedJobId.current = completedJob.id
     } catch {
-      if (requestEpochRef.current !== epoch || currentJobIdRef.current !== completedJob.id) return
+      if (!activeRef.current || requestEpochRef.current !== epoch || currentJobIdRef.current !== completedJob.id) return
       setCompletionError('操作已完成，但刷新失败。请重试刷新。')
     } finally {
-      if (requestEpochRef.current === epoch && currentJobIdRef.current === completedJob.id) {
+      if (activeRef.current && requestEpochRef.current === epoch && currentJobIdRef.current === completedJob.id) {
         completionInFlightJobId.current = null
         setCompletionRefreshing(false)
       }
@@ -73,7 +81,8 @@ export function OperationProgress({ initialJob, onCompleted, canRetry = true }: 
 
   useEffect(() => {
     if (job.status !== 'COMPLETED' || completedJobId.current === job.id) return
-    void reconcileCompletion(job)
+    const completionCallback = onCompletedRef.current
+    void reconcileCompletion(job, completionCallback)
   }, [job])
 
   useEffect(() => {

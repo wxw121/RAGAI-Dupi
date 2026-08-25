@@ -120,6 +120,26 @@ describe('OperationProgress', () => {
     expect(onCompleted).not.toHaveBeenCalled()
   })
 
+  it('does not reconcile a completed old job when its response and new props commit together', async () => {
+    vi.useFakeTimers()
+    let resolveOld: ((job: OperationJobResponse) => void) | undefined
+    operationApi.getOperation.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve }))
+    const oldCompletion = vi.fn()
+    const newCompletion = vi.fn()
+    render(<OperationProgress initialJob={runningJob} onCompleted={oldCompletion} />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+
+    const nextJob = { ...runningJob, id: 'job-2' }
+    await act(async () => {
+      resolveOld?.({ ...runningJob, status: 'COMPLETED', completedAt: '2026-08-25T00:01:00Z' })
+      await Promise.resolve()
+      root?.render(<OperationProgress initialJob={nextJob} onCompleted={newCompletion} />)
+    })
+
+    expect(oldCompletion).not.toHaveBeenCalled()
+    expect(newCompletion).not.toHaveBeenCalled()
+  })
+
   it('retains completed evidence and offers refresh retry when completion reconciliation fails', async () => {
     const completedJob = { ...runningJob, status: 'COMPLETED' as const, completedAt: '2026-08-25T00:01:00Z' }
     const onCompleted = vi.fn().mockRejectedValueOnce(new Error('refresh failed')).mockResolvedValueOnce(undefined)
