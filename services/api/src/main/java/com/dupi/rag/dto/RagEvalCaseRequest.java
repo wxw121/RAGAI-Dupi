@@ -66,8 +66,19 @@ public class RagEvalCaseRequest {
 
     private long expectedDocumentCount() {
         List<UUID> additional = expectedDocumentIds == null ? List.of() : expectedDocumentIds;
-        return java.util.stream.Stream.concat(java.util.stream.Stream.of(expectedDocumentId), additional.stream())
+        long idCount = java.util.stream.Stream.concat(
+                        java.util.stream.Stream.of(expectedDocumentId), additional.stream())
                 .filter(java.util.Objects::nonNull)
+                .distinct()
+                .count();
+        if (idCount > 0) {
+            return idCount;
+        }
+        List<String> additionalNames = expectedFileNames == null ? List.of() : expectedFileNames;
+        return java.util.stream.Stream.concat(
+                        java.util.stream.Stream.of(expectedFileName), additionalNames.stream())
+                .filter(value -> value != null && !value.isBlank())
+                .map(String::trim)
                 .distinct()
                 .count();
     }

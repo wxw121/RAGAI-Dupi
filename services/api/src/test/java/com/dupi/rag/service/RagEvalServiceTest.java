@@ -304,6 +304,87 @@ class RagEvalServiceTest {
     }
 
     @Test
+    void createCaseResolvesUniqueFilenameOnlyWebPayloadToStableId() {
+        UUID kbId = UUID.randomUUID();
+        Document guide = Document.builder().id(UUID.randomUUID()).kbId(kbId).fileName("guide.md").build();
+        when(documentRepository.findByKbIdOrderByIdAsc(kbId)).thenReturn(List.of(guide));
+        when(caseRepository.save(any(RagEvalCase.class))).thenAnswer(invocation -> {
+            RagEvalCase saved = invocation.getArgument(0);
+            saved.setId(UUID.randomUUID());
+            return saved;
+        });
+        RagEvalCaseRequest request = new RagEvalCaseRequest();
+        request.setCaseKey("legacy-web-single");
+        request.setQuery("question");
+        request.setExpectedFileName("guide.md");
+
+        var response = service().createCase(kbId, request);
+
+        assertThat(response.getExpectedDocumentId()).isEqualTo(guide.getId());
+        assertThat(response.getExpectedFileName()).isEqualTo("guide.md");
+    }
+
+    @Test
+    void createCaseResolvesUniqueMultiFilenameOnlyWebPayloadInOrder() {
+        UUID kbId = UUID.randomUUID();
+        Document guide = Document.builder().id(UUID.randomUUID()).kbId(kbId).fileName("guide.md").build();
+        Document operations = Document.builder().id(UUID.randomUUID()).kbId(kbId).fileName("operations.md").build();
+        when(documentRepository.findByKbIdOrderByIdAsc(kbId)).thenReturn(List.of(operations, guide));
+        when(caseRepository.save(any(RagEvalCase.class))).thenAnswer(invocation -> {
+            RagEvalCase saved = invocation.getArgument(0);
+            saved.setId(UUID.randomUUID());
+            return saved;
+        });
+        RagEvalCaseRequest request = new RagEvalCaseRequest();
+        request.setCaseKey("legacy-web-multi");
+        request.setQuery("question");
+        request.setCategory(RagEvalCaseCategory.MULTI_DOCUMENT);
+        request.setMinHits(2);
+        request.setExpectedFileName("guide.md");
+        request.setExpectedFileNames(List.of("operations.md"));
+
+        assertThat(request.isValidCategoryAssertions()).isTrue();
+        var response = service().createCase(kbId, request);
+
+        assertThat(response.getExpectedDocumentIds()).containsExactly(guide.getId(), operations.getId());
+        assertThat(response.getExpectedFileNames()).containsExactly("guide.md", "operations.md");
+    }
+
+    @Test
+    void createCaseRejectsAmbiguousFilenameOnlyWebPayload() {
+        UUID kbId = UUID.randomUUID();
+        when(documentRepository.findByKbIdOrderByIdAsc(kbId)).thenReturn(List.of(
+                Document.builder().id(UUID.randomUUID()).kbId(kbId).fileName("guide.md").build(),
+                Document.builder().id(UUID.randomUUID()).kbId(kbId).fileName("guide.md").build()));
+        RagEvalCaseRequest request = new RagEvalCaseRequest();
+        request.setCaseKey("ambiguous");
+        request.setQuery("question");
+        request.setExpectedFileName("guide.md");
+
+        assertThatThrownBy(() -> service().createCase(kbId, request))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ambiguous")
+                .hasMessageContaining("guide.md");
+        verify(caseRepository, never()).save(any());
+    }
+
+    @Test
+    void createCaseRejectsMissingFilenameOnlyWebPayload() {
+        UUID kbId = UUID.randomUUID();
+        when(documentRepository.findByKbIdOrderByIdAsc(kbId)).thenReturn(List.of());
+        RagEvalCaseRequest request = new RagEvalCaseRequest();
+        request.setCaseKey("missing");
+        request.setQuery("question");
+        request.setExpectedFileName("gone.md");
+
+        assertThatThrownBy(() -> service().createCase(kbId, request))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not found")
+                .hasMessageContaining("gone.md");
+        verify(caseRepository, never()).save(any());
+    }
+
+    @Test
     void runRejectsKnowledgeBasesAboveTheCaseLimit() {
         UUID kbId = UUID.randomUUID();
         when(caseCoordinator.loadCases(kbId))

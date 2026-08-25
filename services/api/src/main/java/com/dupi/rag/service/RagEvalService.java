@@ -347,7 +347,8 @@ public class RagEvalService {
                 .caseFingerprint(qualityGateService.fingerprint(new RagQualityGateService.CaseDefinition(
                         evalCase.getQuery(), safeMinHits(evalCase), actualTopK,
                         evalCase.getExpectedFileName(), evalCase.getMustContainAny(),
-                        evalCase.getCategory(), evalCase.getExpectedFileNames())))
+                        evalCase.getCategory(), evalCase.getExpectedFileNames(),
+                        evalCase.getExpectedDocumentId(), evalCase.getExpectedDocumentIds())))
                 .passed(failureReasons.isEmpty())
                 .hitPassed(hitPassed)
                 .citationEligible(citationEligible)
@@ -1295,11 +1296,11 @@ public class RagEvalService {
         if (requestedIds.stream().distinct().count() != requestedIds.size()) {
             throw new IllegalArgumentException("Expected document IDs must be unique");
         }
-        if (requestedIds.isEmpty()) {
-            if (blankToNull(request.getExpectedFileName()) != null
-                    || !normalizeSnapshots(request.getExpectedFileNames()).isEmpty()) {
-                throw new IllegalArgumentException("Expected filenames require document IDs");
-            }
+        List<String> clientSnapshots = java.util.stream.Stream.concat(
+                        java.util.stream.Stream.of(blankToNull(request.getExpectedFileName())),
+                        normalizeSnapshots(request.getExpectedFileNames()).stream())
+                .filter(java.util.Objects::nonNull).toList();
+        if (requestedIds.isEmpty() && clientSnapshots.isEmpty()) {
             evalCase.setExpectedDocumentId(null);
             evalCase.setExpectedDocumentIds(List.of());
             evalCase.setExpectedFileName(null);
@@ -1307,17 +1308,40 @@ public class RagEvalService {
             return;
         }
         Map<UUID, Document> documentsById = new LinkedHashMap<>();
-        documentRepository.findAllById(requestedIds).forEach(document -> documentsById.put(document.getId(), document));
+        if (requestedIds.isEmpty()) {
+            if (clientSnapshots.stream().distinct().count() != clientSnapshots.size()) {
+                throw new IllegalArgumentException("Expected filenames must be unique");
+            }
+            Map<String, List<Document>> documentsByName = documentRepository
+                    .findByKbIdOrderByIdAsc(kbId).stream()
+                    .collect(java.util.stream.Collectors.groupingBy(
+                            Document::getFileName, LinkedHashMap::new, java.util.stream.Collectors.toList()));
+            List<UUID> resolvedIds = new ArrayList<>();
+            for (String filename : clientSnapshots) {
+                List<Document> matches = documentsByName.getOrDefault(filename, List.of());
+                if (matches.isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "Expected filename was not found in the knowledge base: " + filename);
+                }
+                if (matches.size() > 1) {
+                    throw new IllegalArgumentException(
+                            "Expected filename is ambiguous in the knowledge base: " + filename);
+                }
+                Document document = matches.get(0);
+                resolvedIds.add(document.getId());
+                documentsById.put(document.getId(), document);
+            }
+            requestedIds = List.copyOf(resolvedIds);
+        } else {
+            documentRepository.findAllById(requestedIds)
+                    .forEach(document -> documentsById.put(document.getId(), document));
+        }
         if (documentsById.size() != requestedIds.size()
                 || requestedIds.stream().map(documentsById::get)
                         .anyMatch(document -> document == null || !kbId.equals(document.getKbId()))) {
             throw new IllegalArgumentException("Expected document does not belong to the knowledge base");
         }
         List<String> snapshots = requestedIds.stream().map(id -> documentsById.get(id).getFileName()).toList();
-        List<String> clientSnapshots = java.util.stream.Stream.concat(
-                        java.util.stream.Stream.of(blankToNull(request.getExpectedFileName())),
-                        normalizeSnapshots(request.getExpectedFileNames()).stream())
-                .filter(java.util.Objects::nonNull).toList();
         if (!clientSnapshots.isEmpty() && !clientSnapshots.equals(snapshots)) {
             throw new IllegalArgumentException("Expected filename does not match the document snapshot");
         }
