@@ -4,7 +4,6 @@ import com.dupi.rag.domain.entity.DocumentTombstone;
 import com.dupi.rag.repository.DocumentTombstoneRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -21,8 +20,7 @@ class AbandonedUploadCleanupService {
         for (String reason : java.util.List.of(
                 DocumentTombstoneService.UPLOAD_ABANDONED,
                 DocumentTombstoneService.UPLOAD_WRITE_ARMED)) {
-            for (DocumentTombstone tombstone : tombstones.findByReasonOrderByCreatedAtAsc(
-                    reason, PageRequest.of(0, limit))) {
+            for (DocumentTombstone tombstone : tombstones.findByReasonOrderByCreatedAtAsc(reason)) {
                 if (completed >= limit) {
                     return completed;
                 }
@@ -33,9 +31,7 @@ class AbandonedUploadCleanupService {
                 }
                 try {
                     storage.deleteChecked(tombstone.getObjectKey());
-                    if (DocumentTombstoneService.UPLOAD_ABANDONED.equals(reason)) {
-                        persistence.complete(tombstone.getDocId(), tombstone.getObjectKey());
-                    }
+                    persistence.complete(tombstone.getDocId(), tombstone.getObjectKey());
                     completed++;
                 } catch (RuntimeException failure) {
                     log.warn("Failed to clean abandoned upload object for document {}",

@@ -126,6 +126,12 @@ public class KnowledgeBaseService {
         return KnowledgeBaseLifecyclePolicy.requireReady(knowledgeBase, id);
     }
 
+    public KnowledgeBase findSystemForUpdateOrThrow(UUID id) {
+        KnowledgeBase knowledgeBase = repository.findSystemByIdForUpdate(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found: " + id));
+        return KnowledgeBaseLifecyclePolicy.requireReady(knowledgeBase, id);
+    }
+
     private KnowledgeBaseResponse toResponse(KnowledgeBase kb) {
         boolean embeddingConfigCurrent = isEmbeddingConfigCurrent(kb);
         UUID kbId = kb.getId();

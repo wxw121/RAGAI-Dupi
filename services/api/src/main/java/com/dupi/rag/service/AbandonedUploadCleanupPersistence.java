@@ -42,7 +42,8 @@ class AbandonedUploadCleanupPersistence {
     void complete(UUID documentId, String objectKey) {
         DocumentTombstone tombstone = tombstones.findByDocId(documentId).orElse(null);
         if (tombstone == null
-                || !"UPLOAD_ABANDONED".equals(tombstone.getReason())
+                || !("UPLOAD_ABANDONED".equals(tombstone.getReason())
+                || DocumentTombstoneService.UPLOAD_WRITE_ARMED.equals(tombstone.getReason()))
                 || !java.util.Objects.equals(objectKey, tombstone.getObjectKey())) {
             return;
         }

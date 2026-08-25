@@ -1,6 +1,7 @@
 package com.dupi.rag.service;
 
 import com.dupi.rag.domain.entity.UploadQuotaReservation;
+import com.dupi.rag.domain.entity.DocumentTombstone;
 import com.dupi.rag.domain.enums.UploadQuotaReservationStatus;
 import com.dupi.rag.repository.DocumentTombstoneRepository;
 import com.dupi.rag.repository.UploadQuotaReservationRepository;
@@ -13,8 +14,25 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
 
 class AbandonedUploadCleanupPersistenceTest {
+
+    @Test
+    void reclaimedArmedWriteBecomesTerminalOnlyAfterObjectDeletionCompletes() {
+        DocumentTombstoneRepository tombstones = mock(DocumentTombstoneRepository.class);
+        UploadQuotaReservationRepository reservations = mock(UploadQuotaReservationRepository.class);
+        UUID documentId = UUID.randomUUID();
+        DocumentTombstone armed = DocumentTombstone.builder().docId(documentId)
+                .objectKey("objects/crashed.md").reason("UPLOAD_WRITE_ARMED").build();
+        when(tombstones.findByDocId(documentId)).thenReturn(Optional.of(armed));
+
+        new AbandonedUploadCleanupPersistence(tombstones, reservations)
+                .complete(documentId, armed.getObjectKey());
+
+        assertThat(armed.getReason()).isEqualTo("UPLOAD_ABANDONED_CLEANED");
+        verify(tombstones).save(armed);
+    }
 
     @Test
     void armedReplayWaitsForLiveWriterButRunsAfterOwnershipIsGone() {

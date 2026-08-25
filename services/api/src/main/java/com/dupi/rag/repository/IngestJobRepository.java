@@ -20,6 +20,12 @@ public interface IngestJobRepository extends JpaRepository<IngestJob, UUID> {
 
     Optional<IngestJob> findTopByDocIdOrderByCreatedAtDesc(UUID docId);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select job from IngestJob job where job.docId = :docId and job.status in :statuses")
+    List<IngestJob> findByDocIdAndStatusInForUpdate(
+            @Param("docId") UUID docId,
+            @Param("statuses") List<IngestJobStatus> statuses);
+
     List<IngestJob> findByKbIdOrderByCreatedAtDesc(UUID kbId);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)

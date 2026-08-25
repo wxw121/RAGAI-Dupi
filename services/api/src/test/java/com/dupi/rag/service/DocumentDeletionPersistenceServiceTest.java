@@ -1,11 +1,15 @@
 package com.dupi.rag.service;
 
 import com.dupi.rag.domain.entity.Document;
+import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.entity.RetrievalProfile;
 import com.dupi.rag.domain.enums.DocumentStatus;
+import com.dupi.rag.domain.enums.IngestJobStatus;
+import com.dupi.rag.domain.enums.IngestStage;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
+import com.dupi.rag.repository.IngestJobRepository;
 import com.dupi.rag.repository.RetrievalProfileRepository;
 import org.junit.jupiter.api.Test;
 
@@ -14,6 +18,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -40,6 +45,29 @@ class DocumentDeletionPersistenceServiceTest {
         order.verify(fixture.vectorTasks).enqueueLegacyDocument(fixture.document.getId());
         verify(fixture.documents, never()).delete(fixture.document);
         verify(fixture.assets, never()).deleteMetadataInCurrentTransaction(fixture.document.getId());
+    }
+
+    @Test
+    void beginRejectsDeletionWhileAClaimedWorkerCanStillWrite() {
+        Fixture fixture = new Fixture();
+        IngestJob active = IngestJob.builder()
+                .id(UUID.randomUUID()).kbId(fixture.kbId).docId(fixture.document.getId())
+                .status(IngestJobStatus.PROCESSING).stage(IngestStage.EMBEDDING).build();
+        List<IngestJobStatus> activeStatuses = List.of(
+                IngestJobStatus.PROCESSING, IngestJobStatus.CANCEL_REQUESTED);
+        when(fixture.jobs.findByDocIdAndStatusInForUpdate(
+                fixture.document.getId(), activeStatuses)).thenReturn(List.of(active));
+
+        assertThatThrownBy(() -> fixture.service.begin(fixture.kbId, fixture.document.getId()))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
+                .hasMessageContaining("ingest");
+
+        assertThat(fixture.document.getStatus()).isNotEqualTo(DocumentStatus.DELETING);
+        var order = inOrder(fixture.knowledgeBases, fixture.jobs, fixture.documents);
+        order.verify(fixture.knowledgeBases).findForUpdateOrThrow(fixture.kbId);
+        order.verify(fixture.jobs).findByDocIdAndStatusInForUpdate(
+                fixture.document.getId(), activeStatuses);
+        order.verify(fixture.documents).findByIdForUpdate(fixture.document.getId());
     }
 
     @Test
@@ -70,6 +98,7 @@ class DocumentDeletionPersistenceServiceTest {
                 .fileName("a.md").objectKey("objects/a.md").quotaReservationId(UUID.randomUUID())
                 .status(DocumentStatus.PENDING).build();
         final DocumentRepository documents = mock(DocumentRepository.class);
+        final IngestJobRepository jobs = mock(IngestJobRepository.class);
         final KnowledgeBaseService knowledgeBases = mock(KnowledgeBaseService.class);
         final DocumentTombstoneService tombstones = mock(DocumentTombstoneService.class);
         final VectorCleanupTaskService vectorTasks = mock(VectorCleanupTaskService.class);
@@ -80,11 +109,14 @@ class DocumentDeletionPersistenceServiceTest {
         final ProfileIndexStateService profileState = mock(ProfileIndexStateService.class);
         final AuditLogService audit = mock(AuditLogService.class);
         final DocumentDeletionPersistenceService service = new DocumentDeletionPersistenceService(
-                documents, knowledgeBases, tombstones, vectorTasks, profiles, chunks,
+                documents, jobs, knowledgeBases, tombstones, vectorTasks, profiles, chunks,
                 assets, quota, profileState, audit);
 
         Fixture() {
             when(knowledgeBases.findForUpdateOrThrow(kbId)).thenReturn(knowledgeBase);
+            when(jobs.findByDocIdAndStatusInForUpdate(
+                    document.getId(), List.of(IngestJobStatus.PROCESSING, IngestJobStatus.CANCEL_REQUESTED)))
+                    .thenReturn(List.of());
             when(documents.findByIdForUpdate(document.getId())).thenReturn(Optional.of(document));
             when(profiles.findByKbIdOrderByVersionDesc(kbId)).thenReturn(List.of(
                     RetrievalProfile.builder().version(3).build(),

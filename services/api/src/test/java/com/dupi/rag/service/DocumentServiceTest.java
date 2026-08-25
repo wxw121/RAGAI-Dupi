@@ -267,12 +267,15 @@ class DocumentServiceTest {
         assertThat(response.getStatus()).isEqualTo(DocumentStatus.PENDING);
         assertThat(response.getCurrentJob()).isNotNull();
         assertThat(response.getCurrentJob().getStatus()).isEqualTo(IngestJobStatus.PENDING);
-        var objectOrder = inOrder(documentTombstoneService, minioStorageService);
+        var objectOrder = inOrder(uploadIntents, documentTombstoneService,
+                minioStorageService, uploadHeartbeat);
+        objectOrder.verify(uploadIntents).prepare(eq("default"), any(), any());
         objectOrder.verify(documentTombstoneService).armUploadCleanup(any(Document.class));
         objectOrder.verify(minioStorageService).upload(
                 contains(kbId.toString()), any(), eq(5L), eq("text/markdown"));
-        verify(uploadIntents).publish(eq("default"), any(Document.class), any(IngestJob.class),
+        objectOrder.verify(uploadIntents).publish(eq("default"), any(Document.class), any(IngestJob.class),
                 any(UploadQuotaReservation.class));
+        objectOrder.verify(uploadHeartbeat).close();
         verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
         verify(auditLogService).recordSuccess(
                 "DOCUMENT_UPLOAD", "DOCUMENT", response.getId(), "Uploaded document a.md");
@@ -378,6 +381,31 @@ class DocumentServiceTest {
         verify(documentTombstoneService, never()).armUploadCleanup(any());
         verify(uploadIntents, never()).fail(any(), any(), any());
         verify(uploadQuotaService, never()).release(any(), anyString());
+    }
+
+    @Test
+    void expiredLeaseBeforeHeartbeatStartPreventsAnyObjectWrite() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId))
+                .thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(uploadQuotaService.reserveForUpload(
+                eq(kbId), any(UUID.class), eq("key"), eq("a.md"),
+                eq("text/markdown"), eq(5L), anyString()))
+                .thenAnswer(invocation -> reservation(kbId, invocation.getArgument(1), "key", 5L));
+        doThrow(new com.dupi.rag.exception.OperationConflictException(
+                "Upload writer ownership was lost before object I/O started"))
+                .when(uploadLeases).start(any());
+
+        assertThatThrownBy(() -> service().upload(
+                kbId,
+                new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes()),
+                "key"))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
+                .hasMessageContaining("ownership");
+
+        verifyNoInteractions(minioStorageService);
+        verify(documentTombstoneService).armUploadCleanup(any(Document.class));
+        verify(uploadIntents, never()).publish(anyString(), any(), any(), any());
     }
 
     @Test

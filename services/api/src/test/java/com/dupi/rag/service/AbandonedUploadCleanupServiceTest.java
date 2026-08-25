@@ -3,7 +3,6 @@ package com.dupi.rag.service;
 import com.dupi.rag.domain.entity.DocumentTombstone;
 import com.dupi.rag.repository.DocumentTombstoneRepository;
 import org.junit.jupiter.api.Test;
-import org.springframework.data.domain.Pageable;
 
 import java.util.List;
 import java.util.UUID;
@@ -27,9 +26,7 @@ class AbandonedUploadCleanupServiceTest {
         DocumentTombstone task = DocumentTombstone.builder().docId(UUID.randomUUID())
                 .kbId(UUID.randomUUID()).objectKey("objects/abandoned.md")
                 .reason("UPLOAD_ABANDONED").build();
-        when(tombstones.findByReasonOrderByCreatedAtAsc(
-                org.mockito.ArgumentMatchers.eq("UPLOAD_ABANDONED"),
-                org.mockito.ArgumentMatchers.any(Pageable.class)))
+        when(tombstones.findByReasonOrderByCreatedAtAsc("UPLOAD_ABANDONED"))
                 .thenReturn(List.of(task));
         doThrow(new IllegalStateException("minio unavailable"))
                 .doNothing().when(storage).deleteChecked(task.getObjectKey());
@@ -46,16 +43,14 @@ class AbandonedUploadCleanupServiceTest {
     }
 
     @Test
-    void armedCrashTruthIsReplayedButNeverDeclaredCleanBeforeWriterCanResolveIt() {
+    void expiredArmedCrashIsTerminalizedAfterSafeObjectDeletion() {
         DocumentTombstoneRepository tombstones = mock(DocumentTombstoneRepository.class);
         MinioStorageService storage = mock(MinioStorageService.class);
         AbandonedUploadCleanupPersistence persistence = mock(AbandonedUploadCleanupPersistence.class);
         DocumentTombstone armed = DocumentTombstone.builder().docId(UUID.randomUUID())
                 .kbId(UUID.randomUUID()).objectKey("objects/possibly-late.md")
                 .reason("UPLOAD_WRITE_ARMED").build();
-        when(tombstones.findByReasonOrderByCreatedAtAsc(
-                org.mockito.ArgumentMatchers.eq("UPLOAD_WRITE_ARMED"),
-                org.mockito.ArgumentMatchers.any(Pageable.class)))
+        when(tombstones.findByReasonOrderByCreatedAtAsc("UPLOAD_WRITE_ARMED"))
                 .thenReturn(List.of(armed));
         when(persistence.shouldReplayArmed(armed.getDocId(), armed.getObjectKey())).thenReturn(true);
         AbandonedUploadCleanupService service = new AbandonedUploadCleanupService(
@@ -64,7 +59,7 @@ class AbandonedUploadCleanupServiceTest {
         assertThat(service.cleanup(10)).isEqualTo(1);
 
         verify(storage).deleteChecked(armed.getObjectKey());
-        verify(persistence, never()).complete(armed.getDocId(), armed.getObjectKey());
+        verify(persistence).complete(armed.getDocId(), armed.getObjectKey());
     }
 
     @Test
@@ -75,14 +70,34 @@ class AbandonedUploadCleanupServiceTest {
         DocumentTombstone armed = DocumentTombstone.builder().docId(UUID.randomUUID())
                 .kbId(UUID.randomUUID()).objectKey("objects/live.md")
                 .reason("UPLOAD_WRITE_ARMED").build();
-        when(tombstones.findByReasonOrderByCreatedAtAsc(
-                org.mockito.ArgumentMatchers.eq("UPLOAD_WRITE_ARMED"),
-                org.mockito.ArgumentMatchers.any(Pageable.class)))
+        when(tombstones.findByReasonOrderByCreatedAtAsc("UPLOAD_WRITE_ARMED"))
                 .thenReturn(List.of(armed));
         when(persistence.shouldReplayArmed(armed.getDocId(), armed.getObjectKey())).thenReturn(false);
 
         assertThat(new AbandonedUploadCleanupService(tombstones, storage, persistence).cleanup(10)).isZero();
 
         verifyNoInteractions(storage);
+    }
+
+    @Test
+    void liveOldestArmedWriteDoesNotStarveLaterExpiredCleanupInSmallBatch() {
+        DocumentTombstoneRepository tombstones = mock(DocumentTombstoneRepository.class);
+        MinioStorageService storage = mock(MinioStorageService.class);
+        AbandonedUploadCleanupPersistence persistence = mock(AbandonedUploadCleanupPersistence.class);
+        DocumentTombstone live = DocumentTombstone.builder().docId(UUID.randomUUID())
+                .objectKey("objects/live.md").reason("UPLOAD_WRITE_ARMED").build();
+        DocumentTombstone expired = DocumentTombstone.builder().docId(UUID.randomUUID())
+                .objectKey("objects/expired.md").reason("UPLOAD_WRITE_ARMED").build();
+        when(tombstones.findByReasonOrderByCreatedAtAsc("UPLOAD_WRITE_ARMED"))
+                .thenReturn(List.of(live, expired));
+        when(persistence.shouldReplayArmed(live.getDocId(), live.getObjectKey())).thenReturn(false);
+        when(persistence.shouldReplayArmed(expired.getDocId(), expired.getObjectKey())).thenReturn(true);
+
+        assertThat(new AbandonedUploadCleanupService(tombstones, storage, persistence).cleanup(1))
+                .isEqualTo(1);
+
+        verify(storage, never()).deleteChecked(live.getObjectKey());
+        verify(storage).deleteChecked(expired.getObjectKey());
+        verify(persistence).complete(expired.getDocId(), expired.getObjectKey());
     }
 }

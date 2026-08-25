@@ -157,14 +157,13 @@ public class DocumentService {
                     throw new OperationConflictException(
                             "Upload writer ownership was lost; object cleanup was scheduled");
                 }
+
+                DocumentUploadPublication publication = uploadIntents.publish(
+                        TenantContext.getTenantId(), doc, job, reservation);
+                doc = publication.document();
+                job = publication.job();
+                response = toResponse(doc, job);
             }
-
-            DocumentUploadPublication publication = uploadIntents.publish(
-                    TenantContext.getTenantId(), doc, job, reservation);
-            doc = publication.document();
-            job = publication.job();
-
-            response = toResponse(doc, job);
         } catch (Exception e) {
             if (intentPrepared && !writerLeaseAcquired) {
                 throw uploadFailure(e);

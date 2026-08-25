@@ -308,10 +308,13 @@ class KnowledgeBaseServiceTest {
         when(repository.findByIdAndTenantIdForUpdateAnyStatus(id, "default"))
                 .thenReturn(Optional.of(deleting));
         when(repository.findById(id)).thenReturn(Optional.of(deleting));
+        when(repository.findSystemByIdForUpdate(id)).thenReturn(Optional.of(deleting));
 
         assertThatThrownBy(() -> service.findForUpdateOrThrow(id))
                 .isInstanceOf(OperationConflictException.class);
         assertThatThrownBy(() -> service.findSystemOrThrow(id))
+                .isInstanceOf(OperationConflictException.class);
+        assertThatThrownBy(() -> service.findSystemForUpdateOrThrow(id))
                 .isInstanceOf(OperationConflictException.class);
     }
 }

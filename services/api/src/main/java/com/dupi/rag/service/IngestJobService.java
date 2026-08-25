@@ -95,7 +95,8 @@ public class IngestJobService {
             log.info("Ignored ingest status update for tombstoned document {}, job {}", docId, jobId);
             return IngestCallbackAckResponse.ignored("document_tombstoned");
         }
-        IngestJob job = findJobForUpdate(jobId);
+        LockedIngestMutation mutation = lockSystemMutation(jobId);
+        IngestJob job = mutation.job();
 
         Document doc = findDocumentForUpdate(docId)
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
@@ -190,7 +191,7 @@ public class IngestJobService {
         documentRepository.save(doc);
         ingestJobRepository.save(job);
         if (completedUpdate) {
-            KnowledgeBase kb = knowledgeBaseService.findSystemOrThrow(doc.getKbId());
+            KnowledgeBase kb = mutation.knowledgeBase();
             profileIndexStateService.bumpRevision(kb);
             if (!wasV2Activated && !wasV2Ready && profileIndexStateService.isV2Ready(doc.getKbId())) {
                 profileIndexStateService.activateV2Index(kb);
@@ -202,7 +203,9 @@ public class IngestJobService {
 
     @Transactional
     public IngestJobResponse claim(UUID jobId, UUID executionId, String workerId, Duration leaseDuration) {
-        IngestJob job = findJobForUpdate(jobId);
+        LockedWorkerMutation mutation = lockWorkerMutation(jobId);
+        IngestJob job = mutation.job();
+        UploadIntentLifecyclePolicy.requireDocumentMutationAllowed(mutation.document());
         UUID currentExecutionId = ensureExecutionId(job);
         if (!currentExecutionId.equals(executionId)) {
             throw new IllegalStateException("Ingest execution mismatch");
@@ -223,7 +226,9 @@ public class IngestJobService {
 
     @Transactional
     public IngestJobResponse refreshLease(UUID jobId, UUID executionId, String workerId, Duration leaseDuration) {
-        IngestJob job = findJobForUpdate(jobId);
+        LockedWorkerMutation mutation = lockWorkerMutation(jobId);
+        IngestJob job = mutation.job();
+        UploadIntentLifecyclePolicy.requireDocumentMutationAllowed(mutation.document());
         if (!ensureExecutionId(job).equals(executionId)) {
             throw new IllegalStateException("Ingest execution mismatch");
         }
@@ -239,11 +244,15 @@ public class IngestJobService {
         return toResponse(job);
     }
 
-    @Transactional(readOnly = true)
+    @Transactional
     public boolean isCancellationRequested(UUID jobId, UUID executionId) {
-        IngestJob job = ingestJobRepository.findById(jobId)
-                .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
+        LockedWorkerMutation mutation = lockWorkerMutation(jobId);
+        IngestJob job = mutation.job();
+        Document document = mutation.document();
         if (job.getExecutionId() == null || !job.getExecutionId().equals(executionId)) {
+            return true;
+        }
+        if (UploadIntentLifecyclePolicy.isDeleting(document)) {
             return true;
         }
         return job.getStatus() == IngestJobStatus.CANCEL_REQUESTED || isTerminal(job.getStatus());
@@ -306,14 +315,13 @@ public class IngestJobService {
 
     @Transactional
     public IngestJobResponse retry(UUID jobId) {
-        IngestJob job = findJobForUpdate(jobId);
-        KnowledgeBase kb = knowledgeBaseService.findSystemOrThrow(job.getKbId());
-        return retryJob(job, kb);
+        LockedIngestMutation mutation = lockSystemMutation(jobId);
+        return retryJob(mutation.job(), mutation.knowledgeBase());
     }
 
     @Transactional
     public IngestJobResponse retryForKnowledgeBase(UUID kbId, UUID jobId) {
-        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
+        KnowledgeBase kb = knowledgeBaseService.findForUpdateOrThrow(kbId);
         IngestJob job = findJobForUpdate(jobId);
         if (!job.getKbId().equals(kbId)) {
             throw new IllegalArgumentException("Ingest job does not belong to knowledge base: " + kbId);
@@ -549,6 +557,32 @@ public class IngestJobService {
 
     private Optional<Document> findDocumentForUpdate(UUID documentId) {
         return documentRepository.findByIdForUpdate(documentId);
+    }
+
+    /** Worker-only paths use the job/document suffix of the global lock order. */
+    private LockedWorkerMutation lockWorkerMutation(UUID jobId) {
+        IngestJob job = findJobForUpdate(jobId);
+        Document document = findDocumentForUpdate(job.getDocId())
+                .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
+        return new LockedWorkerMutation(job, document);
+    }
+
+    /** Global mutation lock order: knowledge base, then ingest job, then document. */
+    private LockedIngestMutation lockSystemMutation(UUID jobId) {
+        IngestJob discovered = ingestJobRepository.findById(jobId)
+                .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
+        KnowledgeBase knowledgeBase = knowledgeBaseService.findSystemForUpdateOrThrow(discovered.getKbId());
+        IngestJob locked = findJobForUpdate(jobId);
+        if (!knowledgeBase.getId().equals(locked.getKbId())) {
+            throw new IllegalStateException("Ingest job knowledge base changed while acquiring locks");
+        }
+        return new LockedIngestMutation(knowledgeBase, locked);
+    }
+
+    private record LockedIngestMutation(KnowledgeBase knowledgeBase, IngestJob job) {
+    }
+
+    private record LockedWorkerMutation(IngestJob job, Document document) {
     }
 
     private void rotateExecution(IngestJob job) {

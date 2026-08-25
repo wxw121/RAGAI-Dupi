@@ -45,6 +45,7 @@ class OperationTransactionStructureTest {
     @Test
     void documentDeletionUsesTwoProxiedShortTransactionsAroundUnlockedObjectIo() throws Exception {
         var documents = mock(com.dupi.rag.repository.DocumentRepository.class);
+        var ingestJobs = mock(com.dupi.rag.repository.IngestJobRepository.class);
         var knowledgeBases = mock(KnowledgeBaseService.class);
         var tombstones = mock(DocumentTombstoneService.class);
         var vectorTasks = mock(VectorCleanupTaskService.class);
@@ -68,7 +69,7 @@ class OperationTransactionStructureTest {
         try (AnnotationConfigApplicationContext spring = transactionalContext(transactions)) {
             spring.registerBean(DocumentDeletionPersistenceService.class,
                     () -> new DocumentDeletionPersistenceService(
-                            documents, knowledgeBases, tombstones, vectorTasks, profiles,
+                            documents, ingestJobs, knowledgeBases, tombstones, vectorTasks, profiles,
                             chunks, assets, quota, profileState, audit));
             spring.refresh();
 

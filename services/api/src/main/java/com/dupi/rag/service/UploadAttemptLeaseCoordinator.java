@@ -2,6 +2,7 @@ package com.dupi.rag.service;
 
 import com.dupi.rag.config.UploadQuotaProperties;
 import com.dupi.rag.domain.entity.UploadQuotaReservation;
+import com.dupi.rag.exception.OperationConflictException;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -45,6 +46,10 @@ final class UploadAttemptLeaseCoordinator implements AutoCloseable {
     }
 
     UploadAttemptHeartbeat start(UploadAttemptLease lease) {
+        if (!quota.renewWriterLease(lease)) {
+            throw new OperationConflictException(
+                    "Upload writer ownership was lost before object I/O started");
+        }
         AtomicBoolean ownershipLost = new AtomicBoolean(false);
         long intervalMillis = Math.max(1L, leaseDuration.toMillis() / 3L);
         var task = scheduler.scheduleWithFixedDelay(() -> {

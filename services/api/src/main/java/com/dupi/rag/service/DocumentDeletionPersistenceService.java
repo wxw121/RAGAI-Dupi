@@ -3,9 +3,12 @@ package com.dupi.rag.service;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.enums.DocumentStatus;
+import com.dupi.rag.domain.enums.IngestJobStatus;
+import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.ChunkRepository;
 import com.dupi.rag.repository.DocumentRepository;
+import com.dupi.rag.repository.IngestJobRepository;
 import com.dupi.rag.repository.RetrievalProfileRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -20,6 +23,7 @@ import java.util.UUID;
 @RequiredArgsConstructor
 class DocumentDeletionPersistenceService {
     private final DocumentRepository documents;
+    private final IngestJobRepository jobs;
     private final KnowledgeBaseService knowledgeBases;
     private final DocumentTombstoneService tombstones;
     private final VectorCleanupTaskService vectorTasks;
@@ -33,10 +37,17 @@ class DocumentDeletionPersistenceService {
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     DocumentDeletionClaim begin(UUID knowledgeBaseId, UUID documentId) {
         knowledgeBases.findForUpdateOrThrow(knowledgeBaseId);
+        boolean activeExecution = !jobs.findByDocIdAndStatusInForUpdate(documentId, List.of(
+                IngestJobStatus.PROCESSING,
+                IngestJobStatus.CANCEL_REQUESTED)).isEmpty();
         Document document = documents.findByIdForUpdate(documentId)
                 .filter(candidate -> knowledgeBaseId.equals(candidate.getKbId()))
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "Document not found: " + documentId));
+        if (activeExecution) {
+            throw new OperationConflictException(
+                    "Document cannot be deleted while ingest execution can still write");
+        }
         if (document.getStatus() != DocumentStatus.DELETING) {
             UploadIntentLifecyclePolicy.requireDocumentMutationAllowed(document);
             document.setStatus(DocumentStatus.DELETING);

@@ -10,12 +10,31 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class UploadAttemptLeaseCoordinatorTest {
+
+    @Test
+    void startSynchronouslyConfirmsOwnershipBeforeRemoteIoCanBegin() {
+        UploadQuotaService quota = mock(UploadQuotaService.class);
+        UploadAttemptLease lease = new UploadAttemptLease(
+                UUID.randomUUID(), UUID.randomUUID(), "upload-writer:test");
+        when(quota.renewWriterLease(lease)).thenReturn(false);
+
+        var executor = Executors.newSingleThreadScheduledExecutor();
+        try (UploadAttemptLeaseCoordinator coordinator = new UploadAttemptLeaseCoordinator(
+                quota, Duration.ofSeconds(30), executor)) {
+            assertThatThrownBy(() -> coordinator.start(lease))
+                    .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
+                    .hasMessageContaining("ownership");
+        }
+
+        verify(quota).renewWriterLease(lease);
+    }
 
     @Test
     void stalledUploadRenewsDurableWriterOwnershipPastTheOriginalLease() throws Exception {
