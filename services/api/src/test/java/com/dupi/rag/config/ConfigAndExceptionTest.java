@@ -50,12 +50,16 @@ class ConfigAndExceptionTest {
                 .contains("runner-cron: ${OPERATION_RUNNER_CRON:*/5 * * * * *}")
                 .contains("runner-batch-size: ${OPERATION_RUNNER_BATCH_SIZE:10}")
                 .contains("runner-cleanup-limit: ${OPERATION_RUNNER_CLEANUP_LIMIT:10}")
-                .contains("staging-retention-hours: ${OPERATION_STAGING_RETENTION_HOURS:24}");
+                .contains("staging-retention-hours: ${OPERATION_STAGING_RETENTION_HOURS:24}")
+                .contains("staging-cleanup-limit: ${OPERATION_STAGING_CLEANUP_LIMIT:10}")
+                .contains("staging-cleanup-cron: ${OPERATION_STAGING_CLEANUP_CRON:0 0 * * * *}");
         assertThat(environment)
                 .contains("OPERATION_RUNNER_CRON=*/5 * * * * *")
                 .contains("OPERATION_RUNNER_BATCH_SIZE=10")
                 .contains("OPERATION_RUNNER_CLEANUP_LIMIT=10")
-                .contains("OPERATION_STAGING_RETENTION_HOURS=24");
+                .contains("OPERATION_STAGING_RETENTION_HOURS=24")
+                .contains("OPERATION_STAGING_CLEANUP_LIMIT=10")
+                .contains("OPERATION_STAGING_CLEANUP_CRON=0 0 * * * *");
     }
 
     @Test

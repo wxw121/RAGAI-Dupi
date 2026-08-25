@@ -85,6 +85,7 @@ public class GovernanceSummaryResponse {
         private Map<OperationStatus, Long> countsByStatus;
         private long due;
         private long oldestDueAgeSeconds;
+        /** Claimed attempts after the first claim of each entered execution phase. */
         private long retryCount;
         private long compensationFailures;
     }

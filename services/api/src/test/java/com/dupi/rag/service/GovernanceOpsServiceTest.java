@@ -169,6 +169,19 @@ class GovernanceOpsServiceTest {
                 );
     }
 
+    @Test
+    void expiredLeaseAgeUsesTheFixedGovernanceClock() {
+        Instant now = Instant.parse("2026-08-25T10:00:00Z");
+        when(operationJobRepository.countDueBefore(now)).thenReturn(1L);
+        when(operationJobRepository.findOldestDueAt(now))
+                .thenReturn(Optional.of(now.minusSeconds(91)));
+
+        var operations = service(now).summarize().getOperations();
+
+        assertThat(operations.getDue()).isEqualTo(1L);
+        assertThat(operations.getOldestDueAgeSeconds()).isEqualTo(91L);
+    }
+
     private GovernanceOpsService service(Instant now) {
         return new GovernanceOpsService(
                 uploadQuotaReservationRepository,

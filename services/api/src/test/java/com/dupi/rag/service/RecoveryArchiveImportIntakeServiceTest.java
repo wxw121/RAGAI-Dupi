@@ -277,6 +277,7 @@ class RecoveryArchiveImportIntakeServiceTest {
         when(jobs.saveAndFlush(job)).thenReturn(job);
 
         writes.scheduleCleanup(job.getId(), plan, "partial put; delete timeout");
+        writes.scheduleCleanup(job.getId(), plan, "duplicate caller");
 
         assertThat(stage.getStatus()).isEqualTo(OperationStepStatus.FAILED);
         assertThat(stage.getLastError()).contains("delete timeout");
@@ -284,8 +285,8 @@ class RecoveryArchiveImportIntakeServiceTest {
         assertThat(job.getStatus()).isEqualTo(OperationStatus.COMPENSATING);
         assertThat(job.getRunnable()).isTrue();
         assertThat(job.getNextAttemptAt()).isNotNull();
-        verify(audit).recordOperationInCurrentTransaction(
-                "tenant-a", AuditLogService.OPERATION_COMPENSATE, job.getId(), job.getLastError());
+        verify(audit, times(1)).recordOperationInCurrentTransaction(
+                eq("tenant-a"), eq(AuditLogService.OPERATION_COMPENSATE), eq(job.getId()), anyString());
     }
 
     @Test

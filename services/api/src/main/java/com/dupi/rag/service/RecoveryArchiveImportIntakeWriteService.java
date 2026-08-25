@@ -115,6 +115,17 @@ class RecoveryArchiveImportIntakeWriteService {
         validatePlan(job, plan);
         OperationStep stage = requiredStage(jobId);
         if (stage.getStatus() == OperationStepStatus.COMPLETED && Boolean.TRUE.equals(job.getRunnable())) return;
+        if (job.getPhase() == OperationPhase.COMPENSATION
+                && job.getStatus() == OperationStatus.COMPENSATING
+                && Boolean.TRUE.equals(job.getRunnable())
+                && stage.getStatus() == OperationStepStatus.FAILED) {
+            return;
+        }
+        if (job.getPhase() != OperationPhase.FORWARD
+                || job.getStatus() != OperationStatus.PREPARED
+                || Boolean.TRUE.equals(job.getRunnable())) {
+            throw new OperationConflictException("Recovery import intake is no longer eligible for cleanup");
+        }
         stage.setStatus(OperationStepStatus.FAILED);
         stage.setLastError(limit(diagnostic));
         stage.setCompletedAt(Instant.now());

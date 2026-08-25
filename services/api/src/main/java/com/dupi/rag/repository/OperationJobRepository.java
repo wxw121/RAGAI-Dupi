@@ -8,6 +8,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.repository.query.Param;
+import org.springframework.data.domain.Pageable;
 
 import java.time.Instant;
 import java.util.List;
@@ -36,29 +37,57 @@ public interface OperationJobRepository extends JpaRepository<OperationJob, UUID
     @Query("""
             select count(job) from OperationJob job
             where job.runnable = true
-              and job.status in (
-                com.dupi.rag.domain.enums.OperationStatus.PREPARED,
-                com.dupi.rag.domain.enums.OperationStatus.RETRY_WAIT,
-                com.dupi.rag.domain.enums.OperationStatus.COMPENSATING
-              )
-              and job.nextAttemptAt <= :now
+              and ((job.status in (
+                    com.dupi.rag.domain.enums.OperationStatus.PREPARED,
+                    com.dupi.rag.domain.enums.OperationStatus.RETRY_WAIT,
+                    com.dupi.rag.domain.enums.OperationStatus.COMPENSATING
+                  ) and job.nextAttemptAt <= :now)
+                or (job.status = com.dupi.rag.domain.enums.OperationStatus.RUNNING
+                  and job.leaseExpiresAt <= :now))
             """)
     long countDueBefore(@Param("now") Instant now);
 
     @Query("""
-            select min(job.nextAttemptAt) from OperationJob job
+            select min(case when job.status = com.dupi.rag.domain.enums.OperationStatus.RUNNING
+                       then job.leaseExpiresAt else job.nextAttemptAt end)
+            from OperationJob job
             where job.runnable = true
-              and job.status in (
-                com.dupi.rag.domain.enums.OperationStatus.PREPARED,
-                com.dupi.rag.domain.enums.OperationStatus.RETRY_WAIT,
-                com.dupi.rag.domain.enums.OperationStatus.COMPENSATING
-              )
-              and job.nextAttemptAt <= :now
+              and ((job.status in (
+                    com.dupi.rag.domain.enums.OperationStatus.PREPARED,
+                    com.dupi.rag.domain.enums.OperationStatus.RETRY_WAIT,
+                    com.dupi.rag.domain.enums.OperationStatus.COMPENSATING
+                  ) and job.nextAttemptAt <= :now)
+                or (job.status = com.dupi.rag.domain.enums.OperationStatus.RUNNING
+                  and job.leaseExpiresAt <= :now))
             """)
     Optional<Instant> findOldestDueAt(@Param("now") Instant now);
 
-    @Query("select coalesce(sum(case when job.attemptCount > 1 then job.attemptCount - 1 else 0 end), 0) from OperationJob job")
+    /** Claimed attempts beyond the first attempt of each actually-entered execution phase. */
+    @Query("""
+            select coalesce(sum(
+              case
+                when job.phase = com.dupi.rag.domain.enums.OperationPhase.COMPENSATION
+                  and job.attemptCount > job.phaseAttemptCount
+                then case when job.attemptCount > 2 then job.attemptCount - 2 else 0 end
+                else case when job.attemptCount > 1 then job.attemptCount - 1 else 0 end
+              end), 0)
+            from OperationJob job
+            """)
     long sumRetryCount();
+
+    @Query("""
+            select job.id from OperationJob job
+            where job.operationType in (
+                com.dupi.rag.domain.enums.OperationType.RECOVERY_ARCHIVE_IMPORT,
+                com.dupi.rag.domain.enums.OperationType.MARKDOWN_PACKAGE_IMPORT
+              )
+              and job.status = com.dupi.rag.domain.enums.OperationStatus.PREPARED
+              and job.phase = com.dupi.rag.domain.enums.OperationPhase.FORWARD
+              and job.runnable = false
+              and job.createdAt <= :cutoff
+            order by job.createdAt asc, job.id asc
+            """)
+    List<UUID> findExpiredStagingIntakes(@Param("cutoff") Instant cutoff, Pageable pageable);
 
     long countByPhaseAndStatus(OperationPhase phase, OperationStatus status);
 

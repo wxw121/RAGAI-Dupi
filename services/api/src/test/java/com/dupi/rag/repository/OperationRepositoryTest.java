@@ -15,6 +15,57 @@ import static org.assertj.core.api.Assertions.assertThat;
 class OperationRepositoryTest {
 
     @Test
+    void governanceDueQueriesMirrorRunnableClaimsIncludingExpiredLeases() throws Exception {
+        String countQuery = OperationJobRepository.class.getMethod("countDueBefore", Instant.class)
+                .getAnnotation(Query.class).value();
+        String oldestQuery = OperationJobRepository.class.getMethod("findOldestDueAt", Instant.class)
+                .getAnnotation(Query.class).value();
+
+        assertThat(countQuery)
+                .contains("job.runnable = true")
+                .contains("job.nextAttemptAt <= :now")
+                .contains("OperationStatus.RUNNING")
+                .contains("job.leaseExpiresAt <= :now");
+        assertThat(oldestQuery)
+                .contains("case when job.status =")
+                .contains("OperationStatus.RUNNING")
+                .contains("then job.leaseExpiresAt")
+                .contains("else job.nextAttemptAt")
+                .contains("job.leaseExpiresAt <= :now");
+    }
+
+    @Test
+    void retryAggregationDoesNotCountTheInitialAttemptOfEitherPhase() throws Exception {
+        String query = OperationJobRepository.class.getMethod("sumRetryCount")
+                .getAnnotation(Query.class).value();
+
+        assertThat(query)
+                .contains("job.phase")
+                .contains("OperationPhase.COMPENSATION")
+                .contains("job.phaseAttemptCount")
+                .contains("job.attemptCount - 2");
+    }
+
+    @Test
+    void retentionScanIsBoundedByPageableAndSelectsOnlyStagedImportIntakes() throws Exception {
+        var method = OperationJobRepository.class.getMethod(
+                "findExpiredStagingIntakes", Instant.class,
+                org.springframework.data.domain.Pageable.class);
+        String query = method.getAnnotation(Query.class).value();
+
+        assertThat(query)
+                .contains("OperationType.RECOVERY_ARCHIVE_IMPORT")
+                .contains("OperationType.MARKDOWN_PACKAGE_IMPORT")
+                .contains("OperationStatus.PREPARED")
+                .contains("OperationPhase.FORWARD")
+                .contains("job.runnable = false")
+                .contains("job.createdAt <= :cutoff")
+                .contains("order by job.createdAt asc, job.id asc");
+        assertThat(method.getParameterTypes()[1])
+                .isEqualTo(org.springframework.data.domain.Pageable.class);
+    }
+
+    @Test
     void jobRepositoryCanFindAnIdempotentRequest() throws NoSuchMethodException {
         var method = OperationJobRepository.class.getMethod(
                 "findByTenantIdAndOperationTypeAndIdempotencyKey",
