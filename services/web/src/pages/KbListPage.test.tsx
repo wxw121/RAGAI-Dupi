@@ -9,13 +9,19 @@ const api = vi.hoisted(() => ({
   deleteKnowledgeBase: vi.fn(),
 }))
 const toast = vi.hoisted(() => ({ showError: vi.fn(), showSuccess: vi.fn() }))
+const navigation = vi.hoisted(() => ({ navigate: vi.fn() }))
 
 vi.mock('@/api/knowledgeBase', () => api)
 vi.mock('@/components/AppLayout', () => ({ AppLayout: ({ children }: { children: React.ReactNode }) => children }))
 vi.mock('@/components/Toast', () => ({
   useToast: () => toast,
 }))
-vi.mock('react-router-dom', () => ({ useNavigate: () => vi.fn() }))
+vi.mock('@/components/OperationProgress', () => ({
+  OperationProgress: ({ initialJob, onCompleted }: { initialJob: { id: string }; onCompleted: () => void }) => (
+    <button data-testid="operation-progress" onClick={onCompleted}>{initialJob.id}</button>
+  ),
+}))
+vi.mock('react-router-dom', () => ({ useNavigate: () => navigation.navigate }))
 
 describe('KbListPage', () => {
   let root: Root | null = null
@@ -109,7 +115,9 @@ describe('KbListPage', () => {
         { id: 'kb-2', name: '测试二', createdAt: '2026-01-01', chunkSize: 512, chunkOverlap: 64, topK: 5 },
       ])
       .mockResolvedValueOnce([])
-    api.deleteKnowledgeBase.mockResolvedValue(undefined)
+    api.deleteKnowledgeBase
+      .mockResolvedValueOnce(operationJob('delete-job-1', 'kb-1'))
+      .mockResolvedValueOnce(operationJob('delete-job-2', 'kb-2'))
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -144,9 +152,29 @@ describe('KbListPage', () => {
     expect(api.deleteKnowledgeBase).toHaveBeenCalledTimes(2)
     expect(api.deleteKnowledgeBase).toHaveBeenCalledWith('kb-1')
     expect(api.deleteKnowledgeBase).toHaveBeenCalledWith('kb-2')
-    expect(toast.showSuccess).toHaveBeenCalledWith('已删除 2 个知识库')
+    expect(container.textContent).toContain('delete-job-1')
+    expect(container.textContent).toContain('delete-job-2')
+    expect(api.listKnowledgeBases).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      Array.from(container!.querySelectorAll<HTMLElement>('.group')).find((card) => card.textContent?.includes('测试一'))?.click()
+    })
+    expect(navigation.navigate).not.toHaveBeenCalled()
+
+    await act(async () => {
+      container!.querySelectorAll<HTMLButtonElement>('[data-testid="operation-progress"]')[0]?.click()
+      await Promise.resolve()
+    })
+    expect(api.listKnowledgeBases).toHaveBeenCalledTimes(2)
   })
 })
+
+function operationJob(id: string, aggregateId: string) {
+  return {
+    id, operationType: 'KNOWLEDGE_BASE_DELETE', aggregateType: 'KNOWLEDGE_BASE', aggregateId,
+    status: 'RUNNING', attemptCount: 0, nextAttemptAt: null, errorCode: null, errorMessage: null,
+    createdAt: '2026-08-25T00:00:00Z', updatedAt: '2026-08-25T00:00:00Z', completedAt: null, steps: [],
+  }
+}
 
 function setNativeValue(element: HTMLInputElement | HTMLSelectElement, value: string) {
   const prototype = element instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype

@@ -196,7 +196,9 @@ const EMPTY_FORM: RagEvalCaseRequest = {
   topK: 5,
   category: 'REAL_QUERY',
   expectedFileName: '',
+  expectedDocumentId: undefined,
   expectedFileNames: [],
+  expectedDocumentIds: [],
   mustContainAny: [],
 }
 
@@ -215,6 +217,7 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [addPanelOpen, setAddPanelOpen] = useState(false)
   const [addDocuments, setAddDocuments] = useState<Document[]>([])
+  const [sourceDocuments, setSourceDocuments] = useState<Document[]>([])
   const [selectedAddDocumentIds, setSelectedAddDocumentIds] = useState<string[]>([])
   const [addCasesPerDocument, setAddCasesPerDocument] = useState(2)
   const [addGenerationPreview, setAddGenerationPreview] = useState<RagEvalGenerationPreview | null>(null)
@@ -241,14 +244,16 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
       listRagEvalRuns(kbId),
       getRagQualityPolicy(kbId),
       Promise.resolve(listRetrievalProfiles(kbId)),
+      Promise.resolve(listDocuments(kbId)).catch(() => []),
     ])
-      .then(([nextCases, nextRuns, nextPolicy, nextRetrievalProfiles]) => {
+      .then(([nextCases, nextRuns, nextPolicy, nextRetrievalProfiles, nextDocuments]) => {
         if (!active) return
         const profiles = nextRetrievalProfiles ?? []
         setCases(nextCases)
         setRuns(nextRuns)
         setPolicy(nextPolicy)
         setRetrievalProfiles(profiles)
+        setSourceDocuments((nextDocuments ?? []).filter((document) => document.status === 'COMPLETED'))
         setSelectedRetrievalProfileId((current) => current || profiles.find((profile) => !profile.active)?.id || '')
       })
       .catch((error: unknown) => {
@@ -428,7 +433,9 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
       topK: caseDef.topK ?? 5,
       category: caseDef.category ?? 'REAL_QUERY',
       expectedFileName: caseDef.expectedFileName ?? '',
+      expectedDocumentId: caseDef.expectedDocumentId,
       expectedFileNames: caseDef.expectedFileNames ?? [],
+      expectedDocumentIds: caseDef.expectedDocumentIds ?? [],
       mustContainAny: caseDef.mustContainAny ?? [],
     })
   }
@@ -445,6 +452,8 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
       expectedFileName: form.expectedFileName?.trim() || undefined,
       expectedFileNames: expectedFileNamesInput.split(',').map((fileName) => fileName.trim()).filter(Boolean),
       mustContainAny: mustContainAnyInput.split(',').map((token) => token.trim()).filter(Boolean),
+      ...(form.expectedDocumentId ? { expectedDocumentId: form.expectedDocumentId } : {}),
+      ...(form.expectedDocumentIds?.length ? { expectedDocumentIds: form.expectedDocumentIds } : {}),
     }
     try {
       const saved = editingId
@@ -527,7 +536,10 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
         documentFingerprint: generationPreview.documentFingerprint,
         caseFingerprint: generationPreview.caseFingerprint,
         replaceCaseIds: generationPreview.replacedCases.map((caseDef) => caseDef.id),
-        generatedCases: generationPreview.documents.flatMap((document) => document.proposals),
+        generatedCases: generationPreview.documents.flatMap((document) => document.proposals.map((proposal) => ({
+          ...proposal,
+          expectedDocumentId: proposal.expectedDocumentId ?? document.documentId,
+        }))),
       })
       setCases(nextCases)
       setGenerationPreview(null)
@@ -593,7 +605,10 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
         caseFingerprint: addGenerationPreview.caseFingerprint,
         documentIds: selectedAddDocumentIds,
         casesPerDocument: addCasesPerDocument,
-        generatedCases: addGenerationPreview.documents.flatMap((document) => document.proposals),
+        generatedCases: addGenerationPreview.documents.flatMap((document) => document.proposals.map((proposal) => ({
+          ...proposal,
+          expectedDocumentId: proposal.expectedDocumentId ?? document.documentId,
+        }))),
       })
       setCases(nextCases)
       setAddGenerationPreview(null)
@@ -1027,9 +1042,44 @@ export function RagEvalPanel({ kbId }: RagEvalPanelProps) {
               <span>主要来源文件（可选）</span>
               <Input name="expectedFileName" value={form.expectedFileName ?? ''} onChange={(event) => updateForm('expectedFileName', event.target.value)} placeholder="例如：教程.md" />
             </label>
+            <label className="space-y-1 text-xs text-muted-foreground">
+              <span>主要来源文档（稳定 ID）</span>
+              <select
+                name="expectedDocumentId"
+                value={form.expectedDocumentId ?? ''}
+                onChange={(event) => {
+                  const document = sourceDocuments.find((item) => item.id === event.target.value)
+                  setForm((current) => ({
+                    ...current,
+                    expectedDocumentId: document?.id,
+                    expectedFileName: document?.fileName ?? current.expectedFileName,
+                  }))
+                }}
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground"
+              >
+                <option value="">未选择</option>
+                {sourceDocuments.map((document) => <option key={document.id} value={document.id}>{document.fileName}</option>)}
+              </select>
+            </label>
             <label className="space-y-1 text-xs text-muted-foreground md:col-span-2">
               <span>附加来源文件（可选）</span>
               <Input name="expectedFileNames" value={expectedFileNamesInput} onChange={(event) => setExpectedFileNamesInput(normalizeCommaSeparatedInput(event.target.value))} placeholder="多个文件请用逗号分隔" />
+            </label>
+            <label className="space-y-1 text-xs text-muted-foreground md:col-span-2">
+              <span>附加来源文档（稳定 ID，可多选）</span>
+              <select
+                name="expectedDocumentIds"
+                multiple
+                value={form.expectedDocumentIds ?? []}
+                onChange={(event) => {
+                  const ids = Array.from(event.target.selectedOptions, (option) => option.value)
+                  setForm((current) => ({ ...current, expectedDocumentIds: ids }))
+                  setExpectedFileNamesInput(sourceDocuments.filter((document) => ids.includes(document.id)).map((document) => document.fileName).join(', '))
+                }}
+                className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground"
+              >
+                {sourceDocuments.map((document) => <option key={document.id} value={document.id}>{document.fileName}</option>)}
+              </select>
             </label>
             <label className="space-y-1 text-xs text-muted-foreground">
               <span>期望证据词（可选，任一命中即可）</span>

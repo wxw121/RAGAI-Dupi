@@ -225,6 +225,16 @@ describe('api client', () => {
     })
   })
 
+  it('returns DELETE JSON jobs while preserving empty legacy DELETE responses', async () => {
+    setAuthToken('csrf-token')
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ id: 'job-1' }, { status: 202 }))
+      .mockResolvedValueOnce(new Response(null, { status: 200 })))
+
+    await expect(apiDelete<{ id: string }>('/knowledge-base')).resolves.toEqual({ id: 'job-1' })
+    await expect(apiDelete('/legacy-resource')).resolves.toBeUndefined()
+  })
+
   it('sends PATCH requests and parses JSON responses', async () => {
     setAuthToken('csrf-token')
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 'x' }))

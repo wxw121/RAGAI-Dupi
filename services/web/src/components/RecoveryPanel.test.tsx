@@ -8,8 +8,14 @@ const api = vi.hoisted(() => ({
   getArchiveDownloadUrl: vi.fn(), importArchive: vi.fn(), listArchives: vi.fn(), listRestores: vi.fn(),
   retryArchive: vi.fn(), retryRestore: vi.fn(),
 }))
+const toast = vi.hoisted(() => ({ showError: vi.fn(), showSuccess: vi.fn() }))
 vi.mock('@/api/recovery', () => api)
-vi.mock('@/components/Toast', () => ({ useToast: () => ({ showError: vi.fn(), showSuccess: vi.fn() }) }))
+vi.mock('@/components/Toast', () => ({ useToast: () => toast }))
+vi.mock('@/components/OperationProgress', () => ({
+  OperationProgress: ({ initialJob, onCompleted }: { initialJob: { id: string }; onCompleted: () => void }) => (
+    <button data-testid="operation-progress" onClick={onCompleted}>{initialJob.id}</button>
+  ),
+}))
 
 const completedArchive = {
   id: 'archive-1', sourceKnowledgeBaseId: 'kb-1', status: 'COMPLETED', schemaVersion: 1,
@@ -37,7 +43,7 @@ describe('RecoveryPanel', () => {
     api.getArchiveDownloadUrl.mockReturnValue('/download/archive-1')
     api.createArchive.mockResolvedValue({ ...completedArchive, id: 'archive-2', status: 'PREPARING' })
     api.createRestore.mockResolvedValue({ ...failedRestore, id: 'restore-2', status: 'VALIDATING' })
-    api.importArchive.mockResolvedValue({ ...completedArchive, id: 'archive-imported' })
+    api.importArchive.mockResolvedValue(operationJob('recovery-import-job'))
     api.retryRestore.mockResolvedValue({ ...failedRestore, status: 'VALIDATING' })
     api.abandonRestore.mockResolvedValue(undefined)
   })
@@ -87,7 +93,7 @@ describe('RecoveryPanel', () => {
     act(() => root.unmount())
   })
 
-  it('imports a Recovery ZIP and refreshes the archive list', async () => {
+  it('tracks a Recovery ZIP operation and refreshes archives only after completion', async () => {
     const { container, root } = await renderPanel()
     const input = container.querySelector('input[aria-label="Recovery ZIP file"]') as HTMLInputElement
     const file = new File(['zip-content'], 'recovery.zip', { type: 'application/zip' })
@@ -101,7 +107,21 @@ describe('RecoveryPanel', () => {
     })
 
     expect(api.importArchive).toHaveBeenCalledWith('kb-1', file)
+    expect(container.textContent).toContain('recovery-import-job')
+    expect(api.listArchives).toHaveBeenCalledTimes(listCallsBeforeImport)
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="operation-progress"]')?.click()
+      await Promise.resolve()
+    })
     expect(api.listArchives.mock.calls.length).toBeGreaterThan(listCallsBeforeImport)
     act(() => root.unmount())
   })
 })
+
+function operationJob(id: string) {
+  return {
+    id, operationType: 'RECOVERY_ARCHIVE_IMPORT', aggregateType: 'KNOWLEDGE_BASE', aggregateId: 'kb-1',
+    status: 'RUNNING', attemptCount: 0, nextAttemptAt: null, errorCode: null, errorMessage: null,
+    createdAt: '2026-08-25T00:00:00Z', updatedAt: '2026-08-25T00:00:00Z', completedAt: null, steps: [],
+  }
+}

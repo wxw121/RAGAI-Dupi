@@ -1,5 +1,38 @@
 ﻿export type RetrievalIndexMode = 'CLASSIC' | 'PARENT_CHILD' | 'QA_ASSISTED' | 'COMBINED'
 
+export type OperationStatus = 'PREPARED' | 'RUNNING' | 'RETRY_WAIT' | 'COMPENSATING' | 'COMPLETED' | 'FAILED'
+export type OperationStepStatus = 'PENDING' | 'RUNNING' | 'RETRY_WAIT' | 'COMPLETED' | 'FAILED' | 'COMPENSATED'
+export type OperationType = 'RECOVERY_ARCHIVE_IMPORT' | 'MARKDOWN_PACKAGE_IMPORT' | 'KNOWLEDGE_BASE_DELETE'
+
+export interface OperationStepResponse {
+  id: string
+  sequenceNumber: number
+  stepKey: string
+  stepType: string
+  status: OperationStepStatus
+  attemptCount: number
+  lastError: string | null
+  startedAt: string | null
+  completedAt: string | null
+  nextAttemptAt: string | null
+}
+
+export interface OperationJobResponse {
+  id: string
+  operationType: OperationType
+  aggregateType: string
+  aggregateId: string
+  status: OperationStatus
+  attemptCount: number
+  nextAttemptAt: string | null
+  errorCode: string | null
+  errorMessage: string | null
+  createdAt: string
+  updatedAt: string
+  completedAt: string | null
+  steps: OperationStepResponse[]
+}
+
 export type RagEvalProfileGateStatus =
   | 'PASSED'
   | 'BLOCKED'
@@ -315,7 +348,9 @@ export interface RagEvalCase {
   topK?: number
   category?: RagEvalCaseCategory
   expectedFileName?: string
+  expectedDocumentId?: string
   expectedFileNames?: string[]
+  expectedDocumentIds?: string[]
   mustContainAny?: string[]
   sourceValid?: boolean
   missingExpectedFileNames?: string[]
@@ -330,7 +365,9 @@ export interface RagEvalCaseRequest {
   topK?: number
   category?: RagEvalCaseCategory
   expectedFileName?: string
+  expectedDocumentId?: string
   expectedFileNames?: string[]
+  expectedDocumentIds?: string[]
   mustContainAny?: string[]
 }
 
@@ -364,6 +401,7 @@ export interface RagEvalGenerationDraft {
   caseKey: string
   query: string
   expectedFileName: string
+  expectedDocumentId?: string
   mustContainAny: string[]
   category: RagEvalCaseCategory
   minHits: number

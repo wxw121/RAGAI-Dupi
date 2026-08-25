@@ -123,9 +123,12 @@ export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
   return res.json()
 }
 
-export async function apiDelete(path: string): Promise<void> {
+export async function apiDelete<T = void>(path: string): Promise<T> {
   const res = await fetch(path, { method: 'DELETE', credentials: 'include', headers: csrfHeaders() })
   if (!res.ok) throw await parseError(res)
+  if (res.status === 204) return undefined as T
+  if (!res.headers?.get?.('Content-Type')?.includes('application/json')) return undefined as T
+  return res.json()
 }
 
 export interface UploadRequestOptions {

@@ -25,6 +25,7 @@ import type {
   DocumentIndexDetail,
   IngestJob,
   KnowledgeBase,
+  OperationJobResponse,
   OpsGuardrails,
   RetrievalIndexMode,
   UploadQuota,
@@ -37,6 +38,7 @@ import { DocumentIndexDetailPanel } from '@/components/DocumentIndexDetailPanel'
 import { RagEvalPanel } from '@/components/RagEvalPanel'
 import { RetrievalProfilePanel } from '@/components/RetrievalProfilePanel'
 import { RecoveryPanel } from '@/components/RecoveryPanel'
+import { OperationProgress } from '@/components/OperationProgress'
 import { SparseMigrationPanel } from '@/components/SparseMigrationPanel'
 import { UploadZone } from '@/components/UploadZone'
 import { useToast } from '@/components/Toast'
@@ -89,6 +91,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const [savingRetrievalProfile, setSavingRetrievalProfile] = useState(false)
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
   const [cancellingJobId, setCancellingJobId] = useState<string | null>(null)
+  const [markdownImportOperation, setMarkdownImportOperation] = useState<OperationJobResponse | null>(null)
   const [retryingCleanupTaskId, setRetryingCleanupTaskId] = useState<string | null>(null)
   const [indexDetail, setIndexDetail] = useState<DocumentIndexDetail | null>(null)
   const [indexDetailLoadingId, setIndexDetailLoadingId] = useState<string | null>(null)
@@ -289,11 +292,8 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const handleMarkdownPackageUpload = async (file: File) => {
     if (!kbId) return
     try {
-      const result = await uploadMarkdownPackage(kbId, file)
-      await Promise.all([loadDocs(), loadJobs(), loadUploadQuota()])
-      showSuccess(
-        `资源包上传成功：${result.documents.length} 个 Markdown 文档，${result.assetCount} 张引用图片`,
-      )
+      setMarkdownImportOperation(await uploadMarkdownPackage(kbId, file))
+      showSuccess('Markdown 资源包导入已提交')
     } catch (error) {
       showError(error instanceof Error ? error.message : 'Markdown 资源包上传失败')
     }
@@ -696,6 +696,18 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
             guardrails={guardrails}
             quota={uploadQuota}
           />
+          {markdownImportOperation && (
+            <div className="mt-4">
+              <OperationProgress
+                initialJob={markdownImportOperation}
+                onCompleted={async () => {
+                  await Promise.all([loadDocs(), loadJobs(), loadUploadQuota()])
+                  setMarkdownImportOperation(null)
+                  showSuccess('Markdown 资源包导入完成')
+                }}
+              />
+            </div>
+          )}
           <DocTable
             documents={documents}
             jobStages={jobStages}

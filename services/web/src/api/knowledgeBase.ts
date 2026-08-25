@@ -12,6 +12,7 @@ import type {
   KnowledgeBase,
   OpsNotification,
   OpsMetadata,
+  OperationJobResponse,
   PasswordHashResponse,
   PasswordResetRequest,
   RagEvalCase,
@@ -57,8 +58,8 @@ export function createKnowledgeBase(req: CreateKnowledgeBaseRequest): Promise<Kn
   return apiPost<KnowledgeBase>(BASE, req)
 }
 
-export function deleteKnowledgeBase(kbId: string): Promise<void> {
-  return apiDelete(`${BASE}/${kbId}`)
+export function deleteKnowledgeBase(kbId: string): Promise<OperationJobResponse> {
+  return apiDelete<OperationJobResponse>(`${BASE}/${kbId}`)
 }
 
 export function deleteE2eAccount(username: string): Promise<void> {

@@ -363,6 +363,35 @@ describe('RagEvalPanel', () => {
     })
   })
 
+  it('submits the selected document id even when filenames are duplicated', async () => {
+    api.getRagQualityPolicy.mockResolvedValue(null)
+    api.listRagEvalCases.mockResolvedValue([])
+    api.listRagEvalRuns.mockResolvedValue([])
+    api.listRetrievalProfiles.mockResolvedValue([])
+    documentApi.listDocuments.mockResolvedValue([
+      { id: 'doc-1', kbId: 'kb-1', fileName: 'guide.md', status: 'COMPLETED' },
+      { id: 'doc-2', kbId: 'kb-1', fileName: 'guide.md', status: 'COMPLETED' },
+    ])
+    api.createRagEvalCase.mockResolvedValue({ id: 'case-1' })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    await act(async () => { root?.render(<RagEvalPanel kbId="kb-1" />); await Promise.resolve() })
+
+    await act(async () => {
+      setInput('caseKey', 'stable-source')
+      setInput('query', 'Which guide?')
+      setSelect('expectedDocumentId', 'doc-2')
+      button('保存用例')?.click()
+      await Promise.resolve()
+    })
+
+    expect(api.createRagEvalCase).toHaveBeenCalledWith('kb-1', expect.objectContaining({
+      expectedDocumentId: 'doc-2',
+      expectedFileName: 'guide.md',
+    }))
+  })
+
   it('runs a selected retrieval configuration without experimental overrides', async () => {
     api.getRagQualityPolicy.mockResolvedValue(null)
     api.listRagEvalCases.mockResolvedValue([
@@ -434,7 +463,9 @@ describe('RagEvalPanel', () => {
     await act(async () => { button('确认替换')?.click(); await Promise.resolve() })
     expect(api.confirmRagEvalCaseGeneration).toHaveBeenCalledWith('kb-1', {
       documentFingerprint: 'docs-v1', caseFingerprint: 'cases-v1', replaceCaseIds: ['old-1'],
-      generatedCases: expect.arrayContaining([expect.objectContaining({ expectedFileName: 'tutorial.md' })]),
+      generatedCases: expect.arrayContaining([expect.objectContaining({
+        expectedFileName: 'tutorial.md', expectedDocumentId: 'doc-1',
+      })]),
     })
     expect(container.textContent).not.toContain('发现 1 条失效评估用例')
   })
@@ -580,7 +611,8 @@ describe('RagEvalPanel', () => {
 
     await act(async () => { button('确认新增')?.click(); await Promise.resolve() })
     expect(api.confirmAddRagEvalCases).toHaveBeenCalledWith('kb-1', {
-      documentFingerprint: 'docs', caseFingerprint: 'cases', documentIds: ['doc-1'], casesPerDocument: 2, generatedCases: proposals,
+      documentFingerprint: 'docs', caseFingerprint: 'cases', documentIds: ['doc-1'], casesPerDocument: 2,
+      generatedCases: proposals.map((proposal) => ({ ...proposal, expectedDocumentId: 'doc-1' })),
     })
     expect(container.textContent).toContain('guide-1')
   })

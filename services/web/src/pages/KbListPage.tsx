@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { createKnowledgeBase, deleteKnowledgeBase, listKnowledgeBases } from '@/api/knowledgeBase'
-import type { KnowledgeBase } from '@/types'
+import type { KnowledgeBase, OperationJobResponse } from '@/types'
 import { AppLayout } from '@/components/AppLayout'
+import { OperationProgress } from '@/components/OperationProgress'
 import { useToast } from '@/components/Toast'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -21,6 +22,7 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [batchDeleting, setBatchDeleting] = useState(false)
   const [batchConfirmOpen, setBatchConfirmOpen] = useState(false)
+  const [deleteOperations, setDeleteOperations] = useState<Record<string, OperationJobResponse>>({})
   const [searchQuery, setSearchQuery] = useState('')
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -79,16 +81,12 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
   const handleDelete = async (kb: KnowledgeBase, e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
+    if (deleteOperations[kb.id]) return
     if (!confirm(`确定删除知识库「${kb.name}」？此操作不可恢复。`)) return
     try {
-      await deleteKnowledgeBase(kb.id)
-      showSuccess('已删除')
-      setSelectedIds((current) => {
-        const next = new Set(current)
-        next.delete(kb.id)
-        return next
-      })
-      await load()
+      const job = await deleteKnowledgeBase(kb.id)
+      setDeleteOperations((current) => ({ ...current, [kb.id]: job }))
+      showSuccess('删除任务已提交')
     } catch (e) {
       showError(e instanceof Error ? e.message : '删除失败')
     }
@@ -118,13 +116,33 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
     const failedIds = new Set(
       selected.filter((_, index) => results[index].status === 'rejected').map((kb) => kb.id),
     )
-    const deletedCount = selected.length - failedIds.size
+    const jobs = selected.reduce<Record<string, OperationJobResponse>>((current, kb, index) => {
+      const result = results[index]
+      if (result.status === 'fulfilled') current[kb.id] = result.value
+      return current
+    }, {})
+    setDeleteOperations((current) => ({ ...current, ...jobs }))
+    const queuedCount = selected.length - failedIds.size
     setSelectedIds(failedIds)
     setBatchDeleting(false)
 
-    if (deletedCount > 0) showSuccess(`已删除 ${deletedCount} 个知识库`)
+    if (queuedCount > 0) showSuccess(`已提交 ${queuedCount} 个知识库删除任务`)
     if (failedIds.size > 0) showError(`${failedIds.size} 个知识库删除失败，请重试`)
+  }
+
+  const completeDelete = async (kbId: string) => {
+    setSelectedIds((current) => {
+      const next = new Set(current)
+      next.delete(kbId)
+      return next
+    })
     await load()
+    setDeleteOperations((current) => {
+      const next = { ...current }
+      delete next[kbId]
+      return next
+    })
+    showSuccess('知识库已删除')
   }
 
   return (
@@ -247,7 +265,7 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
               <Card
                 key={kb.id}
                 className="group relative cursor-pointer rounded-2xl border-border bg-background transition-colors hover:bg-muted/40"
-                onClick={() => navigate(`/kb/${kb.id}`)}
+                onClick={() => { if (!deleteOperations[kb.id]) navigate(`/kb/${kb.id}`) }}
               >
                 <label
                   className="absolute left-3 top-3 z-10 flex cursor-pointer items-center"
@@ -272,12 +290,20 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
                   <p className="mt-1 text-xs text-muted-foreground">
                     分块 {kb.chunkSize} / 重叠 {kb.chunkOverlap} / TopK {kb.topK}
                   </p>
+                  {deleteOperations[kb.id] && (
+                    <div className="mt-3" onClick={(event) => event.stopPropagation()}>
+                      <OperationProgress
+                        initialJob={deleteOperations[kb.id]}
+                        onCompleted={() => completeDelete(kb.id)}
+                      />
+                    </div>
+                  )}
                   <div className="mt-4 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
-                    <Button variant="outline" size="sm" onClick={() => navigate(`/kb/${kb.id}`)}>
+                    <Button variant="outline" size="sm" disabled={Boolean(deleteOperations[kb.id])} onClick={() => navigate(`/kb/${kb.id}`)}>
                       <FileText className="h-3.5 w-3.5" />
                       管理文档
                     </Button>
-                    <Button size="sm" onClick={() => navigate(`/kb/${kb.id}?tab=chat`)}>
+                    <Button size="sm" disabled={Boolean(deleteOperations[kb.id])} onClick={() => navigate(`/kb/${kb.id}?tab=chat`)}>
                       <MessageSquare className="h-3.5 w-3.5" />
                       去问答
                     </Button>
@@ -287,6 +313,7 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
                   variant="ghost"
                   size="sm"
                   className="absolute right-2 top-2"
+                  disabled={Boolean(deleteOperations[kb.id])}
                   onClick={(e) => handleDelete(kb, e)}
                 >
                   <Trash2 className="h-4 w-4 text-destructive" />

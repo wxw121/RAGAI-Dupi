@@ -20,6 +20,7 @@ const documentApi = vi.hoisted(() => ({
   getIngestJob: vi.fn(),
   getUploadQuota: vi.fn(),
   listDocuments: vi.fn(),
+  uploadMarkdownPackage: vi.fn(),
   uploadDocuments: vi.fn(),
 }))
 
@@ -37,7 +38,16 @@ vi.mock('@/components/ChatPanel', () => ({ ChatPanel: () => null }))
 vi.mock('@/components/DocTable', () => ({ DocTable: () => null }))
 vi.mock('@/components/DocumentIndexDetailPanel', () => ({ DocumentIndexDetailPanel: () => null }))
 vi.mock('@/components/RagEvalPanel', () => ({ RagEvalPanel: () => null }))
-vi.mock('@/components/UploadZone', () => ({ UploadZone: () => null }))
+vi.mock('@/components/UploadZone', () => ({
+  UploadZone: ({ onPackageUpload }: { onPackageUpload?: (file: File) => Promise<void> }) => (
+    <button data-testid="markdown-package" onClick={() => void onPackageUpload?.(new File(['zip'], 'docs.zip'))}>package</button>
+  ),
+}))
+vi.mock('@/components/OperationProgress', () => ({
+  OperationProgress: ({ initialJob, onCompleted }: { initialJob: { id: string }; onCompleted: () => void }) => (
+    <button data-testid="operation-progress" onClick={onCompleted}>{initialJob.id}</button>
+  ),
+}))
 vi.mock('@/components/Toast', () => ({ useToast: () => toast }))
 vi.mock('react-router-dom', () => ({
   Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
@@ -223,7 +233,47 @@ describe('KbDetailPage', () => {
       .find((button) => button.textContent?.includes('重建索引'))
     expect(reindexButton?.disabled).toBe(true)
   })
+
+  it('tracks Markdown package import and refreshes documents after completion', async () => {
+    api.getKnowledgeBase.mockResolvedValue({
+      id: 'kb-1', name: 'Markdown KB', retrievalProfile: 'CLASSIC', embeddingConfigCurrent: true,
+    })
+    api.listOpsMetadata.mockResolvedValue({ guardrails: null })
+    api.listKnowledgeBaseVectorCleanupTasks.mockResolvedValue([])
+    api.listIngestJobs.mockResolvedValue([])
+    chatSessionApi.listChatSessions.mockResolvedValue([])
+    documentApi.getUploadQuota.mockResolvedValue(null)
+    documentApi.listDocuments.mockResolvedValue([])
+    documentApi.uploadMarkdownPackage.mockResolvedValue(operationJob('markdown-job'))
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    await act(async () => { root?.render(<KbDetailPage />); await Promise.resolve(); await Promise.resolve() })
+    const documentCallsBeforeUpload = documentApi.listDocuments.mock.calls.length
+
+    await act(async () => {
+      container?.querySelector<HTMLButtonElement>('[data-testid="markdown-package"]')?.click()
+      await Promise.resolve()
+    })
+    expect(container?.textContent).toContain('markdown-job')
+    expect(documentApi.listDocuments).toHaveBeenCalledTimes(documentCallsBeforeUpload)
+
+    await act(async () => {
+      container?.querySelector<HTMLButtonElement>('[data-testid="operation-progress"]')?.click()
+      await Promise.resolve()
+    })
+    expect(documentApi.listDocuments.mock.calls.length).toBeGreaterThan(documentCallsBeforeUpload)
+  })
 })
+
+function operationJob(id: string) {
+  return {
+    id, operationType: 'MARKDOWN_PACKAGE_IMPORT', aggregateType: 'KNOWLEDGE_BASE', aggregateId: 'kb-1',
+    status: 'RUNNING', attemptCount: 0, nextAttemptAt: null, errorCode: null, errorMessage: null,
+    createdAt: '2026-08-25T00:00:00Z', updatedAt: '2026-08-25T00:00:00Z', completedAt: null, steps: [],
+  }
+}
 
 function setNativeValue(element: HTMLSelectElement, value: string) {
   Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(element, value)
