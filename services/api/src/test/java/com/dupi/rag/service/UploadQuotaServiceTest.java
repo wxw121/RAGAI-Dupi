@@ -383,6 +383,28 @@ class UploadQuotaServiceTest {
     }
 
     @Test
+    void writerCannotAcquireAfterCleanupClaimedThePreparedAttempt() {
+        UUID attemptId = UUID.randomUUID();
+        UploadQuotaReservation prepared = reservation(UUID.randomUUID(), null, "key", "sha256:file");
+        prepared.setAttemptId(attemptId);
+        prepared.setReleaseReason(null);
+        prepared.setAttemptExpiresAt(Instant.now().plusSeconds(30));
+        UploadQuotaReservation claimed = reservation(prepared.getKbId(), null, "key", "sha256:file");
+        claimed.setId(prepared.getId());
+        claimed.setAttemptId(attemptId);
+        claimed.setReleaseReason("upload-cleanup:claimed");
+        claimed.setAttemptExpiresAt(Instant.now().plusSeconds(60));
+        when(reservationRepository.findById(prepared.getId())).thenReturn(Optional.of(claimed));
+
+        assertThatThrownBy(() -> service().acquireWriterLease(prepared))
+                .isInstanceOf(UploadIdempotencyConflictException.class)
+                .hasMessageContaining("no longer owns");
+
+        assertThat(claimed.getReleaseReason()).isEqualTo("upload-cleanup:claimed");
+        verify(reservationRepository, never()).save(any());
+    }
+
+    @Test
     void expiredWriterCannotRenewOwnOrCommitTheAttempt() {
         UUID attemptId = UUID.randomUUID();
         UploadQuotaReservation current = reservation(UUID.randomUUID(), null, "key", "sha256:file");

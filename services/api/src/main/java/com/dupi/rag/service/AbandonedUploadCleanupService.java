@@ -11,8 +11,6 @@ import org.springframework.stereotype.Service;
 @Slf4j
 @RequiredArgsConstructor
 class AbandonedUploadCleanupService {
-    private static final String PENDING_REASON = "UPLOAD_ABANDONED";
-
     private final DocumentTombstoneRepository tombstones;
     private final MinioStorageService storage;
     private final AbandonedUploadCleanupPersistence persistence;
@@ -20,15 +18,29 @@ class AbandonedUploadCleanupService {
     int cleanup(int requestedLimit) {
         int limit = Math.max(1, requestedLimit);
         int completed = 0;
-        for (DocumentTombstone tombstone : tombstones.findByReasonOrderByCreatedAtAsc(
-                PENDING_REASON, PageRequest.of(0, limit))) {
-            try {
-                storage.deleteChecked(tombstone.getObjectKey());
-                persistence.complete(tombstone.getDocId(), tombstone.getObjectKey());
-                completed++;
-            } catch (RuntimeException failure) {
-                log.warn("Failed to clean abandoned upload object for document {}",
-                        tombstone.getDocId(), failure);
+        for (String reason : java.util.List.of(
+                DocumentTombstoneService.UPLOAD_ABANDONED,
+                DocumentTombstoneService.UPLOAD_WRITE_ARMED)) {
+            for (DocumentTombstone tombstone : tombstones.findByReasonOrderByCreatedAtAsc(
+                    reason, PageRequest.of(0, limit))) {
+                if (completed >= limit) {
+                    return completed;
+                }
+                if (DocumentTombstoneService.UPLOAD_WRITE_ARMED.equals(reason)
+                        && !persistence.shouldReplayArmed(
+                                tombstone.getDocId(), tombstone.getObjectKey())) {
+                    continue;
+                }
+                try {
+                    storage.deleteChecked(tombstone.getObjectKey());
+                    if (DocumentTombstoneService.UPLOAD_ABANDONED.equals(reason)) {
+                        persistence.complete(tombstone.getDocId(), tombstone.getObjectKey());
+                    }
+                    completed++;
+                } catch (RuntimeException failure) {
+                    log.warn("Failed to clean abandoned upload object for document {}",
+                            tombstone.getDocId(), failure);
+                }
             }
         }
         return completed;

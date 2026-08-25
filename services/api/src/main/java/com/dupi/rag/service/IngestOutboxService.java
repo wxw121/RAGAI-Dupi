@@ -79,7 +79,7 @@ public class IngestOutboxService {
             }
 
             IngestJob job = ingestJobRepository.findByIdForUpdate(event.getJobId()).orElse(null);
-            Document doc = documentRepository.findById(event.getDocId()).orElse(null);
+            Document doc = documentRepository.findByIdForUpdate(event.getDocId()).orElse(null);
             if (job == null || doc == null) {
                 cancel(event, "Ingest job or document no longer exists");
                 continue;

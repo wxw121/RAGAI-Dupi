@@ -13,6 +13,10 @@ import java.util.UUID;
 public interface DocumentTombstoneRepository extends JpaRepository<DocumentTombstone, UUID> {
     void deleteByKbId(UUID kbId);
 
+    void deleteByKbIdAndReasonIn(UUID kbId, List<String> reasons);
+
+    boolean existsByKbIdAndReasonIn(UUID kbId, List<String> reasons);
+
     List<DocumentTombstone> findByReasonOrderByCreatedAtAsc(String reason, Pageable pageable);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)

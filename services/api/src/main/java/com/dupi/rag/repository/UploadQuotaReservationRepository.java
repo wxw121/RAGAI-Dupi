@@ -63,6 +63,11 @@ public interface UploadQuotaReservationRepository extends JpaRepository<UploadQu
 
     long countByStatus(UploadQuotaReservationStatus status);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select r from UploadQuotaReservation r where r.attemptId = :documentId or r.docId = :documentId")
+    Optional<UploadQuotaReservation> findByAttemptIdOrDocIdForUpdate(
+            @Param("documentId") UUID documentId);
+
     @Query("""
             select count(r) from UploadQuotaReservation r
             where r.status = com.dupi.rag.domain.enums.UploadQuotaReservationStatus.PENDING

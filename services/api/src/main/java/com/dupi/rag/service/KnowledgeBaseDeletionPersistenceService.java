@@ -45,6 +45,9 @@ class KnowledgeBaseDeletionPersistenceService {
             OperationStatus.RUNNING,
             OperationStatus.RETRY_WAIT,
             OperationStatus.COMPENSATING);
+    private static final List<String> SAFE_TOMBSTONE_REASONS = List.of(
+            DocumentTombstoneService.DOCUMENT_DELETE,
+            "UPLOAD_ABANDONED_CLEANED");
 
     private final KnowledgeBaseRepository knowledgeBases;
     private final DocumentRepository documents;
@@ -153,7 +156,7 @@ class KnowledgeBaseDeletionPersistenceService {
         steps.saveAndFlush(finalStep);
 
         vectorTasks.deleteByKnowledgeBaseId(knowledgeBaseId);
-        tombstones.deleteByKbId(knowledgeBaseId);
+        tombstones.deleteByKbIdAndReasonIn(knowledgeBaseId, SAFE_TOMBSTONE_REASONS);
         notifications.deleteByKbId(knowledgeBaseId);
         knowledgeBases.delete(knowledgeBase);
         audit.recordSuccessInCurrentTransactionForTenant(job.getTenantId(),

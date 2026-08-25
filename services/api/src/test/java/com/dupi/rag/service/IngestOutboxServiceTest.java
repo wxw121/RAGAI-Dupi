@@ -74,7 +74,7 @@ class IngestOutboxServiceTest {
         )).thenReturn(List.of(event));
         when(documentTombstoneService.isDeleted(docId)).thenReturn(false);
         when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
 
         int dispatched = service().dispatchPending();
@@ -107,7 +107,7 @@ class IngestOutboxServiceTest {
         )).thenReturn(List.of(event));
         when(documentTombstoneService.isDeleted(docId)).thenReturn(false);
         when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
         doThrow(new IllegalStateException("redis down"))
                 .when(ingestJobProducer).enqueue(job, kb, event.getObjectKey(), event.getFileName(), event.getMimeType());
@@ -159,7 +159,7 @@ class IngestOutboxServiceTest {
         )).thenReturn(List.of(event));
         when(documentTombstoneService.isDeleted(docId)).thenReturn(false);
         when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.empty());
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc(kbId, docId)));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc(kbId, docId)));
 
         int dispatched = service().dispatchPending();
 
@@ -185,7 +185,7 @@ class IngestOutboxServiceTest {
                 eq(List.of(IngestOutboxStatus.PENDING, IngestOutboxStatus.FAILED)), any(Instant.class)))
                 .thenReturn(List.of(intentEvent));
         when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(uploadIntent));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(uploading));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(uploading));
 
         assertThat(service().dispatchPending()).isZero();
 
@@ -195,6 +195,33 @@ class IngestOutboxServiceTest {
         verifyNoInteractions(ingestJobProducer, knowledgeBaseService);
         verify(ingestJobRepository, never()).save(any());
         verify(documentRepository, never()).save(any());
+    }
+
+    @Test
+    void dispatcherCannotOverwriteDeletingDocumentAfterLoadingItsOutboxEvent() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestOutboxEvent event = event(kbId, docId, jobId);
+        IngestJob job = job(kbId, docId, jobId);
+        Document deleting = doc(kbId, docId);
+        deleting.setStatus(DocumentStatus.DELETING);
+        when(outboxRepository.findTop50ByStatusInAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
+                eq(List.of(IngestOutboxStatus.PENDING, IngestOutboxStatus.FAILED)), any(Instant.class)))
+                .thenReturn(List.of(event));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        lenient().when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(deleting));
+        lenient().when(documentRepository.findById(docId)).thenReturn(Optional.of(deleting));
+
+        assertThat(service().dispatchPending()).isZero();
+
+        assertThat(deleting.getStatus()).isEqualTo(DocumentStatus.DELETING);
+        assertThat(event.getStatus()).isEqualTo(IngestOutboxStatus.CANCELLED);
+        verifyNoInteractions(ingestJobProducer, knowledgeBaseService);
+        verify(documentRepository).findByIdForUpdate(docId);
+        verify(documentRepository, never()).findById(docId);
+        verify(documentRepository, never()).save(any());
+        verify(ingestJobRepository, never()).save(any());
     }
 
     @Test
@@ -214,7 +241,7 @@ class IngestOutboxServiceTest {
                 eq(List.of(IngestOutboxStatus.PENDING, IngestOutboxStatus.FAILED)), any(Instant.class)))
                 .thenReturn(List.of(event));
         when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(cleanup));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(uploading));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(uploading));
 
         assertThat(service().dispatchPending()).isZero();
 
@@ -240,7 +267,7 @@ class IngestOutboxServiceTest {
         )).thenReturn(List.of(event));
         when(documentTombstoneService.isDeleted(docId)).thenReturn(false);
         when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
         doThrow(new IllegalStateException(" "))
                 .when(ingestJobProducer).enqueue(job, kb, event.getObjectKey(), event.getFileName(), event.getMimeType());

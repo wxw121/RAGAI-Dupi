@@ -124,7 +124,8 @@ class OperationTransactionStructureTest {
             spring.registerBean(UploadQuotaService.class, () -> quota);
             spring.registerBean(IngestOutboxService.class, () -> outbox);
             spring.registerBean(DocumentUploadIntentService.class,
-                    () -> new DocumentUploadIntentService(knowledgeBases, documents, jobs, quota, outbox));
+                    () -> new DocumentUploadIntentService(knowledgeBases, documents, jobs, quota, outbox,
+                            mock(DocumentTombstoneService.class)));
             spring.refresh();
 
             DocumentUploadIntentService publisher = spring.getBean(DocumentUploadIntentService.class);
@@ -177,7 +178,8 @@ class OperationTransactionStructureTest {
             spring.registerBean(UploadQuotaService.class, () -> quota);
             spring.registerBean(IngestOutboxService.class, () -> outbox);
             spring.registerBean(DocumentUploadIntentService.class,
-                    () -> new DocumentUploadIntentService(knowledgeBases, documents, jobs, quota, outbox));
+                    () -> new DocumentUploadIntentService(knowledgeBases, documents, jobs, quota, outbox,
+                            mock(DocumentTombstoneService.class)));
             spring.refresh();
 
             DocumentUploadIntentService publisher = spring.getBean(DocumentUploadIntentService.class);

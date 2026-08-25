@@ -3,6 +3,7 @@ package com.dupi.rag.service;
 import com.dupi.rag.domain.entity.UploadQuotaReservation;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.enums.UploadQuotaReservationStatus;
+import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
 import com.dupi.rag.repository.IngestOutboxEventRepository;
@@ -69,6 +70,29 @@ class UploadQuotaReconciliationPersistenceServiceTest {
                 candidate, oldAttempt, null, Instant.now())).isEmpty();
 
         verify(reservations, never()).save(reopened);
+    }
+
+    @Test
+    void legacyCleanupCannotClaimDocumentWhoseExternalDeletionAlreadyStarted() {
+        UploadQuotaReservationRepository reservations = mock(UploadQuotaReservationRepository.class);
+        DocumentRepository documents = mock(DocumentRepository.class);
+        UUID reservationId = UUID.randomUUID();
+        UUID documentId = UUID.randomUUID();
+        UploadQuotaAttemptCandidate candidate = new UploadQuotaAttemptCandidate(
+                reservationId, documentId, "upload-writer:expired");
+        UploadQuotaReservation current = UploadQuotaReservation.builder().id(reservationId)
+                .attemptId(documentId).releaseReason("upload-writer:expired")
+                .attemptExpiresAt(Instant.now().minusSeconds(1))
+                .status(UploadQuotaReservationStatus.PENDING).build();
+        Document deleting = Document.builder().id(documentId).objectKey("objects/doc")
+                .status(DocumentStatus.DELETING).build();
+        when(documents.findByIdForUpdate(documentId)).thenReturn(Optional.of(deleting));
+
+        assertThat(service(reservations, documents).claimLegacyCleanup(
+                candidate, documentId, null, Instant.now())).isEmpty();
+
+        verify(reservations, never()).findById(reservationId);
+        verify(reservations, never()).save(current);
     }
 
     private UploadQuotaReconciliationPersistenceService service(

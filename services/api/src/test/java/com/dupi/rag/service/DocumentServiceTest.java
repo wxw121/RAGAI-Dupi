@@ -267,7 +267,10 @@ class DocumentServiceTest {
         assertThat(response.getStatus()).isEqualTo(DocumentStatus.PENDING);
         assertThat(response.getCurrentJob()).isNotNull();
         assertThat(response.getCurrentJob().getStatus()).isEqualTo(IngestJobStatus.PENDING);
-        verify(minioStorageService).upload(contains(kbId.toString()), any(), eq(5L), eq("text/markdown"));
+        var objectOrder = inOrder(documentTombstoneService, minioStorageService);
+        objectOrder.verify(documentTombstoneService).armUploadCleanup(any(Document.class));
+        objectOrder.verify(minioStorageService).upload(
+                contains(kbId.toString()), any(), eq(5L), eq("text/markdown"));
         verify(uploadIntents).publish(eq("default"), any(Document.class), any(IngestJob.class),
                 any(UploadQuotaReservation.class));
         verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
@@ -322,6 +325,8 @@ class DocumentServiceTest {
         verify(uploadQuotaService, never()).release(any(), anyString());
         verify(uploadIntents, never()).fail(any(), any(), any());
         verify(uploadIntents, never()).publish(anyString(), any(), any(), any());
+        verify(documentTombstoneService).armUploadCleanup(any(Document.class));
+        verify(documentTombstoneService).recordAbandonedUpload(any(Document.class));
     }
 
     @Test
@@ -347,6 +352,32 @@ class DocumentServiceTest {
         verify(documentTombstoneService).recordAbandonedUpload(document.capture());
         assertThat(document.getValue().getObjectKey()).contains("a.md");
         verify(uploadIntents, never()).publish(anyString(), any(), any(), any());
+    }
+
+    @Test
+    void cleanupClaimBetweenIntentAndWriterAcquirePreventsObjectIoWithoutOverwritingCleanupTruth() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId))
+                .thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(uploadQuotaService.reserveForUpload(
+                eq(kbId), any(UUID.class), eq("key"), eq("a.md"),
+                eq("text/markdown"), eq(5L), anyString()))
+                .thenAnswer(invocation -> reservation(kbId, invocation.getArgument(1), "key", 5L));
+        doThrow(
+                new com.dupi.rag.exception.UploadIdempotencyConflictException(
+                        "Upload attempt no longer owns its quota reservation"))
+                .when(uploadLeases).acquire(any());
+
+        assertThatThrownBy(() -> service().upload(
+                kbId,
+                new MockMultipartFile("file", "a.md", "text/markdown", "hello".getBytes()),
+                "key"))
+                .isInstanceOf(com.dupi.rag.exception.UploadIdempotencyConflictException.class);
+
+        verifyNoInteractions(minioStorageService);
+        verify(documentTombstoneService, never()).armUploadCleanup(any());
+        verify(uploadIntents, never()).fail(any(), any(), any());
+        verify(uploadQuotaService, never()).release(any(), anyString());
     }
 
     @Test

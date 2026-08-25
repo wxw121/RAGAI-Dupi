@@ -197,6 +197,32 @@ describe('KbDetailPage', () => {
     expect(api.listIngestJobs).toHaveBeenCalledTimes(2)
     expect(reindexButton?.disabled).toBe(false)
   })
+
+  it('disables reindex while durable document deletion is in progress', async () => {
+    api.getKnowledgeBase.mockResolvedValue({
+      id: 'kb-1', name: 'Deleting document KB', retrievalProfile: 'CLASSIC', embeddingConfigCurrent: true,
+    })
+    api.listOpsMetadata.mockResolvedValue({ guardrails: null })
+    api.listKnowledgeBaseVectorCleanupTasks.mockResolvedValue([])
+    api.listIngestJobs.mockResolvedValue([])
+    chatSessionApi.listChatSessions.mockResolvedValue([])
+    documentApi.getUploadQuota.mockResolvedValue(null)
+    documentApi.listDocuments.mockResolvedValue([{ id: 'doc-1', status: 'DELETING' }])
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(<KbDetailPage />)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    const reindexButton = Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('重建索引'))
+    expect(reindexButton?.disabled).toBe(true)
+  })
 })
 
 function setNativeValue(element: HTMLSelectElement, value: string) {

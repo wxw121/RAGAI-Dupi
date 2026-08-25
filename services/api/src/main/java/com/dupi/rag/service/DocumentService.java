@@ -15,6 +15,7 @@ import com.dupi.rag.dto.DocumentResponse;
 import com.dupi.rag.dto.IngestJobResponse;
 import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.exception.UploadIdempotencyConflictException;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
 import lombok.RequiredArgsConstructor;
@@ -139,12 +140,15 @@ public class DocumentService {
                 .updatedAt(now)
                 .build();
         boolean intentPrepared = false;
+        boolean writerLeaseAcquired = false;
         boolean objectWriteAttempted = false;
         DocumentResponse response;
         try {
             uploadIntents.prepare(TenantContext.getTenantId(), doc, job);
             intentPrepared = true;
             UploadAttemptLease writerLease = uploadLeases.acquire(reservation);
+            writerLeaseAcquired = true;
+            documentTombstoneService.armUploadCleanup(doc);
             try (UploadAttemptHeartbeat heartbeat = uploadLeases.start(writerLease)) {
                 objectWriteAttempted = true;
                 minioStorageService.upload(objectKey, file.getInputStream(), file.getSize(), doc.getMimeType());
@@ -162,6 +166,9 @@ public class DocumentService {
 
             response = toResponse(doc, job);
         } catch (Exception e) {
+            if (intentPrepared && !writerLeaseAcquired) {
+                throw uploadFailure(e);
+            }
             if (objectWriteAttempted && intentPrepared) {
                 try {
                     DocumentUploadPublicationResolution resolution = uploadIntents.reconcilePublication(
@@ -175,6 +182,7 @@ public class DocumentService {
                                 "Uploaded document " + doc.getFileName());
                         return response;
                     }
+                    documentTombstoneService.recordAbandonedUpload(doc);
                 } catch (Exception reconciliationFailure) {
                     if (reconciliationFailure != e) {
                         e.addSuppressed(reconciliationFailure);
@@ -215,6 +223,9 @@ public class DocumentService {
         }
         if (error instanceof ResourceNotFoundException notFound) {
             return notFound;
+        }
+        if (error instanceof UploadIdempotencyConflictException conflict) {
+            return conflict;
         }
         if (error.getMessage() != null && error.getMessage().contains("database down")) {
             return new IllegalStateException(error.getMessage(), error);

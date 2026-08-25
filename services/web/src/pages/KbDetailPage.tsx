@@ -549,7 +549,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
                 variant={!kb.embeddingConfigCurrent ? 'default' : 'outline'}
                 size="sm"
                 disabled={reindexing || documents.length === 0
-                  || documents.some((document) => document.status === 'UPLOADING')}
+                  || documents.some((document) => document.status === 'UPLOADING' || document.status === 'DELETING')}
                 onClick={handleReindex}
               >
                 {reindexing ? (

@@ -97,10 +97,13 @@ public class IngestJobService {
         }
         IngestJob job = findJobForUpdate(jobId);
 
-        Document doc = documentRepository.findById(docId)
+        Document doc = findDocumentForUpdate(docId)
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
         if (!job.getDocId().equals(doc.getId()) || !job.getKbId().equals(doc.getKbId())) {
             throw new IllegalArgumentException("Ingest status update does not match job/document");
+        }
+        if (UploadIntentLifecyclePolicy.isDeleting(doc)) {
+            return IngestCallbackAckResponse.ignored("document_deleting");
         }
         boolean wasV2Ready = completedUpdate && profileIndexStateService.isV2Ready(doc.getKbId());
         boolean wasV2Activated = completedUpdate && profileIndexStateService.isV2Activated(doc.getKbId());
@@ -276,9 +279,10 @@ public class IngestJobService {
         if (!job.getKbId().equals(kbId)) {
             throw new IllegalArgumentException("Ingest job does not belong to knowledge base: " + kbId);
         }
-        Document doc = documentRepository.findById(job.getDocId())
+        Document doc = findDocumentForUpdate(job.getDocId())
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
         UploadIntentLifecyclePolicy.requireJobCancellationAllowed(job);
+        UploadIntentLifecyclePolicy.requireDocumentMutationAllowed(doc);
         if (job.getStatus() == IngestJobStatus.PENDING) {
             job.setStatus(IngestJobStatus.CANCELLED);
             job.setStage(IngestStage.CANCELLED);
@@ -325,6 +329,9 @@ public class IngestJobService {
         if (job.getStatus() != IngestJobStatus.DEAD_LETTER && job.getRetryCount() >= maxRecoveryAttempts()) {
             throw new IllegalStateException("Max retries exceeded");
         }
+        Document doc = findDocumentForUpdate(job.getDocId())
+                .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
+        UploadIntentLifecyclePolicy.requireDocumentMutationAllowed(doc);
         job.setRetryCount(job.getStatus() == IngestJobStatus.DEAD_LETTER ? 0 : safeRetryCount(job) + 1);
         job.setStatus(IngestJobStatus.PENDING);
         job.setStage(IngestStage.QUEUED);
@@ -332,8 +339,6 @@ public class IngestJobService {
         rotateExecution(job);
         ingestJobRepository.save(job);
 
-        Document doc = documentRepository.findById(job.getDocId())
-                .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
         doc.setStatus(DocumentStatus.PENDING);
         doc.setIndexSchemaVersion(1);
         doc.setErrorMessage(null);
@@ -394,7 +399,7 @@ public class IngestJobService {
                 IngestJobStatus.PENDING, IngestStage.QUEUED);
         int recovered = recoverExpiredProcessingJobs();
         for (IngestJob job : jobs) {
-            Document doc = documentRepository.findById(job.getDocId()).orElse(null);
+            Document doc = findDocumentForUpdate(job.getDocId()).orElse(null);
             if (doc == null || doc.getStatus() != DocumentStatus.PENDING) {
                 continue;
             }
@@ -421,7 +426,7 @@ public class IngestJobService {
                 IngestJobStatus.PROCESSING, now);
         int recovered = 0;
         for (IngestJob job : jobs) {
-            Document doc = documentRepository.findById(job.getDocId()).orElse(null);
+            Document doc = findDocumentForUpdate(job.getDocId()).orElse(null);
             if (doc == null || doc.getStatus() != DocumentStatus.PROCESSING) {
                 continue;
             }
@@ -448,7 +453,12 @@ public class IngestJobService {
     private int finalizeExpiredCancellations(Instant now) {
         List<IngestJob> jobs = ingestJobRepository.findTop20ByStatusAndLeaseExpiresAtBeforeOrderByUpdatedAtAsc(
                 IngestJobStatus.CANCEL_REQUESTED, now);
+        int finalized = 0;
         for (IngestJob job : jobs) {
+            Document doc = findDocumentForUpdate(job.getDocId()).orElse(null);
+            if (doc == null || UploadIntentLifecyclePolicy.isDeleting(doc)) {
+                continue;
+            }
             vectorCleanupTaskService.enqueueDocument(job.getDocId());
             job.setStatus(IngestJobStatus.CANCELLED);
             job.setStage(IngestStage.CANCELLED);
@@ -458,13 +468,12 @@ public class IngestJobService {
             job.setErrorMessage(null);
             ingestJobRepository.save(job);
 
-            documentRepository.findById(job.getDocId()).ifPresent(doc -> {
-                doc.setStatus(DocumentStatus.CANCELLED);
-                doc.setErrorMessage(null);
-                documentRepository.save(doc);
-            });
+            doc.setStatus(DocumentStatus.CANCELLED);
+            doc.setErrorMessage(null);
+            documentRepository.save(doc);
+            finalized++;
         }
-        return jobs.size();
+        return finalized;
     }
 
     private IngestJobResponse requeueDocumentForReindex(KnowledgeBase kb, Document doc) {
@@ -536,6 +545,10 @@ public class IngestJobService {
         }
         return ingestJobRepository.findById(jobId)
                 .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
+    }
+
+    private Optional<Document> findDocumentForUpdate(UUID documentId) {
+        return documentRepository.findByIdForUpdate(documentId);
     }
 
     private void rotateExecution(IngestJob job) {

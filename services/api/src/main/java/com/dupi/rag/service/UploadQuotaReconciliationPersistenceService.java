@@ -103,7 +103,8 @@ class UploadQuotaReconciliationPersistenceService {
         }
         Document document = documents.findByIdForUpdate(documentId).orElse(null);
         if (document == null || document.getImportJobId() != null
-                || document.getStatus() == DocumentStatus.IMPORTING) {
+                || document.getStatus() == DocumentStatus.IMPORTING
+                || document.getStatus() == DocumentStatus.DELETING) {
             return Optional.empty();
         }
         UploadQuotaReservation current = current(candidate);
@@ -127,6 +128,9 @@ class UploadQuotaReconciliationPersistenceService {
             return false;
         }
         Document document = documents.findByIdForUpdate(claim.documentId()).orElse(null);
+        if (document != null && document.getStatus() == DocumentStatus.DELETING) {
+            return false;
+        }
         UploadQuotaReservation current = reservations.findById(claim.reservationId()).orElse(null);
         if (document == null || current == null
                 || current.getStatus() != UploadQuotaReservationStatus.PENDING

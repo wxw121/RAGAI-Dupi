@@ -3,6 +3,7 @@ package com.dupi.rag.service;
 import com.dupi.rag.domain.enums.IngestJobStatus;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.repository.DocumentRepository;
+import com.dupi.rag.repository.DocumentTombstoneRepository;
 import com.dupi.rag.repository.IngestJobRepository;
 import com.dupi.rag.repository.RagEvalRunRepository;
 import com.dupi.rag.repository.SparseMigrationRepository;
@@ -22,8 +23,9 @@ class RepositoryRecoveryActivityProbeTest {
         RagEvalRunRepository eval = mock(RagEvalRunRepository.class);
         SparseMigrationRepository sparse = mock(SparseMigrationRepository.class);
         DocumentRepository documents = mock(DocumentRepository.class);
+        DocumentTombstoneRepository tombstones = mock(DocumentTombstoneRepository.class);
         RepositoryRecoveryActivityProbe probe = new RepositoryRecoveryActivityProbe(
-                ingest, eval, sparse, documents);
+                ingest, eval, sparse, documents, tombstones);
         UUID kbId = UUID.randomUUID();
 
         when(ingest.existsByKbIdAndStatusIn(eq(kbId), anyList())).thenReturn(true);
@@ -47,11 +49,29 @@ class RepositoryRecoveryActivityProbeTest {
         RagEvalRunRepository eval = mock(RagEvalRunRepository.class);
         SparseMigrationRepository sparse = mock(SparseMigrationRepository.class);
         DocumentRepository documents = mock(DocumentRepository.class);
+        DocumentTombstoneRepository tombstones = mock(DocumentTombstoneRepository.class);
         RepositoryRecoveryActivityProbe probe = new RepositoryRecoveryActivityProbe(
-                ingest, eval, sparse, documents);
+                ingest, eval, sparse, documents, tombstones);
         UUID kbId = UUID.randomUUID();
         when(documents.existsByKbIdAndStatus(kbId, DocumentStatus.DELETING)).thenReturn(true);
 
         assertThat(probe.hasActiveWork(kbId)).isTrue();
+    }
+
+    @Test
+    void unresolvedLateWriterCleanupBlocksKnowledgeBaseDeletion() {
+        IngestJobRepository ingest = mock(IngestJobRepository.class);
+        RagEvalRunRepository eval = mock(RagEvalRunRepository.class);
+        SparseMigrationRepository sparse = mock(SparseMigrationRepository.class);
+        DocumentRepository documents = mock(DocumentRepository.class);
+        DocumentTombstoneRepository tombstones = mock(DocumentTombstoneRepository.class);
+        RepositoryRecoveryActivityProbe probe = new RepositoryRecoveryActivityProbe(
+                ingest, eval, sparse, documents, tombstones);
+        UUID kbId = UUID.randomUUID();
+        when(tombstones.existsByKbIdAndReasonIn(eq(kbId), anyList())).thenReturn(true);
+
+        assertThat(probe.hasActiveWork(kbId)).isTrue();
+        verify(tombstones).existsByKbIdAndReasonIn(eq(kbId), argThat(reasons ->
+                reasons.contains("UPLOAD_WRITE_ARMED") && reasons.contains("UPLOAD_ABANDONED")));
     }
 }

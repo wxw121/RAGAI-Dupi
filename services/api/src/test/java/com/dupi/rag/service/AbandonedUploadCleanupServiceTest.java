@@ -14,6 +14,7 @@ import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class AbandonedUploadCleanupServiceTest {
@@ -42,5 +43,46 @@ class AbandonedUploadCleanupServiceTest {
         var order = inOrder(storage, persistence);
         order.verify(storage, org.mockito.Mockito.times(2)).deleteChecked(task.getObjectKey());
         order.verify(persistence).complete(task.getDocId(), task.getObjectKey());
+    }
+
+    @Test
+    void armedCrashTruthIsReplayedButNeverDeclaredCleanBeforeWriterCanResolveIt() {
+        DocumentTombstoneRepository tombstones = mock(DocumentTombstoneRepository.class);
+        MinioStorageService storage = mock(MinioStorageService.class);
+        AbandonedUploadCleanupPersistence persistence = mock(AbandonedUploadCleanupPersistence.class);
+        DocumentTombstone armed = DocumentTombstone.builder().docId(UUID.randomUUID())
+                .kbId(UUID.randomUUID()).objectKey("objects/possibly-late.md")
+                .reason("UPLOAD_WRITE_ARMED").build();
+        when(tombstones.findByReasonOrderByCreatedAtAsc(
+                org.mockito.ArgumentMatchers.eq("UPLOAD_WRITE_ARMED"),
+                org.mockito.ArgumentMatchers.any(Pageable.class)))
+                .thenReturn(List.of(armed));
+        when(persistence.shouldReplayArmed(armed.getDocId(), armed.getObjectKey())).thenReturn(true);
+        AbandonedUploadCleanupService service = new AbandonedUploadCleanupService(
+                tombstones, storage, persistence);
+
+        assertThat(service.cleanup(10)).isEqualTo(1);
+
+        verify(storage).deleteChecked(armed.getObjectKey());
+        verify(persistence, never()).complete(armed.getDocId(), armed.getObjectKey());
+    }
+
+    @Test
+    void liveWriterKeepsArmedCleanupFromPerformingConflictingObjectIo() {
+        DocumentTombstoneRepository tombstones = mock(DocumentTombstoneRepository.class);
+        MinioStorageService storage = mock(MinioStorageService.class);
+        AbandonedUploadCleanupPersistence persistence = mock(AbandonedUploadCleanupPersistence.class);
+        DocumentTombstone armed = DocumentTombstone.builder().docId(UUID.randomUUID())
+                .kbId(UUID.randomUUID()).objectKey("objects/live.md")
+                .reason("UPLOAD_WRITE_ARMED").build();
+        when(tombstones.findByReasonOrderByCreatedAtAsc(
+                org.mockito.ArgumentMatchers.eq("UPLOAD_WRITE_ARMED"),
+                org.mockito.ArgumentMatchers.any(Pageable.class)))
+                .thenReturn(List.of(armed));
+        when(persistence.shouldReplayArmed(armed.getDocId(), armed.getObjectKey())).thenReturn(false);
+
+        assertThat(new AbandonedUploadCleanupService(tombstones, storage, persistence).cleanup(10)).isZero();
+
+        verifyNoInteractions(storage);
     }
 }

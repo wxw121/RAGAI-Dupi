@@ -30,6 +30,7 @@ class DocumentUploadIntentService {
     private final IngestJobRepository jobs;
     private final UploadQuotaService quota;
     private final IngestOutboxService outbox;
+    private final DocumentTombstoneService tombstones;
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     void prepare(String tenantId, Document document, IngestJob job) {
@@ -72,6 +73,7 @@ class DocumentUploadIntentService {
         }
 
         quota.commitInCurrentTransaction(reservation, document);
+        tombstones.disarmUploadCleanup(document);
         document.setStatus(DocumentStatus.PENDING);
         document.setErrorMessage(null);
         job.setStatus(IngestJobStatus.PENDING);

@@ -35,7 +35,8 @@ class DocumentUploadIntentServiceTest {
                 .thenReturn(Optional.of(deleting));
 
         var service = new DocumentUploadIntentService(
-                knowledgeBases, documents, jobs, mock(UploadQuotaService.class), mock(IngestOutboxService.class));
+                knowledgeBases, documents, jobs, mock(UploadQuotaService.class),
+                mock(IngestOutboxService.class), mock(DocumentTombstoneService.class));
 
         assertThatThrownBy(() -> service.prepare("tenant-a", document(kbId), job(kbId)))
                 .isInstanceOf(OperationConflictException.class)
@@ -56,7 +57,7 @@ class DocumentUploadIntentServiceTest {
         when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a"))
                 .thenReturn(Optional.of(ready));
 
-        new DocumentUploadIntentService(knowledgeBases, documents, jobs, null, null)
+        new DocumentUploadIntentService(knowledgeBases, documents, jobs, null, null, null)
                 .prepare("tenant-a", document, job);
 
         var order = inOrder(knowledgeBases, documents, jobs);
@@ -79,7 +80,8 @@ class DocumentUploadIntentServiceTest {
         IngestJob job = job(document.getKbId());
 
         IngestOutboxService outbox = mock(IngestOutboxService.class);
-        new DocumentUploadIntentService(knowledgeBases, documents, jobs, mock(UploadQuotaService.class), outbox)
+        new DocumentUploadIntentService(knowledgeBases, documents, jobs,
+                mock(UploadQuotaService.class), outbox, mock(DocumentTombstoneService.class))
                 .fail(document, job, "storage unavailable");
 
         assertThat(document.getStatus()).isEqualTo(DocumentStatus.FAILED);
@@ -98,6 +100,7 @@ class DocumentUploadIntentServiceTest {
         IngestJobRepository jobs = mock(IngestJobRepository.class);
         UploadQuotaService quota = mock(UploadQuotaService.class);
         IngestOutboxService outbox = mock(IngestOutboxService.class);
+        DocumentTombstoneService tombstones = mock(DocumentTombstoneService.class);
         UUID kbId = UUID.randomUUID();
         KnowledgeBase ready = KnowledgeBase.builder().id(kbId).tenantId("tenant-a")
                 .lifecycleStatus(KnowledgeBaseLifecycleStatus.READY).build();
@@ -112,14 +115,15 @@ class DocumentUploadIntentServiceTest {
         when(documents.findById(document.getId())).thenReturn(Optional.of(document));
 
         DocumentUploadPublication publication = new DocumentUploadIntentService(
-                knowledgeBases, documents, jobs, quota, outbox)
+                knowledgeBases, documents, jobs, quota, outbox, tombstones)
                 .publish("tenant-a", document, job, reservation);
 
-        var order = inOrder(knowledgeBases, jobs, documents, quota, outbox);
+        var order = inOrder(knowledgeBases, jobs, documents, quota, outbox, tombstones);
         order.verify(knowledgeBases).findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a");
         order.verify(jobs).findByIdForUpdate(job.getId());
         order.verify(documents).findById(document.getId());
         order.verify(quota).commitInCurrentTransaction(reservation, document);
+        order.verify(tombstones).disarmUploadCleanup(document);
         order.verify(documents).save(document);
         order.verify(jobs).save(job);
         order.verify(outbox).record(job, ready, document.getObjectKey(), document.getFileName(), document.getMimeType());
@@ -153,7 +157,8 @@ class DocumentUploadIntentServiceTest {
         when(outbox.hasDurableRecord(currentJob.getId())).thenReturn(true);
 
         DocumentUploadPublicationResolution resolution = new DocumentUploadIntentService(
-                knowledgeBases, documents, jobs, mock(UploadQuotaService.class), outbox)
+                knowledgeBases, documents, jobs, mock(UploadQuotaService.class), outbox,
+                mock(DocumentTombstoneService.class))
                 .reconcilePublication("tenant-a", detachedIntent, detachedJob);
 
         assertThat(resolution.isPublished()).isTrue();
@@ -179,7 +184,8 @@ class DocumentUploadIntentServiceTest {
         when(documents.findById(intent.getId())).thenReturn(Optional.of(intent));
 
         DocumentUploadPublicationResolution resolution = new DocumentUploadIntentService(
-                knowledgeBases, documents, jobs, mock(UploadQuotaService.class), outbox)
+                knowledgeBases, documents, jobs, mock(UploadQuotaService.class), outbox,
+                mock(DocumentTombstoneService.class))
                 .reconcilePublication("tenant-a", intent, job);
 
         assertThat(resolution.isPublished()).isFalse();

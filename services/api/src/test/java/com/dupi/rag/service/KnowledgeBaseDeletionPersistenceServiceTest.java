@@ -187,7 +187,11 @@ class KnowledgeBaseDeletionPersistenceServiceTest {
         assertThat(job.getRunnable()).isFalse();
         var order = inOrder(vectorTasks, tombstones, notifications, knowledgeBases, jobs);
         order.verify(vectorTasks).deleteByKnowledgeBaseId(kbId);
-        order.verify(tombstones).deleteByKbId(kbId);
+        order.verify(tombstones).deleteByKbIdAndReasonIn(eq(kbId), argThat(reasons ->
+                reasons.contains("DOCUMENT_DELETE")
+                        && reasons.contains("UPLOAD_ABANDONED_CLEANED")
+                        && !reasons.contains("UPLOAD_WRITE_ARMED")
+                        && !reasons.contains("UPLOAD_ABANDONED")));
         order.verify(notifications).deleteByKbId(kbId);
         order.verify(knowledgeBases).delete(kb);
         order.verify(jobs).saveAndFlush(job);

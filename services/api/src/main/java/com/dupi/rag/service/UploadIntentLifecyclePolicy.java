@@ -14,23 +14,34 @@ final class UploadIntentLifecyclePolicy {
 
     static void requireDocumentMutationAllowed(Document document) {
         if (document.getStatus() == DocumentStatus.UPLOADING) {
-            throw conflict();
+            throw uploadConflict();
+        }
+        if (document.getStatus() == DocumentStatus.DELETING) {
+            throw deletionConflict();
         }
     }
 
     static void requireJobCancellationAllowed(IngestJob job) {
         if (job.getStatus() == IngestJobStatus.UPLOAD_INTENT) {
-            throw conflict();
+            throw uploadConflict();
         }
     }
 
     static void requireReindexAllowed(Collection<Document> documents) {
-        if (documents.stream().anyMatch(document -> document.getStatus() == DocumentStatus.UPLOADING)) {
-            throw conflict();
+        for (Document document : documents) {
+            requireDocumentMutationAllowed(document);
         }
     }
 
-    private static OperationConflictException conflict() {
+    static boolean isDeleting(Document document) {
+        return document != null && document.getStatus() == DocumentStatus.DELETING;
+    }
+
+    private static OperationConflictException uploadConflict() {
         return new OperationConflictException("Document upload is still in progress");
+    }
+
+    private static OperationConflictException deletionConflict() {
+        return new OperationConflictException("Document deletion is still in progress");
     }
 }

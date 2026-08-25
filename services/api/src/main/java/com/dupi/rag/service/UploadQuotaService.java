@@ -236,7 +236,11 @@ public class UploadQuotaService {
                 .orElseThrow(() -> new UploadIdempotencyConflictException(
                         "Upload attempt no longer owns its quota reservation"));
         if (current.getStatus() != UploadQuotaReservationStatus.PENDING
-                || !reservation.getAttemptId().equals(current.getAttemptId())) {
+                || !reservation.getAttemptId().equals(current.getAttemptId())
+                || reservation.getReleaseReason() != null
+                || current.getReleaseReason() != null
+                || current.getAttemptExpiresAt() == null
+                || !current.getAttemptExpiresAt().isAfter(Instant.now())) {
             throw new UploadIdempotencyConflictException(
                     "Upload attempt no longer owns its quota reservation");
         }
