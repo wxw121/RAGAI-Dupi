@@ -153,6 +153,22 @@ public class MinioStorageService {
         }
     }
 
+    public boolean existsChecked(String objectKey) {
+        try {
+            minioClient.statObject(StatObjectArgs.builder()
+                    .bucket(properties.getBucket()).object(objectKey).build());
+            return true;
+        } catch (io.minio.errors.ErrorResponseException missing) {
+            String code = missing.errorResponse() == null ? "" : missing.errorResponse().code();
+            if ("NoSuchKey".equals(code) || "NoSuchObject".equals(code) || "NoSuchBucket".equals(code)) {
+                return false;
+            }
+            throw new IllegalStateException("Failed to inspect MinIO object", missing);
+        } catch (Exception failure) {
+            throw new IllegalStateException("Failed to inspect MinIO object", failure);
+        }
+    }
+
     public enum ObjectState { ABSENT, MATCHING, CONFLICT }
     public enum ObjectWriteResult { CREATED, ALREADY_EXISTS }
     public record ObjectInspection(ObjectState state, long byteSize, String sha256) { }

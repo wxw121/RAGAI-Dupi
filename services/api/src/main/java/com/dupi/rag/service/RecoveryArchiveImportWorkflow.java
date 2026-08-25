@@ -79,7 +79,12 @@ public class RecoveryArchiveImportWorkflow implements OperationWorkflow {
         String manifestKey = storage.finalKey(plan.tenantId(), context.jobId(), "manifest.json");
         cleanup(context, "cleanup-manifest", "CLEANUP_OBJECT", manifestKey,
                 () -> fencedDelete(context, manifestKey));
-        String stagingKey = storage.stagingKey(context.jobId(), plan.zipSha256());
+        String stagingKey = steps.findByJobIdAndStepKey(
+                        context.jobId(), RecoveryArchiveImportIntakeWriteService.STAGE_STEP)
+                .map(OperationStep::getResourceRef)
+                .map(value -> value != null && value.startsWith("{")
+                        ? RecoveryStageEvidence.decode(value).objectKey() : value)
+                .orElse(storage.stagingKey(context.jobId(), plan.zipSha256()));
         cleanup(context, "cleanup-staging", "CLEANUP_STAGING", stagingKey,
                 () -> fencedDelete(context, stagingKey));
 

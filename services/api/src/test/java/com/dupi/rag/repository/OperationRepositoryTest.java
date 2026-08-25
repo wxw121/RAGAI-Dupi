@@ -49,7 +49,7 @@ class OperationRepositoryTest {
     @Test
     void retentionScanIsBoundedByPageableAndSelectsOnlyStagedImportIntakes() throws Exception {
         var method = OperationJobRepository.class.getMethod(
-                "findExpiredStagingIntakes", Instant.class,
+                "findExpiredStagingIntakes", Instant.class, Instant.class,
                 org.springframework.data.domain.Pageable.class);
         String query = method.getAnnotation(Query.class).value();
 
@@ -59,9 +59,10 @@ class OperationRepositoryTest {
                 .contains("OperationStatus.PREPARED")
                 .contains("OperationPhase.FORWARD")
                 .contains("job.runnable = false")
-                .contains("job.createdAt <= :cutoff")
-                .contains("order by job.createdAt asc, job.id asc");
-        assertThat(method.getParameterTypes()[1])
+                .contains("job.updatedAt <= :cutoff")
+                .contains("job.leaseExpiresAt <= :now")
+                .contains("order by job.updatedAt asc, job.id asc");
+        assertThat(method.getParameterTypes()[2])
                 .isEqualTo(org.springframework.data.domain.Pageable.class);
     }
 

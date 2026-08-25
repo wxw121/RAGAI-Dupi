@@ -5,6 +5,8 @@ import com.dupi.rag.domain.enums.OperationPhase;
 import com.dupi.rag.domain.enums.OperationStatus;
 import com.dupi.rag.domain.enums.OperationType;
 import com.dupi.rag.repository.OperationJobRepository;
+import com.dupi.rag.repository.OperationStagingAttemptRepository;
+import com.dupi.rag.domain.enums.OperationStagingAttemptState;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -23,12 +25,13 @@ class OperationStagingRetentionPersistenceService {
             OperationType.RECOVERY_ARCHIVE_IMPORT, OperationType.MARKDOWN_PACKAGE_IMPORT);
 
     private final OperationJobRepository jobs;
+    private final OperationStagingAttemptRepository stagingAttempts;
     private final AuditLogService audit;
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     boolean scheduleCleanup(UUID jobId, Instant cutoff, Instant now) {
         OperationJob job = jobs.findByIdForUpdate(jobId).orElse(null);
-        if (!eligible(job, cutoff)) {
+        if (!eligible(job, cutoff, now)) {
             return false;
         }
         job.setPhase(OperationPhase.COMPENSATION);
@@ -39,19 +42,30 @@ class OperationStagingRetentionPersistenceService {
         job.setNextAttemptAt(now);
         job.setClaimToken(null);
         job.setLeaseExpiresAt(null);
+        for (var attempt : stagingAttempts.findByJobIdAndState(
+                jobId, OperationStagingAttemptState.ACTIVE)) {
+            attempt.setState(OperationStagingAttemptState.CLEANUP_PENDING);
+            attempt.setLeaseExpiresAt(now);
+            attempt.setLastActivityAt(now);
+            stagingAttempts.save(attempt);
+        }
         jobs.saveAndFlush(job);
         audit.recordOperationInCurrentTransaction(
                 job.getTenantId(), AuditLogService.OPERATION_COMPENSATE, job.getId(), EXPIRED);
         return true;
     }
 
-    private boolean eligible(OperationJob job, Instant cutoff) {
+    private boolean eligible(OperationJob job, Instant cutoff, Instant now) {
         return job != null
                 && STAGED_IMPORTS.contains(job.getOperationType())
                 && job.getStatus() == OperationStatus.PREPARED
                 && job.getPhase() == OperationPhase.FORWARD
                 && !Boolean.TRUE.equals(job.getRunnable())
-                && job.getCreatedAt() != null
-                && !job.getCreatedAt().isAfter(cutoff);
+                && ((job.getClaimToken() == null
+                        && job.getUpdatedAt() != null
+                        && !job.getUpdatedAt().isAfter(cutoff))
+                    || (job.getClaimToken() != null
+                        && job.getLeaseExpiresAt() != null
+                        && !job.getLeaseExpiresAt().isAfter(now)));
     }
 }

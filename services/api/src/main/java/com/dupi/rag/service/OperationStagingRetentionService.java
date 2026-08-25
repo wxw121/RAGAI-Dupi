@@ -46,7 +46,8 @@ public class OperationStagingRetentionService {
         Instant now = clock.instant();
         Instant cutoff = now.minusSeconds(retentionHours * 3600L);
         int scheduled = 0;
-        for (var jobId : jobs.findExpiredStagingIntakes(cutoff, PageRequest.of(0, cleanupLimit))) {
+        for (var jobId : jobs.findExpiredStagingIntakes(cutoff, now,
+                PageRequest.of(0, cleanupLimit))) {
             try {
                 if (persistence.scheduleCleanup(jobId, cutoff, now)) {
                     scheduled++;

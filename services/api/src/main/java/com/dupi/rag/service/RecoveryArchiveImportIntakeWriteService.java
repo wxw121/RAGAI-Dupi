@@ -29,14 +29,22 @@ class RecoveryArchiveImportIntakeWriteService {
     private final OperationStepRepository steps;
     private final KnowledgeBaseRepository knowledgeBases;
     private final AuditLogService audit;
+    private final OperationStagingAttemptService stagingAttempts;
+
+    RecoveryArchiveImportIntakeWriteService(OperationJobRepository jobs, OperationStepRepository steps,
+                                            KnowledgeBaseRepository knowledgeBases, AuditLogService audit) {
+        this(jobs, steps, knowledgeBases, audit, null);
+    }
 
     @Autowired
     RecoveryArchiveImportIntakeWriteService(OperationJobRepository jobs, OperationStepRepository steps,
-                                            KnowledgeBaseRepository knowledgeBases, AuditLogService audit) {
+                                            KnowledgeBaseRepository knowledgeBases, AuditLogService audit,
+                                            OperationStagingAttemptService stagingAttempts) {
         this.jobs = jobs;
         this.steps = steps;
         this.knowledgeBases = knowledgeBases;
         this.audit = audit;
+        this.stagingAttempts = stagingAttempts;
     }
 
     RecoveryArchiveImportIntakeWriteService(OperationJobRepository jobs, OperationStepRepository steps,
@@ -76,8 +84,16 @@ class RecoveryArchiveImportIntakeWriteService {
     @Transactional
     OperationJobResponse completeStageAndPublish(UUID jobId, RecoveryArchiveImportPlan plan,
                                                   StoredRecoveryObject evidence) {
+        return completeStageAndPublish(jobId, plan, evidence, null);
+    }
+
+    @Transactional
+    OperationJobResponse completeStageAndPublish(UUID jobId, RecoveryArchiveImportPlan plan,
+                                                  StoredRecoveryObject evidence,
+                                                  OperationStagingLease lease) {
         OperationJob job = locked(jobId);
         validatePlan(job, plan);
+        requireOwner(job, lease);
         validateEvidence(jobId, plan, evidence);
         OperationStep stage = requiredStage(jobId);
         if (stage.getStatus() == OperationStepStatus.COMPLETED) {
@@ -106,6 +122,8 @@ class RecoveryArchiveImportIntakeWriteService {
         }
         job.setRunnable(true);
         job.setNextAttemptAt(Instant.now());
+        if (stagingAttempts != null && lease != null) stagingAttempts.transferToPublished(lease);
+        job.setClaimToken(null); job.setLeaseExpiresAt(null);
         return response(jobs.saveAndFlush(job));
     }
 
@@ -137,6 +155,7 @@ class RecoveryArchiveImportIntakeWriteService {
         job.setLastError(limit(diagnostic));
         job.setNextAttemptAt(Instant.now());
         jobs.saveAndFlush(job);
+        if (stagingAttempts != null) stagingAttempts.markJobCleanupPending(jobId);
         audit(job, AuditLogService.OPERATION_COMPENSATE, job.getLastError());
     }
 
@@ -220,7 +239,8 @@ class RecoveryArchiveImportIntakeWriteService {
         if (evidence == null || evidence.versionToken() == null || evidence.versionToken().isBlank()
                 || evidence.byteSize() < 0 || !plan.zipSha256().equals(evidence.sha256())
                 || !evidence.objectKey().startsWith("recovery-staging/" + plan.zipSha256() + "/")
-                || !evidence.objectKey().endsWith(suffix)) {
+                || !(evidence.objectKey().endsWith(suffix)
+                    || evidence.objectKey().contains(suffix + ".attempt-"))) {
             throw new OperationConflictException("Recovery import stage evidence does not match its plan");
         }
     }
@@ -248,6 +268,14 @@ class RecoveryArchiveImportIntakeWriteService {
     private String limit(String value) {
         if (value == null) return "Recovery stage upload failed";
         return value.length() <= 2000 ? value : value.substring(0, 2000);
+    }
+    private void requireOwner(OperationJob job, OperationStagingLease lease) {
+        if (lease == null) return;
+        if (!lease.token().equals(job.getClaimToken())
+                || lease.epoch() != (job.getClaimEpoch() == null ? 0 : job.getClaimEpoch())
+                || job.getLeaseExpiresAt() == null || !job.getLeaseExpiresAt().isAfter(Instant.now())) {
+            throw new OperationConflictException("Recovery staging ownership was lost");
+        }
     }
     private void audit(OperationJob job, String action, String message) {
         if (audit != null) {

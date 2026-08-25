@@ -19,12 +19,25 @@ import java.util.List;
 
 /** Recovery-domain create/resume/stage/publish orchestration. */
 @Service
-@RequiredArgsConstructor
 public class RecoveryArchiveImportIntakeService {
     private final OperationJobRepository jobs;
     private final OperationStepRepository steps;
     private final RecoveryArchiveImportIntakeWriteService writes;
     private final RecoveryStorageService storage;
+    private final OperationStagingLeaseCoordinator stagingLeases;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public RecoveryArchiveImportIntakeService(OperationJobRepository jobs, OperationStepRepository steps,
+            RecoveryArchiveImportIntakeWriteService writes, RecoveryStorageService storage,
+            OperationStagingLeaseCoordinator stagingLeases) {
+        this.jobs = jobs; this.steps = steps; this.writes = writes; this.storage = storage;
+        this.stagingLeases = stagingLeases;
+    }
+
+    RecoveryArchiveImportIntakeService(OperationJobRepository jobs, OperationStepRepository steps,
+            RecoveryArchiveImportIntakeWriteService writes, RecoveryStorageService storage) {
+        this(jobs, steps, writes, storage, null);
+    }
 
     public RecoveryImportIntake createOrResume(RecoveryArchiveImportPlan plan, String idempotencyKey,
                                                 String createdBy) {
@@ -33,15 +46,15 @@ public class RecoveryArchiveImportIntakeService {
         String key = idempotencyKey.trim();
         var existing = jobs.findByTenantIdAndOperationTypeAndIdempotencyKey(
                 tenant, OperationType.RECOVERY_ARCHIVE_IMPORT, key);
-        if (existing.isPresent()) return resume(existing.get(), plan);
+        if (existing.isPresent()) return acquireIfWritable(resume(existing.get(), plan));
         try {
             OperationJob inserted = writes.insert(tenant, plan, key, createdBy.trim(), null);
-            return intake(inserted, plan);
+            return acquireIfWritable(intake(inserted, plan));
         } catch (DataIntegrityViolationException conflict) {
             OperationJob winner = jobs.findByTenantIdAndOperationTypeAndIdempotencyKey(
                             tenant, OperationType.RECOVERY_ARCHIVE_IMPORT, key)
                     .orElseThrow(() -> conflict);
-            return resume(winner, plan);
+            return acquireIfWritable(resume(winner, plan));
         }
     }
 
@@ -49,6 +62,12 @@ public class RecoveryArchiveImportIntakeService {
                                                          RecoveryArchiveImportPlan plan,
                                                          StoredRecoveryObject evidence) {
         return writes.completeStageAndPublish(jobId, plan, evidence);
+    }
+
+    public OperationJobResponse completeStageAndPublish(java.util.UUID jobId,
+            RecoveryArchiveImportPlan plan, StoredRecoveryObject evidence,
+            OperationStagingLease lease) {
+        return writes.completeStageAndPublish(jobId, plan, evidence, lease);
     }
 
     public void scheduleCleanup(java.util.UUID jobId, RecoveryArchiveImportPlan plan, Throwable failure) {
@@ -75,7 +94,14 @@ public class RecoveryArchiveImportIntakeService {
                 ? RecoveryStageEvidence.decode(stage.getResourceRef()) : null;
         return new RecoveryImportIntake(response(job), stage.getStatus(),
                 Boolean.TRUE.equals(job.getRunnable()) && stage.getStatus() == OperationStepStatus.COMPLETED,
-                evidence, job.getPhase() == OperationPhase.COMPENSATION);
+                evidence, job.getPhase() == OperationPhase.COMPENSATION, null);
+    }
+
+    private RecoveryImportIntake acquireIfWritable(RecoveryImportIntake intake) {
+        if (stagingLeases == null || intake.published() || intake.cleanupPending()) return intake;
+        OperationStagingLease lease = stagingLeases.acquire(intake.job().getId());
+        return new RecoveryImportIntake(intake.job(), intake.stageStatus(), intake.published(),
+                intake.stageObject(), intake.cleanupPending(), lease);
     }
 
     private OperationStep requiredStage(OperationJob job) {

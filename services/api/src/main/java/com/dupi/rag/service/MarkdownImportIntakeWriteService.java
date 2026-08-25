@@ -26,14 +26,22 @@ class MarkdownImportIntakeWriteService {
     private final OperationStepRepository steps;
     private final KnowledgeBaseRepository knowledgeBases;
     private final AuditLogService audit;
+    private final OperationStagingAttemptService stagingAttempts;
+
+    MarkdownImportIntakeWriteService(OperationJobRepository jobs, OperationStepRepository steps,
+                                     KnowledgeBaseRepository knowledgeBases, AuditLogService audit) {
+        this(jobs, steps, knowledgeBases, audit, null);
+    }
 
     @Autowired
     MarkdownImportIntakeWriteService(OperationJobRepository jobs, OperationStepRepository steps,
-                                     KnowledgeBaseRepository knowledgeBases, AuditLogService audit) {
+                                     KnowledgeBaseRepository knowledgeBases, AuditLogService audit,
+                                     OperationStagingAttemptService stagingAttempts) {
         this.jobs = jobs;
         this.steps = steps;
         this.knowledgeBases = knowledgeBases;
         this.audit = audit;
+        this.stagingAttempts = stagingAttempts;
     }
 
     MarkdownImportIntakeWriteService(OperationJobRepository jobs, OperationStepRepository steps,
@@ -66,8 +74,15 @@ class MarkdownImportIntakeWriteService {
 
     @Transactional
     void completeStage(java.util.UUID jobId, MarkdownImportPlan plan, MarkdownImportPlan.Entry entry) {
+        completeStage(jobId, plan, entry, null, entry.stagingKey());
+    }
+
+    @Transactional
+    void completeStage(java.util.UUID jobId, MarkdownImportPlan plan, MarkdownImportPlan.Entry entry,
+                       OperationStagingLease lease, String actualKey) {
         OperationJob job = locked(jobId);
         validatePlan(job, plan);
+        requireOwner(job, lease);
         OperationStep step = required(jobId, stageStep(entry));
         if (step.getStatus() == OperationStepStatus.COMPLETED) return;
         requireWritable(job);
@@ -75,20 +90,29 @@ class MarkdownImportIntakeWriteService {
             throw new OperationConflictException("Markdown import stage cannot complete while " + step.getStatus());
         }
         step.setStatus(OperationStepStatus.COMPLETED);
+        step.setResourceRef(actualKey);
         step.setCompletedAt(Instant.now()); step.setNextAttemptAt(null); step.setLastError(null);
         steps.saveAndFlush(step);
     }
 
     @Transactional
     OperationJob publishRunnable(java.util.UUID jobId, MarkdownImportPlan plan) {
+        return publishRunnable(jobId, plan, null);
+    }
+
+    @Transactional
+    OperationJob publishRunnable(java.util.UUID jobId, MarkdownImportPlan plan, OperationStagingLease lease) {
         OperationJob job = locked(jobId);
         validatePlan(job, plan);
         if (Boolean.TRUE.equals(job.getRunnable())) return job;
         requireWritable(job);
+        requireOwner(job, lease);
         boolean incomplete = plan.entries().stream().map(entry -> required(jobId, stageStep(entry)))
                 .anyMatch(step -> step.getStatus() != OperationStepStatus.COMPLETED);
         if (incomplete) throw new OperationConflictException("Markdown import staging is incomplete");
+        if (stagingAttempts != null && lease != null) stagingAttempts.transferToPublished(lease);
         job.setRunnable(true); job.setNextAttemptAt(Instant.now());
+        job.setClaimToken(null); job.setLeaseExpiresAt(null);
         return jobs.saveAndFlush(job);
     }
 
@@ -103,6 +127,7 @@ class MarkdownImportIntakeWriteService {
         job.setPhase(OperationPhase.COMPENSATION); job.setStatus(OperationStatus.COMPENSATING);
         job.setRunnable(true); job.setLastError(limit(diagnostic)); job.setNextAttemptAt(Instant.now());
         jobs.saveAndFlush(job);
+        if (stagingAttempts != null) stagingAttempts.markJobCleanupPending(jobId);
         audit(job, AuditLogService.OPERATION_COMPENSATE, job.getLastError());
     }
 
@@ -134,6 +159,14 @@ class MarkdownImportIntakeWriteService {
         if (job.getStatus() != OperationStatus.PREPARED || job.getPhase() != OperationPhase.FORWARD
                 || Boolean.TRUE.equals(job.getRunnable())) {
             throw new OperationConflictException("Markdown import intake is no longer writable");
+        }
+    }
+    private void requireOwner(OperationJob job, OperationStagingLease lease) {
+        if (lease == null) return;
+        if (!lease.token().equals(job.getClaimToken())
+                || lease.epoch() != (job.getClaimEpoch() == null ? 0 : job.getClaimEpoch())
+                || job.getLeaseExpiresAt() == null || !job.getLeaseExpiresAt().isAfter(Instant.now())) {
+            throw new OperationConflictException("Markdown staging ownership was lost");
         }
     }
     private String limit(String value) {

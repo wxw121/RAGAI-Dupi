@@ -113,6 +113,7 @@ dupi:
     staging-retention-hours: ${OPERATION_STAGING_RETENTION_HOURS:24}
     staging-cleanup-limit: ${OPERATION_STAGING_CLEANUP_LIMIT:10}
     staging-cleanup-cron: ${OPERATION_STAGING_CLEANUP_CRON:0 0 * * * *}
+    staging-lease-seconds: ${OPERATION_STAGING_LEASE_SECONDS:60}
     lease-seconds: ${OPERATION_LEASE_SECONDS:60}
     max-attempts: ${OPERATION_MAX_ATTEMPTS:5}
   audit:

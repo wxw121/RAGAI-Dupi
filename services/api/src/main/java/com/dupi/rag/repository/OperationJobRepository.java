@@ -84,10 +84,13 @@ public interface OperationJobRepository extends JpaRepository<OperationJob, UUID
               and job.status = com.dupi.rag.domain.enums.OperationStatus.PREPARED
               and job.phase = com.dupi.rag.domain.enums.OperationPhase.FORWARD
               and job.runnable = false
-              and job.createdAt <= :cutoff
-            order by job.createdAt asc, job.id asc
+              and ((job.claimToken is null and job.updatedAt <= :cutoff)
+                or (job.claimToken is not null and job.leaseExpiresAt <= :now))
+            order by job.updatedAt asc, job.id asc
             """)
-    List<UUID> findExpiredStagingIntakes(@Param("cutoff") Instant cutoff, Pageable pageable);
+    List<UUID> findExpiredStagingIntakes(@Param("cutoff") Instant cutoff,
+                                         @Param("now") Instant now,
+                                         Pageable pageable);
 
     long countByPhaseAndStatus(OperationPhase phase, OperationStatus status);
 

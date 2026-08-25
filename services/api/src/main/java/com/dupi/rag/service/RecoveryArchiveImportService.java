@@ -32,7 +32,6 @@ import java.util.zip.ZipInputStream;
 
 /** Validates a ZIP completely, then durably stages it before scheduling deterministic promotion. */
 @Service
-@RequiredArgsConstructor
 public class RecoveryArchiveImportService {
     private static final String MANIFEST_PATH = "manifest.json";
     private static final int MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
@@ -46,6 +45,25 @@ public class RecoveryArchiveImportService {
     private final RecoveryProperties properties;
     private final RecoveryManifestService manifests;
     private final RecoveryArchiveImportIntakeService intakeService;
+    private final OperationStagingLeaseCoordinator stagingLeases;
+    private final OperationStagingAttemptService stagingAttempts;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public RecoveryArchiveImportService(KnowledgeBaseService knowledgeBases, RecoveryStorageService storage,
+            RecoveryProperties properties, RecoveryManifestService manifests,
+            RecoveryArchiveImportIntakeService intakeService,
+            OperationStagingLeaseCoordinator stagingLeases,
+            OperationStagingAttemptService stagingAttempts) {
+        this.knowledgeBases = knowledgeBases; this.storage = storage; this.properties = properties;
+        this.manifests = manifests; this.intakeService = intakeService;
+        this.stagingLeases = stagingLeases; this.stagingAttempts = stagingAttempts;
+    }
+
+    RecoveryArchiveImportService(KnowledgeBaseService knowledgeBases, RecoveryStorageService storage,
+            RecoveryProperties properties, RecoveryManifestService manifests,
+            RecoveryArchiveImportIntakeService intakeService) {
+        this(knowledgeBases, storage, properties, manifests, intakeService, null, null);
+    }
 
     public OperationJobResponse submit(UUID knowledgeBaseId, MultipartFile file, String idempotencyKey, String actor) {
         KnowledgeBase knowledgeBase = knowledgeBases.findOrThrow(knowledgeBaseId);
@@ -70,7 +88,12 @@ public class RecoveryArchiveImportService {
             if (intake.cleanupPending()) {
                 throw new IllegalStateException("Recovery ZIP staging cleanup is still in progress");
             }
-            String stagingKey = storage.stagingKey(job.getId(), zipSha256);
+            OperationStagingLease lease = intake.lease();
+            var attempt = stagingAttempts == null ? null : stagingAttempts.arm(lease,
+                    RecoveryArchiveImportIntakeWriteService.STAGE_STEP, "RECOVERY",
+                    storage.stagingKey(job.getId(), zipSha256));
+            try (OperationStagingHeartbeat heartbeat = stagingLeases == null ? null : stagingLeases.start(lease)) {
+            String stagingKey = attempt == null ? storage.stagingKey(job.getId(), zipSha256) : attempt.getObjectKey();
             StoredRecoveryObject expectedStage = new StoredRecoveryObject(storage.bucket(), stagingKey,
                     file.getSize(), zipSha256);
             RecoveryStorageInspection inspection = storage.inspect(
@@ -123,7 +146,16 @@ public class RecoveryArchiveImportService {
                         new IllegalStateException("Recovery ZIP staging changed before publication"));
                 throw new IllegalStateException("Recovery ZIP staging changed before publication");
             }
-            return intakeService.completeStageAndPublish(job.getId(), plan, publicationCheck.object());
+            if (heartbeat != null && heartbeat.ownershipLost()) {
+                var lost = new com.dupi.rag.exception.OperationConflictException(
+                        "Recovery staging ownership was lost");
+                scheduleCleanup(job.getId(), plan, lost);
+                throw lost;
+            }
+            return lease == null
+                    ? intakeService.completeStageAndPublish(job.getId(), plan, publicationCheck.object())
+                    : intakeService.completeStageAndPublish(job.getId(), plan, publicationCheck.object(), lease);
+            }
         } catch (IOException exception) {
             throw invalid("Recovery ZIP could not be read", exception);
         } finally {

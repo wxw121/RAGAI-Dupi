@@ -43,10 +43,10 @@ public class MarkdownPackageImportWorkflow implements OperationWorkflow {
             prepare(context, plan);
             for (MarkdownImportPlan.MarkdownDocument document : plan.documents()) {
                 store(context, "store-document-" + digest(document.path()), "STORE_DOCUMENT",
-                        document.objectKey(), document.stagingKey(), document.byteSize(), document.sha256(), "text/markdown");
+                        document.objectKey(), stagedKey(context, document.path()), document.byteSize(), document.sha256(), "text/markdown");
                 for (MarkdownImportPlan.Asset asset : document.assets()) {
                     store(context, "store-asset-" + digest(document.path() + "\u0000" + asset.reference()), "STORE_ASSET",
-                            asset.objectKey(), asset.stagingKey(), asset.byteSize(), asset.sha256(), asset.mimeType());
+                            asset.objectKey(), stagedKey(context, asset.sourcePath()), asset.byteSize(), asset.sha256(), asset.mimeType());
                 }
             }
             for (MarkdownImportPlan.Entry entry : plan.entries()) {
@@ -90,7 +90,7 @@ public class MarkdownPackageImportWorkflow implements OperationWorkflow {
             List<MarkdownImportPlan.Entry> staged = new ArrayList<>(plan.entries());
             Collections.reverse(staged);
             for (MarkdownImportPlan.Entry entry : staged) {
-                cleanupObject(context, "cleanup-stage-" + digest(entry.path()), entry.stagingKey());
+                cleanupObject(context, "cleanup-stage-" + digest(entry.path()), stagedKey(context, entry.path()));
             }
             for (OperationStep step : steps.findByJobIdOrderBySequenceNumberAsc(context.jobId())) {
                 if (!step.getStepKey().startsWith("cleanup-")
@@ -192,7 +192,7 @@ public class MarkdownPackageImportWorkflow implements OperationWorkflow {
 
     private void cleanupStagingForSuccess(OperationExecutionContext context, MarkdownImportPlan.Entry entry) {
         try {
-            cleanupObject(context, "cleanup-stage-" + digest(entry.path()), entry.stagingKey());
+            cleanupObject(context, "cleanup-stage-" + digest(entry.path()), stagedKey(context, entry.path()));
         } catch (RetryableOperationException known) {
             throw known;
         } catch (RuntimeException unavailable) {
@@ -213,6 +213,14 @@ public class MarkdownPackageImportWorkflow implements OperationWorkflow {
 
     private String digest(String value) {
         return MarkdownImportPlan.deterministicId(new UUID(0, 0), "step", value).toString();
+    }
+
+    private String stagedKey(OperationExecutionContext context, String path) {
+        String stepKey = "stage-" + java.util.UUID.nameUUIDFromBytes(
+                path.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return steps.findByJobIdAndStepKey(context.jobId(), stepKey)
+                .map(OperationStep::getResourceRef)
+                .orElseGet(() -> plan(context).entry(path).stagingKey());
     }
 
     private String reason(Throwable failure) {

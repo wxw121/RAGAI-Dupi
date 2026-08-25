@@ -9,9 +9,16 @@ public record RecoveryImportIntake(
         OperationStepStatus stageStatus,
         boolean published,
         StoredRecoveryObject stageObject,
-        boolean cleanupPending
+        boolean cleanupPending,
+        OperationStagingLease lease
 ) {
     public RecoveryImportIntake(OperationJobResponse job, OperationStepStatus stageStatus, boolean published) {
-        this(job, stageStatus, published, null, false);
+        this(job, stageStatus, published, null, false, null);
+    }
+
+    public RecoveryImportIntake(OperationJobResponse job, OperationStepStatus stageStatus,
+                                boolean published, StoredRecoveryObject stageObject,
+                                boolean cleanupPending) {
+        this(job, stageStatus, published, stageObject, cleanupPending, null);
     }
 }

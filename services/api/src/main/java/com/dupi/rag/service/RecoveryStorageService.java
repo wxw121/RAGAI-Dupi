@@ -99,6 +99,16 @@ public class RecoveryStorageService {
         }
     }
 
+    public boolean exists(String objectKey) {
+        try {
+            return objectStore.version(properties.getBucket(), objectKey) != null;
+        } catch (RecoveryObjectNotFoundException absent) {
+            return false;
+        } catch (Exception exception) {
+            throw new RecoveryStorageUnavailableException("Failed to inspect recovery object", exception);
+        }
+    }
+
     /** @deprecated use {@link #delete(String)}; retained for older domain callers. */
     @Deprecated
     public void deleteIfPresent(String objectKey) {

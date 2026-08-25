@@ -7,6 +7,7 @@ import com.dupi.rag.domain.enums.OperationPhase;
 import com.dupi.rag.domain.enums.OperationStepStatus;
 import com.dupi.rag.domain.enums.OperationType;
 import com.dupi.rag.domain.entity.OperationStep;
+import com.dupi.rag.domain.entity.OperationStagingAttempt;
 import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.repository.OperationJobRepository;
 import com.dupi.rag.repository.OperationStepRepository;
@@ -103,6 +104,38 @@ class MarkdownImportIntakeServiceTest {
         order.verify(writes).validatePlan(prepared, plan);
         order.verify(writes, times(2)).completeStage(eq(plan.jobId()), eq(plan), any());
         order.verify(writes).publishRunnable(plan.jobId(), plan);
+    }
+
+    @Test
+    void productionIntakeUsesAttemptKeyAndExactOwnerThroughPublish() throws Exception {
+        TenantContext.setTenantId("tenant-a");
+        MarkdownImportPlan plan = plan("owned", "a.md", "a");
+        OperationJobRepository jobs = mock(OperationJobRepository.class);
+        MarkdownImportIntakeWriteService writes = mock(MarkdownImportIntakeWriteService.class);
+        MinioStorageService storage = mock(MinioStorageService.class);
+        OperationStagingLeaseCoordinator leases = mock(OperationStagingLeaseCoordinator.class);
+        OperationStagingAttemptService attempts = mock(OperationStagingAttemptService.class);
+        OperationStagingHeartbeat heartbeat = mock(OperationStagingHeartbeat.class);
+        OperationJob prepared = job(plan, false); OperationJob runnable = job(plan, true);
+        OperationStagingLease lease = new OperationStagingLease(plan.jobId(), UUID.randomUUID(), 3);
+        String actualKey = plan.entries().get(0).stagingKey() + ".attempt-3-" + lease.token();
+        when(jobs.findByTenantIdAndOperationTypeAndIdempotencyKey(anyString(), any(), anyString()))
+                .thenReturn(Optional.empty());
+        when(writes.insert("tenant-a", "owned", "alice", plan)).thenReturn(prepared);
+        when(leases.acquire(plan.jobId())).thenReturn(lease);
+        when(leases.start(lease)).thenReturn(heartbeat);
+        when(attempts.arm(eq(lease), anyString(), eq("MINIO"), anyString()))
+                .thenReturn(OperationStagingAttempt.builder().objectKey(actualKey).build());
+        when(storage.inspect(anyString(), anyLong(), anyString())).thenReturn(null);
+        when(writes.publishRunnable(plan.jobId(), plan, lease)).thenReturn(runnable);
+
+        new MarkdownImportIntakeService(jobs, writes, storage, leases, attempts)
+                .submit(plan, "owned", "alice");
+
+        verify(storage).uploadIfAbsent(eq(actualKey), any(), anyLong(), anyString());
+        verify(writes).completeStage(plan.jobId(), plan, plan.entries().get(0), lease, actualKey);
+        verify(writes).publishRunnable(plan.jobId(), plan, lease);
+        verify(heartbeat).close();
     }
 
     @Test

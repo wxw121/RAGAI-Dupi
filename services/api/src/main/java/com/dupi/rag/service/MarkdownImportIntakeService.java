@@ -18,11 +18,25 @@ import java.util.UUID;
 
 /** Markdown-domain create/resume/stage/publish orchestration. */
 @Service
-@RequiredArgsConstructor
 public class MarkdownImportIntakeService {
     private final OperationJobRepository jobs;
     private final MarkdownImportIntakeWriteService writes;
     private final MinioStorageService storage;
+    private final OperationStagingLeaseCoordinator stagingLeases;
+    private final OperationStagingAttemptService stagingAttempts;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public MarkdownImportIntakeService(OperationJobRepository jobs, MarkdownImportIntakeWriteService writes,
+            MinioStorageService storage, OperationStagingLeaseCoordinator stagingLeases,
+            OperationStagingAttemptService stagingAttempts) {
+        this.jobs = jobs; this.writes = writes; this.storage = storage;
+        this.stagingLeases = stagingLeases; this.stagingAttempts = stagingAttempts;
+    }
+
+    MarkdownImportIntakeService(OperationJobRepository jobs, MarkdownImportIntakeWriteService writes,
+                                MinioStorageService storage) {
+        this(jobs, writes, storage, null, null);
+    }
 
     public static UUID jobId(String tenant, String idempotencyKey) {
         return UUID.nameUUIDFromBytes(("markdown-import:" + tenant + ":" + idempotencyKey)
@@ -44,9 +58,14 @@ public class MarkdownImportIntakeService {
         }
         writes.validatePlan(job, plan);
         if (Boolean.TRUE.equals(job.getRunnable()) || job.getStatus() == OperationStatus.COMPLETED) return response(job);
-        try {
-            for (MarkdownImportPlan.Entry entry : plan.entries()) stage(plan, entry);
-            return response(writes.publishRunnable(job.getId(), plan));
+        OperationStagingLease lease = stagingLeases == null ? null : stagingLeases.acquire(job.getId());
+        try (OperationStagingHeartbeat heartbeat = stagingLeases == null ? null : stagingLeases.start(lease)) {
+            for (MarkdownImportPlan.Entry entry : plan.entries()) stage(plan, entry, lease);
+            if (heartbeat != null && heartbeat.ownershipLost()) {
+                throw new OperationConflictException("Markdown staging ownership was lost");
+            }
+            return response(lease == null ? writes.publishRunnable(job.getId(), plan)
+                    : writes.publishRunnable(job.getId(), plan, lease));
         } catch (OperationConflictException conflict) {
             writes.scheduleCleanup(job.getId(), plan, conflict.getMessage());
             OperationJob winner = jobs.findById(job.getId()).orElse(job);
@@ -64,22 +83,27 @@ public class MarkdownImportIntakeService {
         }
     }
 
-    private void stage(MarkdownImportPlan plan, MarkdownImportPlan.Entry entry) {
+    private void stage(MarkdownImportPlan plan, MarkdownImportPlan.Entry entry,
+                       OperationStagingLease lease) {
+        var attempt = stagingAttempts == null ? null : stagingAttempts.arm(
+                lease, MarkdownImportIntakeWriteService.stageStep(entry), "MINIO", entry.stagingKey());
+        String stagingKey = attempt == null ? entry.stagingKey() : attempt.getObjectKey();
         MinioStorageService.ObjectInspection inspection = storage.inspect(
-                entry.stagingKey(), entry.byteSize(), entry.sha256());
+                stagingKey, entry.byteSize(), entry.sha256());
         if (inspection != null && inspection.state() == MinioStorageService.ObjectState.CONFLICT) {
             throw new OperationConflictException("Markdown staging key contains different bytes: " + entry.path());
         }
         if (inspection == null || inspection.state() == MinioStorageService.ObjectState.ABSENT) {
             byte[] content = entry.content();
             if (content == null) throw new OperationConflictException("Markdown replay is missing staged input bytes");
-            storage.uploadIfAbsent(entry.stagingKey(), new ByteArrayInputStream(content), entry.byteSize(), entry.mimeType());
-            MinioStorageService.ObjectInspection stored = storage.inspect(entry.stagingKey(), entry.byteSize(), entry.sha256());
+            storage.uploadIfAbsent(stagingKey, new ByteArrayInputStream(content), entry.byteSize(), entry.mimeType());
+            MinioStorageService.ObjectInspection stored = storage.inspect(stagingKey, entry.byteSize(), entry.sha256());
             if (stored != null && stored.state() != MinioStorageService.ObjectState.MATCHING) {
                 throw new OperationConflictException("Markdown staged object differs from its immutable plan: " + entry.path());
             }
         }
-        writes.completeStage(plan.jobId(), plan, entry);
+        if (lease == null) writes.completeStage(plan.jobId(), plan, entry);
+        else writes.completeStage(plan.jobId(), plan, entry, lease, stagingKey);
     }
 
     private void validate(MarkdownImportPlan plan, String key, String createdBy) {
