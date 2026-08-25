@@ -13,11 +13,11 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -26,20 +26,33 @@ public class RagEvalCaseValidationService {
     private final DocumentRepository documentRepository;
 
     public ValidationReport validate(UUID kbId, List<RagEvalCase> cases) {
-        Set<String> completedFiles = new LinkedHashSet<>(documentRepository
+        Map<UUID, Document> completedDocuments = documentRepository
                 .findByKbIdAndStatusOrderByCreatedAtDesc(kbId, DocumentStatus.COMPLETED)
                 .stream()
-                .map(Document::getFileName)
-                .filter(value -> value != null && !value.isBlank())
-                .map(String::trim)
-                .toList());
+                .collect(Collectors.toMap(Document::getId, Function.identity()));
         Map<UUID, CaseValidity> byCaseId = new LinkedHashMap<>();
         List<RagEvalCase> invalidCases = new ArrayList<>();
 
         for (RagEvalCase evalCase : cases) {
-            List<String> missing = expectedFiles(evalCase).stream()
-                    .filter(fileName -> !completedFiles.contains(fileName))
-                    .toList();
+            List<UUID> expectedIds = expectedDocumentIds(evalCase);
+            List<String> snapshots = expectedFiles(evalCase);
+            List<String> missing = new ArrayList<>();
+            if (expectedIds.isEmpty() && !snapshots.isEmpty()) {
+                missing.addAll(snapshots);
+            } else if (expectedIds.size() != snapshots.size()) {
+                missing.addAll(snapshots.isEmpty()
+                        ? expectedIds.stream().map(UUID::toString).toList()
+                        : snapshots);
+            } else {
+                for (int index = 0; index < expectedIds.size(); index++) {
+                    Document document = completedDocuments.get(expectedIds.get(index));
+                    String snapshot = snapshots.get(index);
+                    if (document == null || !java.util.Objects.equals(document.getFileName(), snapshot)) {
+                        missing.add(snapshot == null || snapshot.isBlank()
+                                ? expectedIds.get(index).toString() : snapshot);
+                    }
+                }
+            }
             byCaseId.put(evalCase.getId(), new CaseValidity(missing.isEmpty(), missing));
             if (!missing.isEmpty()) {
                 invalidCases.add(evalCase);
@@ -50,16 +63,27 @@ public class RagEvalCaseValidationService {
     }
 
     public List<String> expectedFiles(RagEvalCase evalCase) {
-        LinkedHashSet<String> files = new LinkedHashSet<>();
+        List<String> files = new ArrayList<>();
         addFile(files, evalCase.getExpectedFileName());
-        List<String> additional = evalCase.getExpectedFileNames() == null
-                ? List.of()
-                : evalCase.getExpectedFileNames();
-        additional.forEach(value -> addFile(files, value));
-        return List.copyOf(files);
+        if (evalCase.getExpectedFileNames() != null) {
+            evalCase.getExpectedFileNames().forEach(value -> addFile(files, value));
+        }
+        if (!expectedDocumentIds(evalCase).isEmpty()) {
+            return List.copyOf(files);
+        }
+        return files.stream().distinct().toList();
     }
 
-    private void addFile(Set<String> files, String value) {
+    public List<UUID> expectedDocumentIds(RagEvalCase evalCase) {
+        if (evalCase.getExpectedDocumentIds() != null && !evalCase.getExpectedDocumentIds().isEmpty()) {
+            return evalCase.getExpectedDocumentIds().stream()
+                    .filter(java.util.Objects::nonNull).distinct().toList();
+        }
+        return evalCase.getExpectedDocumentId() == null
+                ? List.of() : List.of(evalCase.getExpectedDocumentId());
+    }
+
+    private void addFile(List<String> files, String value) {
         if (value != null && !value.isBlank()) {
             files.add(value.trim());
         }
@@ -72,7 +96,8 @@ public class RagEvalCaseValidationService {
                         item.getId().toString(),
                         value(item.getUpdatedAt()),
                         value(item.getCaseKey()),
-                        String.join(",", expectedFiles(item))))
+                        expectedDocumentIds(item).stream().map(UUID::toString)
+                                .collect(java.util.stream.Collectors.joining(","))))
                 .reduce((left, right) -> left + "\n" + right)
                 .orElse("");
         try {

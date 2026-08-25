@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.util.List;
+import java.util.UUID;
 
 @Data
 @Builder
@@ -16,6 +17,7 @@ public class RagEvalGenerationDraft {
     private String caseKey;
     private String query;
     private String expectedFileName;
+    private UUID expectedDocumentId;
     @Builder.Default
     private List<String> mustContainAny = List.of();
     @Builder.Default

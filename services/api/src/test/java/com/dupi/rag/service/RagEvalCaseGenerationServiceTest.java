@@ -51,10 +51,10 @@ class RagEvalCaseGenerationServiceTest {
         Document covered = document(kbId, "covered.md");
         List<Document> documents = List.of(one, two, covered);
         List<RagEvalCase> cases = List.of(
-                singleSource(kbId, "one-existing", "one.md"),
-                singleSource(kbId, "covered-a", "covered.md"),
-                singleSource(kbId, "covered-b", "covered.md"),
-                multiSource(kbId, "cross-doc", "one.md", "two.md"),
+                singleSource(kbId, "one-existing", one),
+                singleSource(kbId, "covered-a", covered),
+                singleSource(kbId, "covered-b", covered),
+                multiSource(kbId, "cross-doc", one, two),
                 sourceFree(kbId, "generic"));
         when(documentRepository.findByKbIdAndStatusOrderByCreatedAtDesc(kbId, DocumentStatus.COMPLETED))
                 .thenReturn(documents);
@@ -219,7 +219,7 @@ class RagEvalCaseGenerationServiceTest {
     void confirmReplacesOnlyInvalidCasesAndRejectsStaleFingerprints() {
         UUID kbId = UUID.randomUUID();
         Document document = document(kbId, "guide.md");
-        RagEvalCase valid = singleSource(kbId, "valid", "guide.md");
+        RagEvalCase valid = singleSource(kbId, "valid", document);
         RagEvalCase stale = singleSource(kbId, "stale", "gone.md");
         List<RagEvalCase> existing = List.of(valid, stale);
         when(documentRepository.findByKbIdAndStatusOrderByCreatedAtDesc(kbId, DocumentStatus.COMPLETED))
@@ -240,7 +240,8 @@ class RagEvalCaseGenerationServiceTest {
         request.setCaseFingerprint(preview.getCaseFingerprint());
         request.setReplaceCaseIds(List.of(stale.getId()));
         request.setGeneratedCases(List.of(com.dupi.rag.dto.RagEvalGenerationDraft.builder()
-                .caseKey("new-case").query("What is alpha?").expectedFileName("guide.md")
+                .caseKey("new-case").query("What is alpha?").expectedDocumentId(document.getId())
+                .expectedFileName("guide.md")
                 .mustContainAny(List.of("alpha", "evidence")).build()));
 
         var confirmed = service().confirm(kbId, request);
@@ -288,7 +289,7 @@ class RagEvalCaseGenerationServiceTest {
     void confirmAddAppendsCasesWithoutDeletingOrUpdatingExistingCases() {
         UUID kbId = UUID.randomUUID();
         Document document = document(kbId, "guide.md");
-        RagEvalCase existing = singleSource(kbId, "existing", "guide.md");
+        RagEvalCase existing = singleSource(kbId, "existing", document);
         when(documentRepository.findByKbIdAndStatusOrderByCreatedAtDesc(kbId, DocumentStatus.COMPLETED))
                 .thenReturn(List.of(document));
         when(caseRepository.findByKbIdOrderByCreatedAtAsc(kbId)).thenReturn(List.of(existing));
@@ -319,6 +320,71 @@ class RagEvalCaseGenerationServiceTest {
                 .contains("existing", "alpha-case", "beta-case");
         verify(caseRepository, never()).deleteAll(org.mockito.ArgumentMatchers.any());
         verify(caseRepository).saveAll(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void confirmsIndependentCasesForSameNameDocumentsById() {
+        UUID kbId = UUID.randomUUID();
+        Document first = document(kbId, "guide.md");
+        Document second = document(kbId, "guide.md");
+        when(documentRepository.findByKbIdAndStatusOrderByCreatedAtDesc(kbId, DocumentStatus.COMPLETED))
+                .thenReturn(List.of(first, second));
+        when(caseRepository.findByKbIdOrderByCreatedAtAsc(kbId)).thenReturn(List.of());
+        when(chunkRepository.countByDocId(first.getId())).thenReturn(1L);
+        when(chunkRepository.countByDocId(second.getId())).thenReturn(1L);
+        when(chunkRepository.findTop20ByDocIdOrderByChunkIndexAsc(first.getId()))
+                .thenReturn(List.of(chunk(first, "alpha evidence")));
+        when(chunkRepository.findTop20ByDocIdOrderByChunkIndexAsc(second.getId()))
+                .thenReturn(List.of(chunk(second, "beta evidence")));
+        when(llmClient.chat(anyString(), contains("guide.md")))
+                .thenReturn(
+                        "{\"cases\":[{\"caseKey\":\"alpha-case\",\"query\":\"shared question\",\"expectedFileName\":\"guide.md\",\"mustContainAny\":[\"alpha\",\"evidence\"]}]}",
+                        "{\"cases\":[{\"caseKey\":\"beta-case\",\"query\":\"shared question\",\"expectedFileName\":\"guide.md\",\"mustContainAny\":[\"beta\",\"evidence\"]}]}");
+        when(caseRepository.saveAll(org.mockito.ArgumentMatchers.any())).thenAnswer(call -> {
+            Iterable<RagEvalCase> items = call.getArgument(0);
+            items.forEach(item -> item.setId(UUID.randomUUID()));
+            return items;
+        });
+        var previewRequest = new com.dupi.rag.dto.RagEvalAddGenerationPreviewRequest();
+        previewRequest.setDocumentIds(List.of(first.getId(), second.getId()));
+        previewRequest.setCasesPerDocument(1);
+        var preview = service().previewAdd(kbId, previewRequest);
+        var confirmRequest = new com.dupi.rag.dto.RagEvalAddGenerationConfirmRequest();
+        confirmRequest.setDocumentFingerprint(preview.getDocumentFingerprint());
+        confirmRequest.setCaseFingerprint(preview.getCaseFingerprint());
+        confirmRequest.setDocumentIds(List.of(first.getId(), second.getId()));
+        confirmRequest.setCasesPerDocument(1);
+        confirmRequest.setGeneratedCases(preview.getDocuments().stream()
+                .flatMap(item -> item.getProposals().stream()).toList());
+
+        var confirmed = service().confirmAdd(kbId, confirmRequest);
+
+        assertThat(confirmed).extracting(com.dupi.rag.dto.RagEvalCaseResponse::getExpectedDocumentId)
+                .containsExactlyInAnyOrder(first.getId(), second.getId());
+    }
+
+    @Test
+    void confirmRejectsClientFilenameThatDiffersFromDocumentSnapshot() {
+        UUID kbId = UUID.randomUUID();
+        Document document = document(kbId, "guide.md");
+        stubGenerationDocument(kbId, document, "alpha evidence");
+        when(llmClient.chat(anyString(), contains("guide.md"))).thenReturn(jsonCases("guide.md", "alpha"));
+        var previewRequest = new com.dupi.rag.dto.RagEvalAddGenerationPreviewRequest();
+        previewRequest.setDocumentIds(List.of(document.getId()));
+        previewRequest.setCasesPerDocument(1);
+        var preview = service().previewAdd(kbId, previewRequest);
+        var draft = preview.getDocuments().get(0).getProposals().get(0);
+        draft.setExpectedFileName("forged.md");
+        var request = new com.dupi.rag.dto.RagEvalAddGenerationConfirmRequest();
+        request.setDocumentFingerprint(preview.getDocumentFingerprint());
+        request.setCaseFingerprint(preview.getCaseFingerprint());
+        request.setDocumentIds(List.of(document.getId()));
+        request.setCasesPerDocument(1);
+        request.setGeneratedCases(List.of(draft));
+
+        assertThatThrownBy(() -> service().confirmAdd(kbId, request))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("filename");
     }
 
     @Test
@@ -369,8 +435,18 @@ class RagEvalCaseGenerationServiceTest {
         return baseCase(kbId, key).expectedFileName(file).expectedFileNames(List.of()).build();
     }
 
+    private static RagEvalCase singleSource(UUID kbId, String key, Document document) {
+        return baseCase(kbId, key).expectedDocumentId(document.getId())
+                .expectedFileName(document.getFileName()).expectedFileNames(List.of()).build();
+    }
+
     private static RagEvalCase multiSource(UUID kbId, String key, String first, String second) {
         return baseCase(kbId, key).expectedFileName(first).expectedFileNames(List.of(second)).build();
+    }
+
+    private static RagEvalCase multiSource(UUID kbId, String key, Document first, Document second) {
+        return baseCase(kbId, key).expectedDocumentIds(List.of(first.getId(), second.getId()))
+                .expectedFileNames(List.of(first.getFileName(), second.getFileName())).build();
     }
 
     private static RagEvalCase sourceFree(UUID kbId, String key) {

@@ -57,10 +57,18 @@ public class RagEvalCase {
     @Column(name = "expected_file_name")
     private String expectedFileName;
 
+    @Column(name = "expected_document_id")
+    private UUID expectedDocumentId;
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "expected_file_names", columnDefinition = "jsonb", nullable = false)
     @Builder.Default
     private List<String> expectedFileNames = List.of();
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "expected_document_ids", columnDefinition = "jsonb", nullable = false)
+    @Builder.Default
+    private List<UUID> expectedDocumentIds = List.of();
 
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "must_contain_any", columnDefinition = "jsonb", nullable = false)

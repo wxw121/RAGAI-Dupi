@@ -19,6 +19,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.io.ByteArrayInputStream;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
 import java.util.Optional;
 import java.util.UUID;
 import java.io.ByteArrayOutputStream;
@@ -102,7 +104,8 @@ class RecoveryArchiveServiceTest {
         Chunk chunk = Chunk.builder().id(UUID.randomUUID()).kbId(kbId).docId(document.getId())
                 .chunkIndex(0).content("guide").build();
         RagEvalCase evalCase = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
-                .caseKey("case").query("guide").minHits(1).topK(3).build();
+                .caseKey("case").query("guide").minHits(1).topK(3)
+                .expectedDocumentId(document.getId()).expectedFileName(document.getFileName()).build();
         RetrievalProfile profile = RetrievalProfile.builder().id(UUID.randomUUID()).kbId(kbId)
                 .name("hybrid").version(2).vectorCandidateCount(10).sparseCandidateCount(10)
                 .rrfConstant(60).rerankCandidateLimit(5).finalTopK(3).build();
@@ -122,11 +125,14 @@ class RecoveryArchiveServiceTest {
         when(items.findByArchiveIdAndItemKey(any(), anyString())).thenReturn(Optional.empty());
         when(items.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(archives.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        Map<String, byte[]> capturedPayloads = new HashMap<>();
         when(recoveryStorage.put(anyString(), eq(archiveId), anyString(), any()))
                 .thenAnswer(invocation -> {
                     String relative = invocation.getArgument(2);
+                    byte[] bytes = ((java.io.InputStream) invocation.getArgument(3)).readAllBytes();
+                    capturedPayloads.put(relative, bytes);
                     return new StoredRecoveryObject("dupi-recovery",
-                            "archives/tenant-a/" + archiveId + "/" + relative, 5, "abc123");
+                            "archives/tenant-a/" + archiveId + "/" + relative, bytes.length, "abc123");
                 });
         when(recoveryStorage.verify(any())).thenReturn(true);
         when(recoveryVectors.sparseCollection(kbId, 2)).thenReturn("chunks_sparse_2");
@@ -149,6 +155,8 @@ class RecoveryArchiveServiceTest {
         verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("vectors/dense.ndjson"), any());
         verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("vectors/profile.ndjson"), any());
         verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("vectors/sparse.ndjson"), any());
+        assertThat(new String(capturedPayloads.get("records/evaluation-cases.ndjson"), java.nio.charset.StandardCharsets.UTF_8))
+                .contains("\"expectedDocumentId\":\"" + document.getId() + "\"");
         verify(maintenance).release(archiveId, RecoveryArchiveStatus.COMPLETED);
     }
 

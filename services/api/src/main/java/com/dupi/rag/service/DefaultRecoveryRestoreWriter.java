@@ -171,6 +171,8 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
                                 List<Document> sourceDocuments, List<Chunk> sourceChunks,
                                 List<RagEvalCase> sourceCases, RagQualityPolicy sourcePolicy,
                                 List<RetrievalProfile> sourceProfiles, List<DocumentAsset> sourceAssets) {
+        Map<UUID, UUID> documentIdMap = sourceDocuments.stream().collect(java.util.stream.Collectors.toMap(
+                Document::getId, source -> remap(job.getId(), source.getId())));
         target.setName(restoredName(sourceKb.getName(), job));
         target.setDescription(sourceKb.getDescription());
         target.setChunkSize(sourceKb.getChunkSize());
@@ -239,6 +241,15 @@ public class DefaultRecoveryRestoreWriter implements RecoveryRestoreWriter {
         for (RagEvalCase source : sourceCases) {
             source.setId(remap(job.getId(), source.getId()));
             source.setKbId(job.getTargetKnowledgeBaseId());
+            if (source.getExpectedDocumentId() != null) {
+                source.setExpectedDocumentId(documentIdMap.get(source.getExpectedDocumentId()));
+            }
+            source.setExpectedDocumentIds(source.getExpectedDocumentIds() == null
+                    ? List.of()
+                    : source.getExpectedDocumentIds().stream()
+                            .map(documentIdMap::get)
+                            .filter(Objects::nonNull)
+                            .toList());
         }
         evalCases.saveAll(sourceCases);
 

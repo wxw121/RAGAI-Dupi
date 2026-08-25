@@ -1,5 +1,6 @@
 package com.dupi.rag.service;
 
+import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.RagEvalCase;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.entity.RagEvalRunResult;
@@ -18,6 +19,7 @@ import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.dto.RetrieveResponse;
 import com.dupi.rag.repository.RagEvalCaseRepository;
+import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.RagEvalRunRepository;
 import com.dupi.rag.repository.RagEvalRunResultRepository;
 import com.dupi.rag.repository.RagQualityPolicyRepository;
@@ -67,6 +69,7 @@ class RagEvalServiceTest {
     @Mock RetrievalProfileService retrievalProfileService;
     @Mock KnowledgeBaseMaintenanceService maintenanceService;
     @Mock RagEvalCaseValidationService caseValidationService;
+    @Mock DocumentRepository documentRepository;
 
     @BeforeEach
     void defaultCasesAreSourceValid() {
@@ -282,6 +285,25 @@ class RagEvalServiceTest {
     }
 
     @Test
+    void createCaseRejectsDocumentIdsFromAnotherKnowledgeBase() {
+        UUID kbId = UUID.randomUUID();
+        UUID otherKbId = UUID.randomUUID();
+        UUID documentId = UUID.randomUUID();
+        when(documentRepository.findAllById(List.of(documentId))).thenReturn(List.of(
+                Document.builder().id(documentId).kbId(otherKbId).fileName("guide.md").build()));
+        RagEvalCaseRequest request = new RagEvalCaseRequest();
+        request.setCaseKey("cross-kb");
+        request.setQuery("question");
+        request.setExpectedDocumentId(documentId);
+        request.setExpectedFileName("guide.md");
+
+        assertThatThrownBy(() -> service().createCase(kbId, request))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("knowledge base");
+        verify(caseRepository, never()).save(any());
+    }
+
+    @Test
     void runRejectsKnowledgeBasesAboveTheCaseLimit() {
         UUID kbId = UUID.randomUUID();
         when(caseCoordinator.loadCases(kbId))
@@ -296,7 +318,12 @@ class RagEvalServiceTest {
     void createUpdateDeleteAndListCasesAreScopedToKnowledgeBase() {
         UUID kbId = UUID.randomUUID();
         UUID caseId = UUID.randomUUID();
+        UUID guideId = UUID.randomUUID();
+        UUID operationsId = UUID.randomUUID();
         RagEvalCase existing = caseEntity(kbId, caseId);
+        when(documentRepository.findAllById(List.of(guideId, operationsId))).thenReturn(List.of(
+                Document.builder().id(guideId).kbId(kbId).fileName("guide.md").build(),
+                Document.builder().id(operationsId).kbId(kbId).fileName("operations.md").build()));
         when(caseRepository.save(any(RagEvalCase.class))).thenAnswer(inv -> {
             RagEvalCase saved = inv.getArgument(0);
             if (saved.getId() == null) {
@@ -313,8 +340,8 @@ class RagEvalServiceTest {
         request.setMinHits(2);
         request.setTopK(3);
         request.setCategory(RagEvalCaseCategory.MULTI_DOCUMENT);
-        request.setExpectedFileName("guide.md");
-        request.setExpectedFileNames(List.of("operations.md"));
+        request.setExpectedDocumentIds(List.of(guideId, operationsId));
+        request.setExpectedFileNames(List.of("guide.md", "operations.md"));
         request.setMustContainAny(List.of("install", "setup"));
 
         var created = service().createCase(kbId, request);
@@ -325,7 +352,8 @@ class RagEvalServiceTest {
 
         assertThat(created.getId()).isEqualTo(caseId);
         assertThat(created.getCategory()).isEqualTo(RagEvalCaseCategory.MULTI_DOCUMENT);
-        assertThat(created.getExpectedFileNames()).containsExactly("operations.md");
+        assertThat(created.getExpectedDocumentIds()).containsExactly(guideId, operationsId);
+        assertThat(created.getExpectedFileNames()).containsExactly("guide.md", "operations.md");
         assertThat(updated.getQuery()).isEqualTo("How to setup?");
         assertThat(listed).hasSize(1);
         verify(knowledgeBaseService, times(2)).findOrThrow(kbId);
@@ -1255,7 +1283,8 @@ class RagEvalServiceTest {
                 maintenanceService,
                 profileIndexStateService,
                 retrievalProfileGateService,
-                caseValidationService
+                caseValidationService,
+                documentRepository
         );
     }
 

@@ -72,6 +72,11 @@ class DefaultRecoveryRestoreWriterTest {
             Chunk restored = values.iterator().next();
             return restored.getMetadata().get("source_chunk_id").equals(restored.getId().toString());
         }));
+        verify(fixture.evalCases).saveAll(argThat(values -> {
+            RagEvalCase restored = values.iterator().next();
+            return restored.getExpectedDocumentId().equals(DefaultRecoveryRestoreWriter.remap(
+                    fixture.job.getId(), fixture.sourceDocumentId));
+        }));
         verify(fixture.jobs, atLeast(4)).save(fixture.job);
     }
 
@@ -234,7 +239,9 @@ class DefaultRecoveryRestoreWriterTest {
                 .chunkIndex(0).content("hello").tokenCount(1)
                 .metadata(Map.of("chunk_role", "qa", "source_chunk_id", sourceChunkId.toString())).build();
         RagEvalCase sourceCase = RagEvalCase.builder().id(UUID.randomUUID()).kbId(sourceKbId)
-                .caseKey("case").query("hello").minHits(1).topK(3).mustContainAny(List.of()).build();
+                .caseKey("case").query("hello").minHits(1).topK(3)
+                .expectedDocumentId(sourceDocId).expectedFileName("guide.md")
+                .mustContainAny(List.of()).build();
         RagQualityPolicy sourcePolicy = RagQualityPolicy.builder().id(UUID.randomUUID()).kbId(sourceKbId).build();
         RetrievalProfile sourceProfile = RetrievalProfile.builder().id(UUID.randomUUID()).kbId(sourceKbId)
                 .name("balanced").version(1).vectorCandidateCount(10).sparseCandidateCount(10)
@@ -319,8 +326,9 @@ class DefaultRecoveryRestoreWriterTest {
                 archives, archiveItems, restoreItems, jobs, knowledgeBases, documents, documentAssets, chunks, evalCases,
                 policies, profiles, storage, documentStorage, recoveryVectors, onlineVectors, provisioner,
                 manifests, uploadQuotaService, mapper);
-        return new Fixture(writer, job, target, jobs, knowledgeBases, documents, documentAssets, chunks, profiles,
-                documentStorage, recoveryVectors, onlineVectors, provisioner, uploadQuotaService);
+        return new Fixture(writer, job, target, jobs, knowledgeBases, documents, documentAssets, chunks, evalCases,
+                profiles, documentStorage, recoveryVectors, onlineVectors, provisioner, uploadQuotaService,
+                sourceDocId);
     }
 
     private void add(List<RecoveryArchiveItem> items, Map<String, byte[]> payloads, UUID archiveId,
@@ -348,8 +356,8 @@ class DefaultRecoveryRestoreWriterTest {
     private record Fixture(DefaultRecoveryRestoreWriter writer, RecoveryRestoreJob job, KnowledgeBase target,
                             RecoveryRestoreJobRepository jobs, KnowledgeBaseRepository knowledgeBases,
                             DocumentRepository documents, DocumentAssetRepository documentAssets,
-                            ChunkRepository chunks, RetrievalProfileRepository profiles,
+                            ChunkRepository chunks, RagEvalCaseRepository evalCases, RetrievalProfileRepository profiles,
                             MinioStorageService documentStorage, MilvusRecoveryService recoveryVectors,
                             MilvusVectorService onlineVectors, SparseRecoveryProvisioner provisioner,
-                            UploadQuotaService uploadQuotaService) { }
+                            UploadQuotaService uploadQuotaService, UUID sourceDocumentId) { }
 }

@@ -34,6 +34,7 @@ import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -67,7 +68,9 @@ public class RagEvalCaseGenerationService {
         Set<String> usedKeys = cases.stream().map(RagEvalCase::getCaseKey)
                 .filter(java.util.Objects::nonNull)
                 .collect(java.util.stream.Collectors.toCollection(HashSet::new));
-        Set<String> usedQuestions = cases.stream().map(this::questionIdentity)
+        Set<String> usedQuestions = cases.stream()
+                .filter(item -> validation.byCaseId().get(item.getId()).sourceValid())
+                .map(this::questionIdentity)
                 .collect(java.util.stream.Collectors.toCollection(HashSet::new));
         List<RagEvalGenerationDocumentPreview> previews = new ArrayList<>();
 
@@ -76,7 +79,7 @@ public class RagEvalCaseGenerationService {
                     RagEvalGenerationDocumentPreview.builder()
                             .documentId(document.getId())
                             .fileName(document.getFileName())
-                            .existingSingleSourceCount(existingSingleSourceCount(document.getFileName(), cases, validation))
+                            .existingSingleSourceCount(existingSingleSourceCount(document.getId(), cases, validation))
                             .deficit(request.getCasesPerDocument())
                             .covered(false)
                             .proposals(List.of());
@@ -117,31 +120,33 @@ public class RagEvalCaseGenerationService {
             throw com.dupi.rag.exception.RagEvalCaseConflictException.stalePreview();
         }
 
-        Set<String> selectedFiles = selected.stream().map(Document::getFileName)
-                .collect(java.util.stream.Collectors.toSet());
+        Map<UUID, Document> selectedById = selected.stream()
+                .collect(java.util.stream.Collectors.toMap(Document::getId, item -> item));
         List<RagEvalGenerationDraft> drafts = safeList(request.getGeneratedCases());
         if (drafts.size() != selected.size() * request.getCasesPerDocument()) {
             throw new IllegalArgumentException("Generated case count does not match the preview request");
         }
-        for (String fileName : selectedFiles) {
-            long count = drafts.stream().filter(item -> fileName.equals(item.getExpectedFileName())).count();
+        for (Document document : selected) {
+            long count = drafts.stream().filter(item -> document.getId().equals(item.getExpectedDocumentId())).count();
             if (count != request.getCasesPerDocument()) {
-                throw new IllegalArgumentException("Generated case count does not match document: " + fileName);
+                throw new IllegalArgumentException("Generated case count does not match document: " + document.getId());
             }
         }
 
         Set<String> usedKeys = existing.stream().map(RagEvalCase::getCaseKey)
                 .filter(java.util.Objects::nonNull)
                 .collect(java.util.stream.Collectors.toCollection(HashSet::new));
-        Set<String> usedQuestions = existing.stream().map(this::questionIdentity)
+        Set<String> usedQuestions = existing.stream()
+                .filter(item -> validation.byCaseId().get(item.getId()).sourceValid())
+                .map(this::questionIdentity)
                 .collect(java.util.stream.Collectors.toCollection(HashSet::new));
         List<RagEvalCase> generated = new ArrayList<>();
         for (RagEvalGenerationDraft draft : drafts) {
-            if (!selectedFiles.contains(draft.getExpectedFileName())) {
+            if (!selectedById.containsKey(draft.getExpectedDocumentId())) {
                 throw new IllegalArgumentException("Generated case references an unselected document");
             }
-            validateConfirmDraft(draft, selectedFiles, usedKeys, selected);
-            String identity = questionIdentity(draft.getExpectedFileName(), draft.getQuery());
+            validateConfirmDraft(draft, selectedById, usedKeys);
+            String identity = questionIdentity(draft.getExpectedDocumentId(), draft.getQuery());
             if (!usedQuestions.add(identity)) {
                 throw new IllegalArgumentException("Duplicate evaluation question for document: " + draft.getExpectedFileName());
             }
@@ -149,6 +154,7 @@ public class RagEvalCaseGenerationService {
             generated.add(RagEvalCase.builder()
                     .kbId(kbId).caseKey(draft.getCaseKey().trim()).query(draft.getQuery().trim())
                     .minHits(1).topK(5).category(RagEvalCaseCategory.REAL_QUERY)
+                    .expectedDocumentId(draft.getExpectedDocumentId()).expectedDocumentIds(List.of())
                     .expectedFileName(draft.getExpectedFileName()).expectedFileNames(List.of())
                     .mustContainAny(draft.getMustContainAny().stream().map(String::trim).distinct().toList())
                     .build());
@@ -182,18 +188,27 @@ public class RagEvalCaseGenerationService {
             throw com.dupi.rag.exception.RagEvalCaseConflictException.stalePreview();
         }
 
-        Set<String> completedFiles = documents.stream().map(Document::getFileName)
-                .collect(java.util.stream.Collectors.toSet());
+        Map<UUID, Document> completedById = documents.stream()
+                .collect(java.util.stream.Collectors.toMap(Document::getId, item -> item));
         Set<String> usedKeys = existing.stream()
                 .filter(item -> !requestedReplacementIds.contains(item.getId()))
                 .map(RagEvalCase::getCaseKey).collect(java.util.stream.Collectors.toCollection(HashSet::new));
+        Set<String> usedQuestions = existing.stream()
+                .filter(item -> !requestedReplacementIds.contains(item.getId()))
+                .map(this::questionIdentity)
+                .collect(java.util.stream.Collectors.toCollection(HashSet::new));
         List<RagEvalCase> generated = new ArrayList<>();
         for (RagEvalGenerationDraft draft : safeList(request.getGeneratedCases())) {
-            validateConfirmDraft(draft, completedFiles, usedKeys, documents);
+            validateConfirmDraft(draft, completedById, usedKeys);
+            if (!usedQuestions.add(questionIdentity(draft.getExpectedDocumentId(), draft.getQuery()))) {
+                throw new IllegalArgumentException(
+                        "Duplicate evaluation question for document: " + draft.getExpectedFileName());
+            }
             usedKeys.add(draft.getCaseKey());
             generated.add(RagEvalCase.builder()
                     .kbId(kbId).caseKey(draft.getCaseKey().trim()).query(draft.getQuery().trim())
                     .minHits(1).topK(5).category(RagEvalCaseCategory.REAL_QUERY)
+                    .expectedDocumentId(draft.getExpectedDocumentId()).expectedDocumentIds(List.of())
                     .expectedFileName(draft.getExpectedFileName()).expectedFileNames(List.of())
                     .mustContainAny(draft.getMustContainAny().stream().map(String::trim).distinct().toList())
                     .build());
@@ -225,10 +240,14 @@ public class RagEvalCaseGenerationService {
         RagEvalCaseValidationService.ValidationReport validation = validationService.validate(kbId, cases);
         Set<String> usedKeys = new HashSet<>();
         cases.stream().map(RagEvalCase::getCaseKey).filter(java.util.Objects::nonNull).forEach(usedKeys::add);
+        Set<String> usedQuestions = cases.stream()
+                .filter(item -> !validation.invalidCases().contains(item))
+                .map(this::questionIdentity)
+                .collect(java.util.stream.Collectors.toCollection(HashSet::new));
         List<RagEvalGenerationDocumentPreview> documentPreviews = new ArrayList<>();
 
         for (Document document : documents) {
-            int existing = existingSingleSourceCount(document.getFileName(), cases, validation);
+            int existing = existingSingleSourceCount(document.getId(), cases, validation);
             int deficit = Math.max(0, CASES_PER_DOCUMENT - existing);
             RagEvalGenerationDocumentPreview.RagEvalGenerationDocumentPreviewBuilder builder =
                     RagEvalGenerationDocumentPreview.builder()
@@ -241,7 +260,9 @@ public class RagEvalCaseGenerationService {
             if (deficit > 0) {
                 try {
                     String context = representativeContext(document.getId());
-                    builder.proposals(generate(document, context, deficit, usedKeys));
+                    List<RagEvalGenerationDraft> proposals = generate(document, context, deficit, usedKeys);
+                    validateUniqueQuestions(proposals, usedQuestions);
+                    builder.proposals(proposals);
                 } catch (Exception ex) {
                     builder.error("Invalid AI response: " + safeMessage(ex));
                 }
@@ -269,13 +290,13 @@ public class RagEvalCaseGenerationService {
     }
 
     private int existingSingleSourceCount(
-            String fileName,
+            UUID documentId,
             List<RagEvalCase> cases,
             RagEvalCaseValidationService.ValidationReport validation
     ) {
         return (int) cases.stream()
                 .filter(item -> validation.byCaseId().get(item.getId()).sourceValid())
-                .filter(item -> validationService.expectedFiles(item).equals(List.of(fileName)))
+                .filter(item -> validationService.expectedDocumentIds(item).equals(List.of(documentId)))
                 .count();
     }
 
@@ -309,7 +330,7 @@ public class RagEvalCaseGenerationService {
     ) {
         Set<String> next = new HashSet<>(usedQuestions);
         for (RagEvalGenerationDraft proposal : proposals) {
-            if (!next.add(questionIdentity(proposal.getExpectedFileName(), proposal.getQuery()))) {
+            if (!next.add(questionIdentity(proposal.getExpectedDocumentId(), proposal.getQuery()))) {
                 throw new IllegalArgumentException(
                         "duplicate question for document " + proposal.getExpectedFileName());
             }
@@ -320,12 +341,17 @@ public class RagEvalCaseGenerationService {
 
     private String questionIdentity(RagEvalCase evalCase) {
         return questionIdentity(
-                String.join("\u001f", validationService.expectedFiles(evalCase)),
+                String.join("\u001f", validationService.expectedDocumentIds(evalCase).stream()
+                        .map(UUID::toString).toList()),
                 evalCase.getQuery());
     }
 
-    private String questionIdentity(String fileName, String query) {
-        String normalizedFile = fileName == null ? "" : fileName.trim().toLowerCase(Locale.ROOT);
+    private String questionIdentity(UUID documentId, String query) {
+        return questionIdentity(documentId == null ? "" : documentId.toString(), query);
+    }
+
+    private String questionIdentity(String sourceIdentity, String query) {
+        String normalizedFile = sourceIdentity == null ? "" : sourceIdentity.trim().toLowerCase(Locale.ROOT);
         String normalizedQuery = query == null ? "" : query.trim().replaceAll("\\s+", " ")
                 .toLowerCase(Locale.ROOT);
         return normalizedFile + "\u001e" + normalizedQuery;
@@ -413,6 +439,7 @@ public class RagEvalCaseGenerationService {
             result.add(RagEvalGenerationDraft.builder()
                     .caseKey(key)
                     .query(generated.getQuery().trim())
+                    .expectedDocumentId(document.getId())
                     .expectedFileName(document.getFileName())
                     .mustContainAny(generated.getMustContainAny().stream().map(String::trim).distinct().toList())
                     .category(RagEvalCaseCategory.REAL_QUERY)
@@ -504,9 +531,8 @@ public class RagEvalCaseGenerationService {
 
     private void validateConfirmDraft(
             RagEvalGenerationDraft draft,
-            Set<String> completedFiles,
-            Set<String> usedKeys,
-            List<Document> documents
+            Map<UUID, Document> completedDocuments,
+            Set<String> usedKeys
     ) {
         if (draft == null || draft.getCaseKey() == null || draft.getCaseKey().isBlank()
                 || draft.getQuery() == null || draft.getQuery().isBlank()) {
@@ -515,8 +541,12 @@ public class RagEvalCaseGenerationService {
         if (usedKeys.contains(draft.getCaseKey().trim())) {
             throw new IllegalArgumentException("Duplicate evaluation case key: " + draft.getCaseKey());
         }
-        if (!completedFiles.contains(draft.getExpectedFileName())) {
+        Document document = completedDocuments.get(draft.getExpectedDocumentId());
+        if (document == null) {
             throw new IllegalArgumentException("Generated case references an unavailable document");
+        }
+        if (!java.util.Objects.equals(document.getFileName(), draft.getExpectedFileName())) {
+            throw new IllegalArgumentException("Generated case filename does not match the document snapshot");
         }
         if (draft.getCategory() != RagEvalCaseCategory.REAL_QUERY
                 || !Integer.valueOf(1).equals(draft.getMinHits())
@@ -527,8 +557,6 @@ public class RagEvalCaseGenerationService {
         if (keywords == null || keywords.size() < 2 || keywords.size() > 5) {
             throw new IllegalArgumentException("Generated cases require 2-5 keywords");
         }
-        Document document = documents.stream().filter(item -> item.getFileName().equals(draft.getExpectedFileName()))
-                .findFirst().orElseThrow();
         String context = representativeContext(document.getId()).toLowerCase(Locale.ROOT);
         if (keywords.stream().anyMatch(keyword -> keyword == null || keyword.isBlank()
                 || !context.contains(keyword.trim().toLowerCase(Locale.ROOT)))) {
@@ -545,7 +573,7 @@ public class RagEvalCaseGenerationService {
         all.addAll(generated);
         for (Document document : documents) {
             long count = all.stream()
-                    .filter(item -> validationService.expectedFiles(item).equals(List.of(document.getFileName())))
+                    .filter(item -> validationService.expectedDocumentIds(item).equals(List.of(document.getId())))
                     .count();
             if (count < CASES_PER_DOCUMENT) {
                 throw new IllegalArgumentException(
@@ -570,6 +598,7 @@ public class RagEvalCaseGenerationService {
         return RagEvalCaseResponse.builder()
                 .id(item.getId()).kbId(item.getKbId()).caseKey(item.getCaseKey()).query(item.getQuery())
                 .minHits(item.getMinHits()).topK(item.getTopK()).category(item.getCategory())
+                .expectedDocumentId(item.getExpectedDocumentId()).expectedDocumentIds(item.getExpectedDocumentIds())
                 .expectedFileName(item.getExpectedFileName()).expectedFileNames(item.getExpectedFileNames())
                 .mustContainAny(item.getMustContainAny()).sourceValid(validity.sourceValid())
                 .missingExpectedFileNames(validity.missingExpectedFileNames())

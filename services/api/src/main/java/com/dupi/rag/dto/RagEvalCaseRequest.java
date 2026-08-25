@@ -10,6 +10,7 @@ import jakarta.validation.constraints.Size;
 import lombok.Data;
 
 import java.util.List;
+import java.util.UUID;
 
 @Data
 public class RagEvalCaseRequest {
@@ -34,8 +35,13 @@ public class RagEvalCaseRequest {
     @Size(max = 512)
     private String expectedFileName;
 
+    private UUID expectedDocumentId;
+
     @Size(max = 20)
     private List<@NotBlank @Size(max = 512) String> expectedFileNames = List.of();
+
+    @Size(max = 20)
+    private List<@NotNull UUID> expectedDocumentIds = List.of();
 
     @Size(max = 20)
     private List<@NotBlank @Size(max = 512) String> mustContainAny = List.of();
@@ -45,7 +51,7 @@ public class RagEvalCaseRequest {
         if (category == null) {
             return true;
         }
-        long expectedFileCount = expectedFileCount();
+        long expectedFileCount = expectedDocumentCount();
         boolean hasTokens = mustContainAny != null && mustContainAny.stream()
                 .anyMatch(value -> value != null && !value.isBlank());
         return switch (category) {
@@ -58,11 +64,10 @@ public class RagEvalCaseRequest {
         };
     }
 
-    private long expectedFileCount() {
-        List<String> additional = expectedFileNames == null ? List.of() : expectedFileNames;
-        return java.util.stream.Stream.concat(java.util.stream.Stream.of(expectedFileName), additional.stream())
-                .filter(value -> value != null && !value.isBlank())
-                .map(String::trim)
+    private long expectedDocumentCount() {
+        List<UUID> additional = expectedDocumentIds == null ? List.of() : expectedDocumentIds;
+        return java.util.stream.Stream.concat(java.util.stream.Stream.of(expectedDocumentId), additional.stream())
+                .filter(java.util.Objects::nonNull)
                 .distinct()
                 .count();
     }
