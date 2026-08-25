@@ -115,7 +115,13 @@ class DocumentUploadIntentService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    void fail(Document document, IngestJob job, String diagnostic) {
+    void fail(Document intentDocument, IngestJob intentJob, String diagnostic) {
+        IngestJob job = jobs.findByIdForUpdate(intentJob.getId())
+                .filter(candidate -> intentDocument.getId().equals(candidate.getDocId()))
+                .orElseThrow(() -> new IllegalStateException("Upload intent ingest job is missing"));
+        Document document = documents.findByIdForUpdate(intentDocument.getId())
+                .filter(candidate -> job.getKbId().equals(candidate.getKbId()))
+                .orElseThrow(() -> new IllegalStateException("Upload intent document is missing"));
         Instant now = Instant.now();
         String error = limit(diagnostic);
         document.setStatus(DocumentStatus.FAILED);

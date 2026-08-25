@@ -22,6 +22,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -51,6 +52,7 @@ class KnowledgeBaseDeletionPersistenceServiceTest {
         persistence = new KnowledgeBaseDeletionPersistenceService(knowledgeBases, documents, assets, profiles,
                 archives, restores, jobs, steps, vectorTasks, tombstones, notifications, guard, audit,
                 List.of(activity));
+        when(jobs.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(jobs.saveAndFlush(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(steps.saveAll(any())).thenAnswer(invocation -> invocation.getArgument(0));
     }
@@ -102,6 +104,37 @@ class KnowledgeBaseDeletionPersistenceServiceTest {
                 eq("KNOWLEDGE_BASE_DELETE_SUBMIT"), eq("KNOWLEDGE_BASE"), eq(kbId), contains(jobId.toString()));
         verify(audit).recordOperationInCurrentTransaction(
                 "tenant-a", AuditLogService.OPERATION_SUBMIT, jobId, "Operation submitted");
+    }
+
+    @Test
+    void submitContinuesWithTheManagedJobReturnedBySave() {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).tenantId("tenant-a").name("kb")
+                .lifecycleStatus(KnowledgeBaseLifecycleStatus.READY).build();
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a"))
+                .thenReturn(Optional.of(kb));
+        AtomicReference<OperationJob> managedJob = new AtomicReference<>();
+        when(jobs.save(any())).thenAnswer(invocation -> {
+            OperationJob submitted = invocation.getArgument(0);
+            OperationJob managed = OperationJob.builder()
+                    .id(submitted.getId()).tenantId(submitted.getTenantId())
+                    .operationType(submitted.getOperationType())
+                    .aggregateType(submitted.getAggregateType()).aggregateId(submitted.getAggregateId())
+                    .status(submitted.getStatus()).phase(submitted.getPhase())
+                    .runnable(false).idempotencyKey(submitted.getIdempotencyKey())
+                    .input(submitted.getInput()).attemptCount(submitted.getAttemptCount())
+                    .phaseAttemptCount(submitted.getPhaseAttemptCount())
+                    .nextAttemptAt(submitted.getNextAttemptAt()).createdBy(submitted.getCreatedBy())
+                    .createdAt(Instant.now()).updatedAt(Instant.now()).build();
+            managedJob.set(managed);
+            return managed;
+        });
+
+        UUID jobId = persistence.submit(kbId, "tenant-a", "alice");
+
+        assertThat(jobId).isEqualTo(managedJob.get().getId());
+        assertThat(managedJob.get().getRunnable()).isTrue();
+        verify(jobs).saveAndFlush(same(managedJob.get()));
     }
 
     @Test

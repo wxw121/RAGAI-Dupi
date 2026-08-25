@@ -78,9 +78,15 @@ curl -X POST http://localhost:8080/api/v1/knowledge-bases/{kbId}/ingest-jobs/{jo
 
 ## V1.4 可验证恢复
 
-具有 `KB_RECOVERY` 权限的运维人员通过 **Recovery** 选项卡创建、检查、下载、导入、重试和删除存档，以及创建、重试或放弃恢复。下载的 Recovery ZIP 可通过 **Import ZIP** 重新上传；服务会校验 `manifest.json`、知识库/租户归属、必需条目及每个文件的大小和 SHA-256，验证通过后以新的内部归档 ID 保存并显示为 `COMPLETED`，随后可照常 Restore。新归档同时保存 Markdown 文档引用的图片资产及其元数据，恢复时重新映射到目标知识库。恢复库名称格式为 `原名称 (restored · Archive {archiveId前8位} · yyyy-MM-dd HH:mm:ss.SSS UTC)`，同一归档多次恢复也可按创建时间区分。归档对象封存在私有恢复桶的 `archives/{tenantId}/{archiveId}/` 下。目标知识库保持隐藏和 `RESTORING` 状态，直到对象、记录、稠密/稀疏向量、计数、模式与校验和全部验证通过。
+具有 `KB_RECOVERY` 权限的运维人员通过 **Recovery** 选项卡创建、检查、下载、导入、重试和删除存档，以及创建、重试或放弃恢复。下载的 Recovery ZIP 可通过 **Import ZIP** 重新上传；服务会校验 `manifest.json`、知识库/租户归属、必需条目及每个文件的大小和 SHA-256，然后进入耐久 staging。操作完成后，验证通过的归档才会用新的内部归档 ID 公开为 `COMPLETED`，随后可照常 Restore。新归档同时保存 Markdown 文档引用的图片资产及其元数据，恢复时重新映射到目标知识库。恢复库名称格式为 `原名称 (restored · Archive {archiveId前8位} · yyyy-MM-dd HH:mm:ss.SSS UTC)`，同一归档多次恢复也可按创建时间区分。归档对象封存在私有恢复桶的 `archives/{tenantId}/{archiveId}/` 下。目标知识库保持隐藏和 `RESTORING` 状态，直到对象、记录、稠密/稀疏向量、计数、模式与校验和全部验证通过。
 
-路由位于 `/api/v1/knowledge-bases/{kbId}/recovery` 下。后台命令返回 `202 Accepted`，完成全部校验的 ZIP 导入返回 `201 Created`；Web 面板每三秒轮询一次非终态作业。参见[恢复运行手册](docs/zh-CN/v1.4-recovery-runbook.md)。
+耗时的破坏性请求和包导入统一使用持久化操作契约。删除知识库、导入 Recovery ZIP、导入 Markdown 包都会返回包含操作作业的 `202 Accepted`。具有 `KB_READ` 权限时可轮询 `GET /api/v1/operations/{jobId}`；状态为 `PREPARED`、`RUNNING`、`RETRY_WAIT`、`COMPENSATING`、`COMPLETED` 或 `FAILED`，响应同时包含步骤进度及脱敏后的失败信息。只有 `FAILED` 操作可以通过 `POST /api/v1/operations/{jobId}/retry` 重试，该接口要求 `MAINTENANCE` 与 `KB_READ`。知识库删除开始时先进入 `DELETING`，从正常读取中隐藏，同时继续幂等清理。
+
+Recovery 与 Markdown 的输入字节会先在 owner token、epoch 和 lease 保护下进入 staging，完成后操作才变为可运行。Flyway V28 将每次唯一 staging attempt 持久化为 `ACTIVE`、`CLEANUP_PENDING` 或 `CLEANED`；超过 `OPERATION_STAGING_RETENTION_HOURS` 的 intake 会进入有界补偿（小于 1 的配置按 1 处理），cleanup replayer 使用 checked delete，避免旧 writer 迟到后留下无追踪对象。`OPERATION_STAGING_CLEANUP_LIMIT` 同样最小为 1。Markdown 只有在所有目标对象验证成功且 publish 事务提交后才一次性公开元数据；补偿会删除 prepared 元数据和对象，不会暴露半个包。
+
+RAG 评估用例现在持久化预期文档 UUID，不再把可变文件名当作身份。Flyway V27 只回填同一知识库内能唯一解析的文件名；存在歧义的旧用例保持未解析，需要人工复核或重新生成。
+
+路由位于 `/api/v1/knowledge-bases/{kbId}/recovery` 下。后台归档/恢复命令和耐久 ZIP 导入均返回 `202 Accepted`；Web 面板每三秒轮询一次非终态作业。参见[恢复运行手册](docs/zh-CN/v1.4-recovery-runbook.md)。
 
 | 变量 | 默认值 | 用途 |
 |---|---:|---|

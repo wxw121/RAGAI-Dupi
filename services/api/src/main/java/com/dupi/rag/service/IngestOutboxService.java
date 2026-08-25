@@ -1,38 +1,48 @@
 package com.dupi.rag.service;
 
-import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.IngestOutboxEvent;
 import com.dupi.rag.domain.entity.KnowledgeBase;
-import com.dupi.rag.domain.enums.DocumentStatus;
-import com.dupi.rag.domain.enums.IngestJobStatus;
 import com.dupi.rag.domain.enums.IngestOutboxStatus;
-import com.dupi.rag.domain.enums.IngestStage;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
 import com.dupi.rag.repository.IngestOutboxEventRepository;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Duration;
 import java.time.Instant;
-import java.util.List;
 import java.util.UUID;
 
 @Service
 @Slf4j
-@RequiredArgsConstructor
 public class IngestOutboxService {
 
     private final IngestOutboxEventRepository outboxRepository;
-    private final IngestJobRepository ingestJobRepository;
-    private final DocumentRepository documentRepository;
-    private final KnowledgeBaseService knowledgeBaseService;
     private final IngestJobProducer ingestJobProducer;
-    private final DocumentTombstoneService documentTombstoneService;
+    private final IngestOutboxDispatchPersistence dispatchPersistence;
+
+    @Autowired
+    public IngestOutboxService(IngestOutboxEventRepository outboxRepository,
+                               IngestJobProducer ingestJobProducer,
+                               IngestOutboxDispatchPersistence dispatchPersistence) {
+        this.outboxRepository = outboxRepository;
+        this.ingestJobProducer = ingestJobProducer;
+        this.dispatchPersistence = dispatchPersistence;
+    }
+
+    IngestOutboxService(IngestOutboxEventRepository outboxRepository,
+                        IngestJobRepository ingestJobRepository,
+                        DocumentRepository documentRepository,
+                        KnowledgeBaseService knowledgeBaseService,
+                        IngestJobProducer ingestJobProducer,
+                        DocumentTombstoneService documentTombstoneService) {
+        this(outboxRepository, ingestJobProducer, new IngestOutboxDispatchPersistence(
+                outboxRepository, ingestJobRepository, documentRepository,
+                knowledgeBaseService, documentTombstoneService));
+    }
 
     @Transactional
     public void record(IngestJob job, KnowledgeBase kb, String objectKey, String fileName, String mimeType) {
@@ -49,10 +59,8 @@ public class IngestOutboxService {
                 .build());
     }
 
-    @Transactional
     public void cancelPendingForJob(UUID jobId, String reason) {
-        outboxRepository.findByJobIdAndStatusIn(jobId, List.of(IngestOutboxStatus.PENDING, IngestOutboxStatus.FAILED))
-                .forEach(event -> cancel(event, reason));
+        dispatchPersistence.cancelPendingForJob(jobId, reason);
     }
 
     @Scheduled(cron = "${dupi.ingest.outbox-dispatch-cron:*/10 * * * * *}")
@@ -63,53 +71,15 @@ public class IngestOutboxService {
         }
     }
 
-    @Transactional
     public int dispatchPending() {
-        Instant now = Instant.now();
-        List<IngestOutboxEvent> events = outboxRepository
-                .findTop50ByStatusInAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
-                        List.of(IngestOutboxStatus.PENDING, IngestOutboxStatus.FAILED),
-                        now
-                );
         int dispatched = 0;
-        for (IngestOutboxEvent event : events) {
-            if (documentTombstoneService.isDeleted(event.getDocId())) {
-                cancel(event, "Document was deleted before ingest dispatch");
-                continue;
-            }
-
-            IngestJob job = ingestJobRepository.findByIdForUpdate(event.getJobId()).orElse(null);
-            Document doc = documentRepository.findByIdForUpdate(event.getDocId()).orElse(null);
-            if (job == null || doc == null) {
-                cancel(event, "Ingest job or document no longer exists");
-                continue;
-            }
-            if (!isDispatchable(job, doc)) {
-                cancel(event, "Ingest job or document is not dispatchable");
-                continue;
-            }
-
+        for (IngestOutboxDispatchClaim claim : dispatchPersistence.claimDue()) {
             try {
-                KnowledgeBase kb = knowledgeBaseService.findSystemOrThrow(event.getKbId());
-                ingestJobProducer.enqueue(job, kb, event.getObjectKey(), event.getFileName(), event.getMimeType());
-                event.setStatus(IngestOutboxStatus.SENT);
-                event.setLastError(null);
-                event.setNextAttemptAt(now);
-                job.setErrorMessage(null);
-                doc.setStatus(DocumentStatus.PROCESSING);
-                doc.setErrorMessage(null);
-                ingestJobRepository.save(job);
-                documentRepository.save(doc);
-                outboxRepository.save(event);
-                dispatched++;
+                ingestJobProducer.enqueue(claim.job(), claim.knowledgeBase(), claim.objectKey(),
+                        claim.fileName(), claim.mimeType(), claim.executionId());
+                if (dispatchPersistence.complete(claim)) dispatched++;
             } catch (Exception e) {
-                if (!isDispatchable(job, doc)
-                        || e instanceof com.dupi.rag.exception.OperationConflictException
-                        || e instanceof com.dupi.rag.exception.ResourceNotFoundException) {
-                    cancel(event, "Knowledge base or ingest work is no longer dispatchable");
-                } else {
-                    markRetryable(event, job, doc, now, e);
-                }
+                dispatchPersistence.fail(claim, e);
             }
         }
         return dispatched;
@@ -120,49 +90,4 @@ public class IngestOutboxService {
         return !outboxRepository.findByJobId(jobId).isEmpty();
     }
 
-    private boolean isDispatchable(IngestJob job, Document doc) {
-        return job.getStatus() == IngestJobStatus.PENDING
-                && job.getStage() == IngestStage.QUEUED
-                && doc.getStatus() == DocumentStatus.PENDING;
-    }
-
-    private void cancel(IngestOutboxEvent event, String reason) {
-        event.setStatus(IngestOutboxStatus.CANCELLED);
-        event.setLastError(reason);
-        event.setNextAttemptAt(Instant.now());
-        outboxRepository.save(event);
-    }
-
-    private void markRetryable(IngestOutboxEvent event, IngestJob job, Document doc, Instant now, Exception error) {
-        int attempts = event.getAttemptCount() == null ? 1 : event.getAttemptCount() + 1;
-        String reason = errorReason(error);
-        event.setStatus(IngestOutboxStatus.FAILED);
-        event.setAttemptCount(attempts);
-        event.setLastError("Waiting for ingest queue recovery: " + reason);
-        event.setNextAttemptAt(now.plus(backoff(attempts)));
-        outboxRepository.save(event);
-
-        if (job != null) {
-            job.setStatus(IngestJobStatus.PENDING);
-            job.setStage(IngestStage.QUEUED);
-            job.setErrorMessage("Waiting for ingest queue recovery: " + reason);
-            ingestJobRepository.save(job);
-        }
-        if (doc != null) {
-            doc.setStatus(DocumentStatus.PENDING);
-            doc.setErrorMessage("Waiting for ingest queue recovery: " + reason);
-            documentRepository.save(doc);
-        }
-    }
-
-    private Duration backoff(int attempts) {
-        long seconds = Math.min(300, Math.max(10, attempts * 10L));
-        return Duration.ofSeconds(seconds);
-    }
-
-    private String errorReason(Exception e) {
-        return e.getMessage() == null || e.getMessage().isBlank()
-                ? e.getClass().getSimpleName()
-                : e.getMessage();
-    }
 }

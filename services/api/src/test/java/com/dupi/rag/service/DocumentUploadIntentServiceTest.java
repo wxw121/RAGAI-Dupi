@@ -78,6 +78,9 @@ class DocumentUploadIntentServiceTest {
         IngestJobRepository jobs = mock(IngestJobRepository.class);
         Document document = document(UUID.randomUUID());
         IngestJob job = job(document.getKbId());
+        job.setDocId(document.getId());
+        when(jobs.findByIdForUpdate(job.getId())).thenReturn(Optional.of(job));
+        when(documents.findByIdForUpdate(document.getId())).thenReturn(Optional.of(document));
 
         IngestOutboxService outbox = mock(IngestOutboxService.class);
         new DocumentUploadIntentService(knowledgeBases, documents, jobs,
@@ -88,9 +91,12 @@ class DocumentUploadIntentServiceTest {
         assertThat(document.getObjectKey()).isNotBlank();
         assertThat(job.getStatus()).isEqualTo(IngestJobStatus.FAILED);
         assertThat(job.getErrorMessage()).isEqualTo("storage unavailable");
-        verify(outbox).cancelPendingForJob(job.getId(), "Upload publication failed");
-        verify(documents).save(document);
-        verify(jobs).saveAndFlush(job);
+        var order = inOrder(jobs, documents, outbox);
+        order.verify(jobs).findByIdForUpdate(job.getId());
+        order.verify(documents).findByIdForUpdate(document.getId());
+        order.verify(outbox).cancelPendingForJob(job.getId(), "Upload publication failed");
+        order.verify(documents).save(document);
+        order.verify(jobs).saveAndFlush(job);
     }
 
     @Test

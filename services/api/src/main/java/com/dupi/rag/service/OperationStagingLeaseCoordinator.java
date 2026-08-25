@@ -2,6 +2,7 @@ package com.dupi.rag.service;
 
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -17,6 +18,7 @@ class OperationStagingLeaseCoordinator implements AutoCloseable {
     private final Clock clock;
     private final ScheduledExecutorService scheduler;
 
+    @Autowired
     OperationStagingLeaseCoordinator(OperationStagingLeasePersistence persistence,
             @Value("${dupi.operations.staging-lease-seconds:60}") long seconds) {
         this(persistence, Duration.ofSeconds(Math.max(1, seconds)), Clock.systemUTC(),

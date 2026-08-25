@@ -43,6 +43,127 @@ import static org.mockito.Mockito.*;
 
 class OperationTransactionStructureTest {
     @Test
+    void outboxDispatcherDoesNotWrapExternalQueueIoInItsDatabaseTransaction() throws Exception {
+        var dispatch = IngestOutboxService.class.getMethod("dispatchPending");
+
+        assertThat(dispatch.getAnnotation(
+                org.springframework.transaction.annotation.Transactional.class)).isNull();
+        for (String method : List.of("complete", "fail")) {
+            var boundary = java.util.Arrays.stream(
+                            IngestOutboxDispatchPersistence.class.getDeclaredMethods())
+                    .filter(candidate -> candidate.getName().equals(method))
+                    .findFirst().orElseThrow();
+            assertThat(boundary.getAnnotation(
+                    org.springframework.transaction.annotation.Transactional.class).propagation())
+                    .isEqualTo(org.springframework.transaction.annotation.Propagation.REQUIRES_NEW);
+        }
+        var candidateClaim = IngestOutboxCandidateClaimPersistence.class
+                .getDeclaredMethod("claim", com.dupi.rag.repository.IngestOutboxDispatchCandidate.class);
+        assertThat(candidateClaim.getAnnotation(
+                org.springframework.transaction.annotation.Transactional.class).propagation())
+                .isEqualTo(org.springframework.transaction.annotation.Propagation.REQUIRES_NEW);
+        var claimDue = IngestOutboxDispatchPersistence.class.getDeclaredMethod("claimDue");
+        assertThat(claimDue.getAnnotation(
+                org.springframework.transaction.annotation.Transactional.class)).isNull();
+        var cancellation = java.util.Arrays.stream(
+                        IngestOutboxDispatchPersistence.class.getDeclaredMethods())
+                .filter(candidate -> candidate.getName().equals("cancelPendingForJob"))
+                .findFirst().orElseThrow();
+        assertThat(cancellation.getAnnotation(
+                org.springframework.transaction.annotation.Transactional.class).propagation())
+                .isEqualTo(org.springframework.transaction.annotation.Propagation.MANDATORY);
+    }
+
+    @Test
+    void outboxCandidateScanHasStableTieBreakOrdering() throws Exception {
+        var candidates = com.dupi.rag.repository.IngestOutboxEventRepository.class.getMethod(
+                "findDispatchCandidates", List.class, Instant.class,
+                org.springframework.data.domain.Pageable.class);
+        String query = candidates.getAnnotation(
+                org.springframework.data.jpa.repository.Query.class).value();
+
+        assertThat(query).contains("order by event.createdAt asc, event.id asc");
+    }
+
+    @Test
+    void outboxClaimsEachCandidateInAnIndependentShortTransaction() {
+        var outbox = mock(com.dupi.rag.repository.IngestOutboxEventRepository.class);
+        var jobs = mock(com.dupi.rag.repository.IngestJobRepository.class);
+        var documents = mock(com.dupi.rag.repository.DocumentRepository.class);
+        var knowledgeBases = mock(KnowledgeBaseService.class);
+        var tombstones = mock(DocumentTombstoneService.class);
+        TrackingTransactionManager transactions = new TrackingTransactionManager();
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
+        IngestJob firstJob = queuedJob(kbId);
+        IngestJob secondJob = queuedJob(kbId);
+        Document firstDocument = pendingDocument(kbId, firstJob.getDocId());
+        Document secondDocument = pendingDocument(kbId, secondJob.getDocId());
+        var firstEvent = pendingEvent(kbId, firstJob);
+        var secondEvent = pendingEvent(kbId, secondJob);
+        var first = new com.dupi.rag.repository.IngestOutboxDispatchCandidate(
+                firstEvent.getId(), firstJob.getId(), firstDocument.getId());
+        var second = new com.dupi.rag.repository.IngestOutboxDispatchCandidate(
+                secondEvent.getId(), secondJob.getId(), secondDocument.getId());
+        when(outbox.findDispatchCandidates(anyList(), any(), any())).thenReturn(List.of(first, second));
+        when(jobs.findByIdForUpdate(firstJob.getId())).thenReturn(Optional.of(firstJob));
+        when(jobs.findByIdForUpdate(secondJob.getId())).thenReturn(Optional.of(secondJob));
+        when(documents.findByIdForUpdate(firstDocument.getId())).thenReturn(Optional.of(firstDocument));
+        when(documents.findByIdForUpdate(secondDocument.getId())).thenReturn(Optional.of(secondDocument));
+        when(outbox.findByIdForUpdate(firstEvent.getId())).thenReturn(Optional.of(firstEvent));
+        when(outbox.findByIdForUpdate(secondEvent.getId())).thenReturn(Optional.of(secondEvent));
+        when(knowledgeBases.findSystemOrThrow(kbId)).thenReturn(kb);
+
+        try (AnnotationConfigApplicationContext spring = transactionalContext(transactions)) {
+            spring.registerBean(IngestOutboxCandidateClaimPersistence.class,
+                    () -> new IngestOutboxCandidateClaimPersistence(
+                            outbox, jobs, documents, knowledgeBases, tombstones));
+            spring.registerBean(IngestOutboxDispatchPersistence.class,
+                    () -> new IngestOutboxDispatchPersistence(outbox, jobs, documents,
+                            spring.getBean(IngestOutboxCandidateClaimPersistence.class)));
+            spring.refresh();
+
+            assertThat(spring.getBean(IngestOutboxDispatchPersistence.class).claimDue()).hasSize(2);
+
+            assertThat(transactions.begins).isEqualTo(2);
+            assertThat(transactions.commits).isEqualTo(2);
+            assertThat(transactions.rollbacks).isZero();
+        }
+    }
+
+    @Test
+    void outboxCancellationJoinsTheCallersExistingTransaction() {
+        var outbox = mock(com.dupi.rag.repository.IngestOutboxEventRepository.class);
+        var jobs = mock(com.dupi.rag.repository.IngestJobRepository.class);
+        var documents = mock(com.dupi.rag.repository.DocumentRepository.class);
+        var knowledgeBases = mock(KnowledgeBaseService.class);
+        var tombstones = mock(DocumentTombstoneService.class);
+        TrackingTransactionManager transactions = new TrackingTransactionManager();
+        UUID jobId = UUID.randomUUID();
+
+        try (AnnotationConfigApplicationContext spring = transactionalContext(transactions)) {
+            spring.registerBean(IngestOutboxDispatchPersistence.class,
+                    () -> new IngestOutboxDispatchPersistence(
+                            outbox, jobs, documents, knowledgeBases, tombstones));
+            spring.refresh();
+            IngestOutboxDispatchPersistence persistence =
+                    spring.getBean(IngestOutboxDispatchPersistence.class);
+
+            assertThatThrownBy(() -> persistence.cancelPendingForJob(jobId, "cancelled"))
+                    .isInstanceOf(IllegalTransactionStateException.class);
+
+            new org.springframework.transaction.support.TransactionTemplate(transactions)
+                    .executeWithoutResult(ignored ->
+                            persistence.cancelPendingForJob(jobId, "cancelled"));
+
+            assertThat(transactions.begins).isEqualTo(1);
+            assertThat(transactions.commits).isEqualTo(1);
+            verify(outbox).findIdsByJobIdAndStatusIn(eq(jobId), anyList());
+            verifyNoInteractions(jobs, documents);
+        }
+    }
+
+    @Test
     void operationTransitionAndAuditShareOneRollbackBoundary() {
         OperationJobRepository jobs = mock(OperationJobRepository.class);
         var auditLogs = mock(com.dupi.rag.repository.AuditLogRepository.class);
@@ -526,6 +647,23 @@ class OperationTransactionStructureTest {
         return OperationJob.builder().id(UUID.randomUUID()).status(OperationStatus.RUNNING)
                 .phase(OperationPhase.FORWARD).claimToken(UUID.randomUUID()).claimEpoch(4L).retryEpoch(3L)
                 .leaseExpiresAt(Instant.now().plusSeconds(30)).build();
+    }
+
+    private static IngestJob queuedJob(UUID kbId) {
+        return IngestJob.builder().id(UUID.randomUUID()).kbId(kbId).docId(UUID.randomUUID())
+                .executionId(UUID.randomUUID()).status(IngestJobStatus.PENDING).stage(IngestStage.QUEUED)
+                .build();
+    }
+
+    private static Document pendingDocument(UUID kbId, UUID documentId) {
+        return Document.builder().id(documentId).kbId(kbId).status(DocumentStatus.PENDING).build();
+    }
+
+    private static com.dupi.rag.domain.entity.IngestOutboxEvent pendingEvent(UUID kbId, IngestJob job) {
+        return com.dupi.rag.domain.entity.IngestOutboxEvent.builder()
+                .id(UUID.randomUUID()).kbId(kbId).jobId(job.getId()).docId(job.getDocId())
+                .status(com.dupi.rag.domain.enums.IngestOutboxStatus.PENDING)
+                .nextAttemptAt(Instant.now().minusSeconds(1)).createdAt(Instant.now()).build();
     }
 
     private static OperationExecutionContext context(OperationJob job) {

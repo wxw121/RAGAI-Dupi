@@ -103,7 +103,7 @@ class KnowledgeBaseDeletionPersistenceService {
                 .runnable(false).idempotencyKey(idempotencyKey).input(Map.copyOf(input))
                 .attemptCount(0).phaseAttemptCount(0).nextAttemptAt(Instant.now())
                 .createdBy(normalizeActor(actor)).build();
-        jobs.save(job);
+        job = jobs.save(job);
         steps.saveAll(inventory);
         steps.flush();
 

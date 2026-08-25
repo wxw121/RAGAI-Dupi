@@ -120,9 +120,9 @@ class RecoveryArchiveImportIntakeWriteService {
         if (job.getStatus() != OperationStatus.PREPARED || job.getPhase() != OperationPhase.FORWARD) {
             throw new OperationConflictException("Only prepared Recovery import intake can become runnable");
         }
+        if (stagingAttempts != null && lease != null) stagingAttempts.transferToPublished(lease);
         job.setRunnable(true);
         job.setNextAttemptAt(Instant.now());
-        if (stagingAttempts != null && lease != null) stagingAttempts.transferToPublished(lease);
         job.setClaimToken(null); job.setLeaseExpiresAt(null);
         return response(jobs.saveAndFlush(job));
     }

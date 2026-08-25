@@ -106,7 +106,6 @@ class IngestJobServiceTest {
                 documentRepository,
                 chunkRepository,
                 knowledgeBaseService,
-                ingestJobProducer,
                 ingestOutboxService,
                 documentTombstoneService,
                 redisQueueProperties,
@@ -489,7 +488,10 @@ class IngestJobServiceTest {
         assertThat(response.getStatus()).isEqualTo(IngestJobStatus.CANCELLED);
         assertThat(job.getStage()).isEqualTo(IngestStage.CANCELLED);
         assertThat(doc.getStatus()).isEqualTo(DocumentStatus.CANCELLED);
-        verify(ingestOutboxService).cancelPendingForJob(jobId, "ingest cancelled by user");
+        var order = inOrder(ingestJobRepository, documentRepository, ingestOutboxService);
+        order.verify(ingestJobRepository).findByIdForUpdate(jobId);
+        order.verify(documentRepository).findByIdForUpdate(docId);
+        order.verify(ingestOutboxService).cancelPendingForJob(jobId, "ingest cancelled by user");
         verify(failureNotificationService, never()).recordTerminalFailure(any(), any());
         verify(ingestJobRepository).save(job);
         verify(documentRepository).save(doc);
@@ -921,7 +923,7 @@ class IngestJobServiceTest {
     }
 
     @Test
-    void recoverQueuedJobsReenqueuesPersistedJobsAndMarksDocumentsProcessing() {
+    void recoverQueuedJobsBackfillsLegacyOutboxWithoutPublishingInsideTheTransaction() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         UUID jobId = UUID.randomUUID();
@@ -930,15 +932,37 @@ class IngestJobServiceTest {
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(job));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
         when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
 
         int recovered = service().recoverQueuedJobs();
 
         assertThat(recovered).isEqualTo(1);
-        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PROCESSING);
-        verify(ingestJobProducer).enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PENDING);
+        verify(ingestOutboxService).record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
         verify(documentRepository).save(doc);
+    }
+
+    @Test
+    void recoverQueuedJobsLeavesDurableOutboxWorkExclusivelyToTheDispatcher() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        Document doc = doc(kbId, docId);
+        when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
+                IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(job));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
+        when(ingestOutboxService.hasDurableRecord(jobId)).thenReturn(true);
+
+        assertThat(service().recoverQueuedJobs()).isZero();
+
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PENDING);
+        verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
+        verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -1028,6 +1052,8 @@ class IngestJobServiceTest {
         processingDoc.setStatus(DocumentStatus.PROCESSING);
         when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(missingDocJob, processingDocJob));
+        when(ingestJobRepository.findByIdForUpdate(missingDocJob.getId())).thenReturn(Optional.of(missingDocJob));
+        when(ingestJobRepository.findByIdForUpdate(processingDocJob.getId())).thenReturn(Optional.of(processingDocJob));
         when(documentRepository.findByIdForUpdate(missingDocId)).thenReturn(Optional.empty());
         when(documentRepository.findByIdForUpdate(processingDocId)).thenReturn(Optional.of(processingDoc));
 
@@ -1065,12 +1091,14 @@ class IngestJobServiceTest {
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(job));
+        when(ingestJobRepository.findByIdForUpdate(job.getId())).thenReturn(Optional.of(job));
         when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
 
         service().recoverQueuedJobsOnSchedule();
 
-        verify(ingestJobProducer).enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        verify(ingestOutboxService).record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -1082,10 +1110,11 @@ class IngestJobServiceTest {
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(job));
+        when(ingestJobRepository.findByIdForUpdate(job.getId())).thenReturn(Optional.of(job));
         when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
         doThrow(new IllegalStateException())
-                .when(ingestJobProducer).enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+                .when(ingestOutboxService).record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
 
         assertThat(service().recoverQueuedJobs()).isZero();
 
@@ -1102,10 +1131,11 @@ class IngestJobServiceTest {
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(job));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
         when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
-        doThrow(new IllegalStateException("redis down"))
-                .when(ingestJobProducer).enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        doThrow(new IllegalStateException("outbox down"))
+                .when(ingestOutboxService).record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
 
         int recovered = service().recoverQueuedJobs();
 
@@ -1127,10 +1157,11 @@ class IngestJobServiceTest {
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(job));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
         when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
-        doThrow(new IllegalStateException("redis down"))
-                .when(ingestJobProducer).enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        doThrow(new IllegalStateException("outbox down"))
+                .when(ingestOutboxService).record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
 
         int recovered = service().recoverQueuedJobs();
 
@@ -1138,7 +1169,7 @@ class IngestJobServiceTest {
         assertThat(job.getRetryCount()).isEqualTo(3);
         assertThat(job.getStatus()).isEqualTo(IngestJobStatus.DEAD_LETTER);
         assertThat(job.getStage()).isEqualTo(IngestStage.DEAD_LETTER);
-        assertThat(job.getErrorMessage()).contains("redis down");
+        assertThat(job.getErrorMessage()).contains("outbox down");
         assertThat(doc.getStatus()).isEqualTo(DocumentStatus.FAILED);
         assertThat(doc.getErrorMessage()).contains("dead-letter");
         verify(ingestJobRepository).save(job);

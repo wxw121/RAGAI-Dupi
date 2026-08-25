@@ -44,7 +44,6 @@ public class IngestJobService {
     private final DocumentRepository documentRepository;
     private final ChunkRepository chunkRepository;
     private final KnowledgeBaseService knowledgeBaseService;
-    private final IngestJobProducer ingestJobProducer;
     private final IngestOutboxService ingestOutboxService;
     private final DocumentTombstoneService documentTombstoneService;
     private final RedisQueueProperties redisQueueProperties;
@@ -406,16 +405,22 @@ public class IngestJobService {
         List<IngestJob> jobs = ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED);
         int recovered = recoverExpiredProcessingJobs();
-        for (IngestJob job : jobs) {
+        for (IngestJob observed : jobs) {
+            IngestJob job = findJobForUpdate(observed.getId());
             Document doc = findDocumentForUpdate(job.getDocId()).orElse(null);
-            if (doc == null || doc.getStatus() != DocumentStatus.PENDING) {
+            if (job.getStatus() != IngestJobStatus.PENDING
+                    || job.getStage() != IngestStage.QUEUED
+                    || doc == null
+                    || doc.getStatus() != DocumentStatus.PENDING) {
+                continue;
+            }
+            if (ingestOutboxService.hasDurableRecord(job.getId())) {
                 continue;
             }
             try {
                 KnowledgeBase kb = knowledgeBaseService.findSystemOrThrow(job.getKbId());
-                ingestJobProducer.enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+                ingestOutboxService.record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
                 job.setErrorMessage(null);
-                doc.setStatus(DocumentStatus.PROCESSING);
                 doc.setErrorMessage(null);
                 ingestJobRepository.save(job);
                 documentRepository.save(doc);
