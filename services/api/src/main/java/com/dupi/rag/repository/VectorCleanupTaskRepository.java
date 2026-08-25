@@ -18,12 +18,17 @@ public interface VectorCleanupTaskRepository extends JpaRepository<VectorCleanup
             VectorCleanupStatus status
     );
 
-    List<VectorCleanupTask> findTop50ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
+    List<VectorCleanupTask> findTop5ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
             VectorCleanupStatus status,
             Instant nextAttemptAt
     );
 
     List<VectorCleanupTask> findTop50ByStatusInOrderByUpdatedAtDesc(List<VectorCleanupStatus> statuses);
+
+    List<VectorCleanupTask> findTop50ByKnowledgeBaseIdAndStatusInOrderByUpdatedAtDesc(
+            UUID knowledgeBaseId,
+            List<VectorCleanupStatus> statuses
+    );
 
     long countByStatusIn(List<VectorCleanupStatus> statuses);
 
@@ -33,4 +38,6 @@ public interface VectorCleanupTaskRepository extends JpaRepository<VectorCleanup
             where d.id = :docId
             """)
     Optional<UUID> resolveKnowledgeBaseIdForDocumentTarget(UUID docId);
+
+    void deleteByKnowledgeBaseId(UUID knowledgeBaseId);
 }

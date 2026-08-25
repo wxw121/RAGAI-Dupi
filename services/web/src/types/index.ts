@@ -1,5 +1,38 @@
 ﻿export type RetrievalIndexMode = 'CLASSIC' | 'PARENT_CHILD' | 'QA_ASSISTED' | 'COMBINED'
 
+export type OperationStatus = 'PREPARED' | 'RUNNING' | 'RETRY_WAIT' | 'COMPENSATING' | 'COMPLETED' | 'FAILED'
+export type OperationStepStatus = 'PENDING' | 'RUNNING' | 'RETRY_WAIT' | 'COMPLETED' | 'FAILED' | 'COMPENSATED'
+export type OperationType = 'RECOVERY_ARCHIVE_IMPORT' | 'MARKDOWN_PACKAGE_IMPORT' | 'KNOWLEDGE_BASE_DELETE'
+
+export interface OperationStepResponse {
+  id: string
+  sequenceNumber: number
+  stepKey: string
+  stepType: string
+  status: OperationStepStatus
+  attemptCount: number
+  lastError: string | null
+  startedAt: string | null
+  completedAt: string | null
+  nextAttemptAt: string | null
+}
+
+export interface OperationJobResponse {
+  id: string
+  operationType: OperationType
+  aggregateType: string
+  aggregateId: string
+  status: OperationStatus
+  attemptCount: number
+  nextAttemptAt: string | null
+  errorCode: string | null
+  errorMessage: string | null
+  createdAt: string
+  updatedAt: string
+  completedAt: string | null
+  steps: OperationStepResponse[]
+}
+
 export type RagEvalProfileGateStatus =
   | 'PASSED'
   | 'BLOCKED'
@@ -73,7 +106,7 @@ export interface Document {
   fileName: string
   mimeType: string
   fileSize: number
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+  status: 'UPLOADING' | 'DELETING' | 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
   errorMessage: string | null
   currentJob?: IngestJob | null
   createdAt: string
@@ -94,6 +127,11 @@ export interface BatchDocumentUploadResponse {
   results: BatchDocumentUploadResult[]
 }
 
+export interface MarkdownPackageUploadResponse {
+  documents: Document[]
+  assetCount: number
+}
+
 export interface IngestJob {
   id: string
   executionId?: string | null
@@ -101,7 +139,7 @@ export interface IngestJob {
   docId: string
   documentFileName?: string | null
   documentStatus?: Document['status'] | null
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'DEAD_LETTER' | 'CANCEL_REQUESTED' | 'CANCELLED'
+  status: 'UPLOAD_INTENT' | 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'DEAD_LETTER' | 'CANCEL_REQUESTED' | 'CANCELLED'
   stage: string | null
   retryCount: number
   errorMessage: string | null
@@ -130,6 +168,7 @@ export interface VectorCleanupTask {
     | 'LEGACY_KNOWLEDGE_BASE'
     | 'LEGACY_DOCUMENT'
   targetId: string
+  knowledgeBaseId: string | null
   status: 'PENDING' | 'COMPLETED' | 'FAILED'
   attemptCount: number
   lastError: string | null
@@ -309,8 +348,12 @@ export interface RagEvalCase {
   topK?: number
   category?: RagEvalCaseCategory
   expectedFileName?: string
+  expectedDocumentId?: string
   expectedFileNames?: string[]
+  expectedDocumentIds?: string[]
   mustContainAny?: string[]
+  sourceValid?: boolean
+  missingExpectedFileNames?: string[]
   createdAt?: string
   updatedAt?: string
 }
@@ -322,7 +365,9 @@ export interface RagEvalCaseRequest {
   topK?: number
   category?: RagEvalCaseCategory
   expectedFileName?: string
+  expectedDocumentId?: string
   expectedFileNames?: string[]
+  expectedDocumentIds?: string[]
   mustContainAny?: string[]
 }
 
@@ -350,6 +395,56 @@ export interface RagEvalResult {
   embeddingModel: string | null
   embeddingDimension: number | null
   topK: number | null
+}
+
+export interface RagEvalGenerationDraft {
+  caseKey: string
+  query: string
+  expectedFileName: string
+  expectedDocumentId?: string
+  mustContainAny: string[]
+  category: RagEvalCaseCategory
+  minHits: number
+  topK: number
+}
+
+export interface RagEvalGenerationDocumentPreview {
+  documentId: string
+  fileName: string
+  existingSingleSourceCount: number
+  deficit: number
+  covered: boolean
+  proposals: RagEvalGenerationDraft[]
+  error?: string | null
+}
+
+export interface RagEvalGenerationPreview {
+  documentFingerprint: string
+  caseFingerprint: string
+  retainedCases: RagEvalCase[]
+  replacedCases: RagEvalCase[]
+  documents: RagEvalGenerationDocumentPreview[]
+  confirmable: boolean
+}
+
+export interface RagEvalGenerationConfirmRequest {
+  documentFingerprint: string
+  caseFingerprint: string
+  replaceCaseIds: string[]
+  generatedCases: RagEvalGenerationDraft[]
+}
+
+export interface RagEvalAddGenerationPreviewRequest {
+  documentIds: string[]
+  casesPerDocument: number
+}
+
+export interface RagEvalAddGenerationConfirmRequest {
+  documentFingerprint: string
+  caseFingerprint: string
+  documentIds: string[]
+  casesPerDocument: number
+  generatedCases: RagEvalGenerationDraft[]
 }
 
 export interface RagEvalMetrics {

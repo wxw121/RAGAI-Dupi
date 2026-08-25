@@ -68,26 +68,26 @@ class IngestOutboxServiceTest {
         Document doc = doc(kbId, docId);
         IngestJob job = job(kbId, docId, jobId);
         IngestOutboxEvent event = event(kbId, docId, jobId);
-        when(outboxRepository.findTop50ByStatusInAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
-                eq(List.of(IngestOutboxStatus.PENDING, IngestOutboxStatus.FAILED)),
-                any(Instant.class)
-        )).thenReturn(List.of(event));
+        stubCandidate(event);
+        when(outboxRepository.findByIdForUpdate(event.getId())).thenReturn(Optional.of(event));
         when(documentTombstoneService.isDeleted(docId)).thenReturn(false);
-        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
 
         int dispatched = service().dispatchPending();
 
         assertThat(dispatched).isEqualTo(1);
-        verify(ingestJobProducer).enqueue(job, kb, event.getObjectKey(), event.getFileName(), event.getMimeType());
+        verify(ingestJobProducer).enqueue(job, kb, event.getObjectKey(), event.getFileName(), event.getMimeType(),
+                job.getExecutionId());
         assertThat(event.getStatus()).isEqualTo(IngestOutboxStatus.SENT);
         assertThat(event.getLastError()).isNull();
         assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PROCESSING);
         assertThat(doc.getErrorMessage()).isNull();
-        verify(outboxRepository).save(event);
+        verify(outboxRepository, times(2)).save(event);
         verify(documentRepository).save(doc);
         verify(ingestJobRepository).save(job);
+        verify(ingestJobRepository, times(2)).findByIdForUpdate(jobId);
     }
 
     @Test
@@ -99,17 +99,16 @@ class IngestOutboxServiceTest {
         Document doc = doc(kbId, docId);
         IngestJob job = job(kbId, docId, jobId);
         IngestOutboxEvent event = event(kbId, docId, jobId);
+        stubCandidate(event);
+        when(outboxRepository.findByIdForUpdate(event.getId())).thenReturn(Optional.of(event));
         Instant before = Instant.now();
-        when(outboxRepository.findTop50ByStatusInAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
-                eq(List.of(IngestOutboxStatus.PENDING, IngestOutboxStatus.FAILED)),
-                any(Instant.class)
-        )).thenReturn(List.of(event));
         when(documentTombstoneService.isDeleted(docId)).thenReturn(false);
-        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
         doThrow(new IllegalStateException("redis down"))
-                .when(ingestJobProducer).enqueue(job, kb, event.getObjectKey(), event.getFileName(), event.getMimeType());
+                .when(ingestJobProducer).enqueue(job, kb, event.getObjectKey(), event.getFileName(), event.getMimeType(),
+                        job.getExecutionId());
 
         int dispatched = service().dispatchPending();
 
@@ -120,7 +119,7 @@ class IngestOutboxServiceTest {
         assertThat(event.getNextAttemptAt()).isAfter(before);
         assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PENDING);
         assertThat(job.getStage()).isEqualTo(IngestStage.QUEUED);
-        verify(outboxRepository).save(event);
+        verify(outboxRepository, times(2)).save(event);
         verify(documentRepository).save(doc);
         verify(ingestJobRepository).save(job);
     }
@@ -131,10 +130,7 @@ class IngestOutboxServiceTest {
         UUID docId = UUID.randomUUID();
         UUID jobId = UUID.randomUUID();
         IngestOutboxEvent event = event(kbId, docId, jobId);
-        when(outboxRepository.findTop50ByStatusInAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
-                eq(List.of(IngestOutboxStatus.PENDING, IngestOutboxStatus.FAILED)),
-                any(Instant.class)
-        )).thenReturn(List.of(event));
+        stubCandidate(event);
         when(documentTombstoneService.isDeleted(docId)).thenReturn(true);
 
         int dispatched = service().dispatchPending();
@@ -142,7 +138,7 @@ class IngestOutboxServiceTest {
         assertThat(dispatched).isZero();
         assertThat(event.getStatus()).isEqualTo(IngestOutboxStatus.CANCELLED);
         assertThat(event.getLastError()).contains("deleted");
-        verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
+        verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any(), any());
         verify(outboxRepository).save(event);
     }
 
@@ -152,21 +148,93 @@ class IngestOutboxServiceTest {
         UUID docId = UUID.randomUUID();
         UUID jobId = UUID.randomUUID();
         IngestOutboxEvent event = event(kbId, docId, jobId);
-        when(outboxRepository.findTop50ByStatusInAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
-                eq(List.of(IngestOutboxStatus.PENDING, IngestOutboxStatus.FAILED)),
-                any(Instant.class)
-        )).thenReturn(List.of(event));
+        stubCandidate(event);
         when(documentTombstoneService.isDeleted(docId)).thenReturn(false);
-        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.empty());
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc(kbId, docId)));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.empty());
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc(kbId, docId)));
 
         int dispatched = service().dispatchPending();
 
         assertThat(dispatched).isZero();
         assertThat(event.getStatus()).isEqualTo(IngestOutboxStatus.CANCELLED);
         assertThat(event.getLastError()).contains("no longer exists");
-        verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
+        verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any(), any());
         verify(outboxRepository).save(event);
+    }
+
+    @Test
+    void dispatcherCancelsUploadIntentAndTerminalJobInsteadOfResurrectingThem() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestOutboxEvent intentEvent = event(kbId, docId, jobId);
+        stubCandidate(intentEvent);
+        IngestJob uploadIntent = job(kbId, docId, jobId);
+        uploadIntent.setStatus(IngestJobStatus.UPLOAD_INTENT);
+        uploadIntent.setStage(IngestStage.UPLOAD_PENDING);
+        Document uploading = doc(kbId, docId);
+        uploading.setStatus(DocumentStatus.UPLOADING);
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(uploadIntent));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(uploading));
+
+        assertThat(service().dispatchPending()).isZero();
+
+        assertThat(intentEvent.getStatus()).isEqualTo(IngestOutboxStatus.CANCELLED);
+        assertThat(uploadIntent.getStatus()).isEqualTo(IngestJobStatus.UPLOAD_INTENT);
+        assertThat(uploading.getStatus()).isEqualTo(DocumentStatus.UPLOADING);
+        verifyNoInteractions(ingestJobProducer, knowledgeBaseService);
+        verify(ingestJobRepository, never()).save(any());
+        verify(documentRepository, never()).save(any());
+    }
+
+    @Test
+    void dispatcherCannotOverwriteDeletingDocumentAfterLoadingItsOutboxEvent() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestOutboxEvent event = event(kbId, docId, jobId);
+        stubCandidate(event);
+        IngestJob job = job(kbId, docId, jobId);
+        Document deleting = doc(kbId, docId);
+        deleting.setStatus(DocumentStatus.DELETING);
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        lenient().when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(deleting));
+        lenient().when(documentRepository.findById(docId)).thenReturn(Optional.of(deleting));
+
+        assertThat(service().dispatchPending()).isZero();
+
+        assertThat(deleting.getStatus()).isEqualTo(DocumentStatus.DELETING);
+        assertThat(event.getStatus()).isEqualTo(IngestOutboxStatus.CANCELLED);
+        verifyNoInteractions(ingestJobProducer, knowledgeBaseService);
+        verify(documentRepository).findByIdForUpdate(docId);
+        verify(documentRepository, never()).findById(docId);
+        verify(documentRepository, never()).save(any());
+        verify(ingestJobRepository, never()).save(any());
+    }
+
+    @Test
+    void cleanupClaimWinnerIsCancelledByDispatcherWithoutExternalEnqueue() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestOutboxEvent event = event(kbId, docId, jobId);
+        stubCandidate(event);
+        IngestJob cleanup = job(kbId, docId, jobId);
+        cleanup.setStatus(IngestJobStatus.UPLOAD_INTENT);
+        cleanup.setStage(IngestStage.UPLOAD_CLEANUP);
+        cleanup.setClaimedBy("upload-cleanup:owner");
+        cleanup.setLeaseExpiresAt(Instant.now().plusSeconds(30));
+        Document uploading = doc(kbId, docId);
+        uploading.setStatus(DocumentStatus.UPLOADING);
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(cleanup));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(uploading));
+
+        assertThat(service().dispatchPending()).isZero();
+
+        assertThat(event.getStatus()).isEqualTo(IngestOutboxStatus.CANCELLED);
+        assertThat(cleanup.getStage()).isEqualTo(IngestStage.UPLOAD_CLEANUP);
+        verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any(), any());
+        verify(ingestJobRepository).findByIdForUpdate(jobId);
     }
 
     @Test
@@ -178,17 +246,16 @@ class IngestOutboxServiceTest {
         Document doc = doc(kbId, docId);
         IngestJob job = job(kbId, docId, jobId);
         IngestOutboxEvent event = event(kbId, docId, jobId);
+        stubCandidate(event);
+        when(outboxRepository.findByIdForUpdate(event.getId())).thenReturn(Optional.of(event));
         event.setAttemptCount(2);
-        when(outboxRepository.findTop50ByStatusInAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
-                eq(List.of(IngestOutboxStatus.PENDING, IngestOutboxStatus.FAILED)),
-                any(Instant.class)
-        )).thenReturn(List.of(event));
         when(documentTombstoneService.isDeleted(docId)).thenReturn(false);
-        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
         doThrow(new IllegalStateException(" "))
-                .when(ingestJobProducer).enqueue(job, kb, event.getObjectKey(), event.getFileName(), event.getMimeType());
+                .when(ingestJobProducer).enqueue(job, kb, event.getObjectKey(), event.getFileName(), event.getMimeType(),
+                        job.getExecutionId());
 
         int dispatched = service().dispatchPending();
 
@@ -198,7 +265,7 @@ class IngestOutboxServiceTest {
         assertThat(event.getLastError()).contains("IllegalStateException");
         assertThat(job.getErrorMessage()).contains("IllegalStateException");
         assertThat(doc.getErrorMessage()).contains("IllegalStateException");
-        verify(outboxRepository).save(event);
+        verify(outboxRepository, times(2)).save(event);
         verify(documentRepository).save(doc);
         verify(ingestJobRepository).save(job);
     }
@@ -214,6 +281,15 @@ class IngestOutboxServiceTest {
         );
     }
 
+    private void stubCandidate(IngestOutboxEvent event) {
+        when(outboxRepository.findDispatchCandidates(
+                eq(List.of(IngestOutboxStatus.PENDING, IngestOutboxStatus.FAILED)),
+                any(Instant.class), any(org.springframework.data.domain.Pageable.class)))
+                .thenReturn(List.of(new com.dupi.rag.repository.IngestOutboxDispatchCandidate(
+                        event.getId(), event.getJobId(), event.getDocId())));
+        lenient().when(outboxRepository.findByIdForUpdate(event.getId())).thenReturn(Optional.of(event));
+    }
+
     private static IngestJob job(UUID kbId, UUID docId, UUID jobId) {
         return IngestJob.builder()
                 .id(jobId)
@@ -222,6 +298,7 @@ class IngestOutboxServiceTest {
                 .status(IngestJobStatus.PENDING)
                 .stage(IngestStage.QUEUED)
                 .retryCount(0)
+                .executionId(UUID.randomUUID())
                 .createdAt(Instant.now())
                 .updatedAt(Instant.now())
                 .build();

@@ -46,10 +46,11 @@ class ChatServiceTest {
     @Mock LlmClient llmClient;
     @Mock StringRedisTemplate redisTemplate;
     @Mock ChatSessionService chatSessionService;
+    @Mock AuditLogService auditLogService;
 
     ChatService service(RedisQueueProperties props) {
         return new ChatService(knowledgeBaseService, retrievalService, llmClient, redisTemplate, props, new ObjectMapper(),
-                chatSessionService);
+                chatSessionService, auditLogService);
     }
 
     @Test
@@ -90,7 +91,7 @@ class ChatServiceTest {
     }
 
     @Test
-    void chatStreamTruncatesCitationsClampsTopKAndCreatesPersistedSession() {
+    void chatStreamKeepsFullCitationsClampsTopKAndCreatesPersistedSession() throws Exception {
         UUID kbId = UUID.randomUUID();
         UUID sessionId = UUID.randomUUID();
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).topK(500).build());
@@ -121,7 +122,12 @@ class ChatServiceTest {
         verify(retrievalService).retrieve(eq(kbId), captor.capture());
         assertThat(captor.getValue().getTopK()).isEqualTo(50);
         assertThat(events).extracting(e -> e.event()).containsExactly("retrieval", "done");
-        assertThat(events.get(0).data()).contains("...").contains("doc.md");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> retrievalPayload = new ObjectMapper().readValue(events.get(0).data(), Map.class);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> citationItems = (List<Map<String, Object>>) retrievalPayload.get("citations");
+        assertThat(citationItems).singleElement()
+                .satisfies(item -> assertThat(item.get("snippet")).isEqualTo(longContent));
         assertThat(events.get(1).data()).contains(sessionId.toString());
         verify(chatSessionService).saveUserMessage(kbId, sessionId, "问题");
         verify(chatSessionService, never()).saveAssistantMessage(any(), any(), anyString(), anyList());
@@ -245,6 +251,8 @@ class ChatServiceTest {
         Thread.sleep(50);
 
         verify(chatSessionService).saveUserMessage(kbId, sessionId, "闂");
+        verify(auditLogService).recordSuccess(
+                "CHAT_QUERY", "CHAT_SESSION", sessionId, "Submitted a knowledge base question");
         verify(chatSessionService, timeout(200).times(1)).saveAssistantMessage(kbId, sessionId, "閮?", List.of());
     }
 
@@ -461,6 +469,14 @@ class ChatServiceTest {
         request.setQuery("问题");
 
         assertThat(service(redisProps()).chat(kbId, request)).isEqualTo("答案");
+        ArgumentCaptor<String> systemPrompt = ArgumentCaptor.forClass(String.class);
+        verify(llmClient).chat(systemPrompt.capture(), contains("问题"));
+        assertThat(systemPrompt.getValue())
+                .contains("不要逐段拼接或照抄原文章节结构")
+                .contains("忽略只有标题而没有正文的片段")
+                .contains("不要沿用原文的章节编号");
+        verify(auditLogService).recordSuccess(
+                "CHAT_QUERY", "KNOWLEDGE_BASE", kbId, "Submitted a knowledge base question");
     }
 
     @Test

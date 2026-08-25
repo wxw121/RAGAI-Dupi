@@ -216,6 +216,12 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
         if (uri.startsWith("/api/v1/ops/")) {
             return List.of("OPS_ADMIN");
         }
+        if ("GET".equalsIgnoreCase(method) && uri.matches("/api/v1/operations/[^/]+")) {
+            return List.of("KB_READ");
+        }
+        if ("POST".equalsIgnoreCase(method) && uri.matches("/api/v1/operations/[^/]+/retry")) {
+            return List.of("MAINTENANCE", "KB_READ");
+        }
         if (uri.contains("/recovery/")) {
             return List.of("KB_RECOVERY", "KB_READ");
         }
@@ -224,7 +230,7 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
         }
         if (uri.contains("/retrieval-profiles")) {
             if ("POST".equalsIgnoreCase(method)
-                    && (uri.endsWith("/activate") || uri.endsWith("/rollback"))) {
+                    && (uri.endsWith("/activate") || uri.endsWith("/rollback") || uri.endsWith("/default"))) {
                 return List.of("OPS_ADMIN", "KB_READ");
             }
             if ("POST".equalsIgnoreCase(method)) {
@@ -264,6 +270,9 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
         }
         if ("POST".equalsIgnoreCase(method) && uri.endsWith("/reindex")) {
             return List.of("MAINTENANCE");
+        }
+        if ("POST".equalsIgnoreCase(method) && uri.contains("/vector-cleanup-tasks/")) {
+            return List.of("MAINTENANCE", "KB_READ");
         }
         if ("PATCH".equalsIgnoreCase(method) && uri.endsWith("/retrieval-profile")) {
             return List.of("MAINTENANCE");

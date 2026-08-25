@@ -1,6 +1,7 @@
 package com.dupi.rag.service;
 
 import com.dupi.rag.domain.entity.RagEvalCase;
+import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.entity.RagEvalRunResult;
 import com.dupi.rag.domain.entity.RagQualityPolicy;
@@ -24,10 +25,12 @@ import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.dto.RetrieveResponse;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.exception.RagEvalCaseConflictException;
 import com.dupi.rag.repository.RagEvalCaseRepository;
 import com.dupi.rag.repository.RagEvalRunRepository;
 import com.dupi.rag.repository.RagEvalRunResultRepository;
 import com.dupi.rag.repository.RagQualityPolicyRepository;
+import com.dupi.rag.repository.DocumentRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -42,6 +45,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
@@ -61,11 +65,15 @@ public class RagEvalService {
     private final KnowledgeBaseMaintenanceService maintenanceService;
     private final ProfileIndexStateService profileIndexStateService;
     private final RetrievalProfileGateService retrievalProfileGateService;
+    private final RagEvalCaseValidationService caseValidationService;
+    private final DocumentRepository documentRepository;
 
     @Transactional
     public List<RagEvalCaseResponse> listCases(UUID kbId) {
-        return caseCoordinator.loadOrSeed(kbId).stream()
-                .map(this::toCaseResponse)
+        List<RagEvalCase> cases = caseCoordinator.loadCases(kbId);
+        RagEvalCaseValidationService.ValidationReport validation = caseValidationService.validate(kbId, cases);
+        return cases.stream()
+                .map(evalCase -> toCaseResponse(evalCase, validation.byCaseId().get(evalCase.getId())))
                 .toList();
     }
 
@@ -74,7 +82,7 @@ public class RagEvalService {
         maintenanceService.assertMutationAllowed(kbId);
         caseCoordinator.assertCanCreate(kbId);
         RagEvalCase evalCase = RagEvalCase.builder().kbId(kbId).build();
-        apply(evalCase, request);
+        apply(evalCase, request, kbId);
         return toCaseResponse(caseRepository.save(evalCase));
     }
 
@@ -83,7 +91,7 @@ public class RagEvalService {
         maintenanceService.assertMutationAllowed(kbId);
         knowledgeBaseService.findOrThrow(kbId);
         RagEvalCase evalCase = findCase(kbId, caseId);
-        apply(evalCase, request);
+        apply(evalCase, request, kbId);
         return toCaseResponse(caseRepository.save(evalCase));
     }
 
@@ -109,6 +117,10 @@ public class RagEvalService {
     public RagEvalRunResponse run(UUID kbId, RagEvalRunRequest request) {
         RagEvalRunRequest effective = request == null ? new RagEvalRunRequest() : request;
         boolean useRerank = Boolean.TRUE.equals(effective.getUseRerank());
+        if (effective.getProfileId() != null || effective.getRetrievalMode() != null) {
+            return run(kbId, useRerank, effective.getProfileId(), effective.getRetrievalMode(),
+                    effective.getTopKOverride(), blankToNull(effective.getExperimentLabel()));
+        }
         return run(kbId, useRerank, effective.getProfiles(),
                 effective.getTopKOverride(), blankToNull(effective.getExperimentLabel()));
     }
@@ -133,7 +145,8 @@ public class RagEvalService {
             String experimentLabel
     ) {
         maintenanceService.assertMutationAllowed(kbId);
-        List<RagEvalCase> cases = caseCoordinator.loadOrSeed(kbId);
+        List<RagEvalCase> cases = caseCoordinator.loadCases(kbId);
+        assertSourcesValid(kbId, cases);
         List<com.dupi.rag.domain.enums.RetrievalProfile> profiles = normalizeProfiles(requestedProfiles);
         long runRevision = profileIndexStateService.currentRevision(kbId);
         RagEvalRun run = RagEvalRun.builder()
@@ -194,7 +207,8 @@ public class RagEvalService {
         if (profileId != null && retrievalMode == RetrievalMode.VECTOR) {
             throw new IllegalArgumentException("VECTOR evaluation cannot use a retrieval profile");
         }
-        List<RagEvalCase> cases = caseCoordinator.loadOrSeed(kbId);
+        List<RagEvalCase> cases = caseCoordinator.loadCases(kbId);
+        assertSourcesValid(kbId, cases);
         RetrievalProfile profile = profileId == null ? null : retrievalProfileService.find(kbId, profileId);
         boolean effectiveRerank = profile == null ? useRerank : Boolean.TRUE.equals(profile.getRerankEnabled());
         RagQualityPolicy policy = getOrCreatePolicy(kbId);
@@ -300,7 +314,7 @@ public class RagEvalService {
                     new EvaluationTarget(profile, retrievalMode, qualityProfile));
             hits = response.getHits() == null ? List.of() : response.getHits();
             boolean expectsNoHits = safeMinHits(evalCase) == 0
-                    && expectedFiles(evalCase).isEmpty()
+                    && !hasExpectedFile(evalCase)
                     && (evalCase.getMustContainAny() == null || evalCase.getMustContainAny().isEmpty());
             hitPassed = expectsNoHits ? hits.isEmpty() : hits.size() >= safeMinHits(evalCase);
             if (expectsNoHits && !hits.isEmpty()) {
@@ -312,7 +326,9 @@ public class RagEvalService {
             }
             matchedFiles = matchFiles(evalCase, hits, failureReasons, failureCategories);
             matchedFile = matchedFiles.isEmpty() ? null : matchedFiles.get(0);
-            citationPassed = citationEligible && matchedFiles.size() == expectedFiles(evalCase).size();
+            int expectedSourceCount = expectedDocumentIds(evalCase).isEmpty()
+                    ? expectedFiles(evalCase).size() : expectedDocumentIds(evalCase).size();
+            citationPassed = citationEligible && matchedFiles.size() == expectedSourceCount;
             matchedToken = matchToken(evalCase, hits, failureReasons, failureCategories);
         } catch (Exception ex) {
             failureReasons.add(ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage());
@@ -331,7 +347,8 @@ public class RagEvalService {
                 .caseFingerprint(qualityGateService.fingerprint(new RagQualityGateService.CaseDefinition(
                         evalCase.getQuery(), safeMinHits(evalCase), actualTopK,
                         evalCase.getExpectedFileName(), evalCase.getMustContainAny(),
-                        evalCase.getCategory(), evalCase.getExpectedFileNames())))
+                        evalCase.getCategory(), evalCase.getExpectedFileNames(),
+                        evalCase.getExpectedDocumentId(), evalCase.getExpectedDocumentIds())))
                 .passed(failureReasons.isEmpty())
                 .hitPassed(hitPassed)
                 .citationEligible(citationEligible)
@@ -443,24 +460,38 @@ public class RagEvalService {
 
     private List<String> matchFiles(RagEvalCase evalCase, List<RetrievalHit> hits, List<String> failureReasons,
                                     List<String> failureCategories) {
+        List<UUID> expectedIds = expectedDocumentIds(evalCase);
         List<String> expectedFiles = expectedFiles(evalCase);
-        if (expectedFiles.isEmpty()) {
+        if (expectedIds.isEmpty() && expectedFiles.isEmpty()) {
             return List.of();
         }
-        List<String> hitFiles = hits.stream()
-                .map(RetrievalHit::getFileName)
-                .filter(fileName -> fileName != null && !fileName.isBlank())
-                .distinct()
-                .toList();
-        List<String> matchedFiles = expectedFiles.stream().filter(hitFiles::contains).toList();
-        List<String> missingFiles = expectedFiles.stream().filter(fileName -> !hitFiles.contains(fileName)).toList();
-        if (!missingFiles.isEmpty()) {
-            failureReasons.add(expectedFiles.size() == 1
-                    ? "missing expected file " + missingFiles.get(0)
-                    : "missing expected files " + String.join(", ", missingFiles));
-            failureCategories.add("MISSING_EXPECTED_FILE");
+        if (expectedIds.isEmpty()) {
+            List<String> hitFiles = hits.stream().map(RetrievalHit::getFileName)
+                    .filter(this::hasText).distinct().toList();
+            List<String> matchedFiles = expectedFiles.stream().filter(hitFiles::contains).toList();
+            List<String> missingFiles = expectedFiles.stream().filter(file -> !hitFiles.contains(file)).toList();
+            addMissingFileFailure(expectedFiles, missingFiles, failureReasons, failureCategories);
+            return matchedFiles;
         }
+        Set<UUID> hitDocumentIds = hits.stream().map(RetrievalHit::getDocId)
+                .filter(java.util.Objects::nonNull).collect(java.util.stream.Collectors.toSet());
+        List<String> matchedFiles = new ArrayList<>();
+        List<String> missingFiles = new ArrayList<>();
+        for (int index = 0; index < expectedIds.size(); index++) {
+            String snapshot = index < expectedFiles.size() ? expectedFiles.get(index) : expectedIds.get(index).toString();
+            (hitDocumentIds.contains(expectedIds.get(index)) ? matchedFiles : missingFiles).add(snapshot);
+        }
+        addMissingFileFailure(expectedFiles, missingFiles, failureReasons, failureCategories);
         return matchedFiles;
+    }
+
+    private void addMissingFileFailure(List<String> expectedFiles, List<String> missingFiles,
+                                       List<String> failureReasons, List<String> failureCategories) {
+        if (missingFiles.isEmpty()) return;
+        failureReasons.add(expectedFiles.size() == 1
+                ? "missing expected file " + missingFiles.get(0)
+                : "missing expected files " + String.join(", ", missingFiles));
+        failureCategories.add("MISSING_EXPECTED_FILE");
     }
 
     private String matchToken(RagEvalCase evalCase, List<RetrievalHit> hits, List<String> failureReasons,
@@ -505,7 +536,11 @@ public class RagEvalService {
     }
 
     private boolean hasExpectedFile(RagEvalCase evalCase) {
-        return !expectedFiles(evalCase).isEmpty();
+        return !expectedDocumentIds(evalCase).isEmpty() || !expectedFiles(evalCase).isEmpty();
+    }
+
+    private List<UUID> expectedDocumentIds(RagEvalCase evalCase) {
+        return caseValidationService.expectedDocumentIds(evalCase);
     }
 
     private List<String> expectedFiles(RagEvalCase evalCase) {
@@ -1236,26 +1271,97 @@ public class RagEvalService {
                 .orElseThrow(() -> new ResourceNotFoundException("RAG eval case not found: " + caseId));
     }
 
-    private void apply(RagEvalCase evalCase, RagEvalCaseRequest request) {
+    private void apply(RagEvalCase evalCase, RagEvalCaseRequest request, UUID kbId) {
         evalCase.setCaseKey(request.getCaseKey().trim());
         evalCase.setQuery(request.getQuery().trim());
         evalCase.setMinHits(request.getMinHits() == null ? 1 : request.getMinHits());
         evalCase.setTopK(request.getTopK() == null ? 5 : request.getTopK());
         evalCase.setCategory(request.getCategory() == null ? RagEvalCaseCategory.REAL_QUERY : request.getCategory());
-        evalCase.setExpectedFileName(blankToNull(request.getExpectedFileName()));
-        evalCase.setExpectedFileNames(normalizeStrings(request.getExpectedFileNames()));
+        applyDocumentSources(evalCase, request, kbId);
         evalCase.setMustContainAny(request.getMustContainAny() == null ? List.of() : request.getMustContainAny());
     }
 
-    private List<String> normalizeStrings(List<String> values) {
-        if (values == null) {
-            return List.of();
+    private void applyDocumentSources(RagEvalCase evalCase, RagEvalCaseRequest request, UUID kbId) {
+        if (request.getExpectedDocumentId() != null
+                && request.getExpectedDocumentIds() != null
+                && !request.getExpectedDocumentIds().isEmpty()) {
+            throw new IllegalArgumentException("Use expectedDocumentId for one source or expectedDocumentIds for multiple sources");
         }
-        return values.stream()
-                .filter(value -> value != null && !value.isBlank())
-                .map(String::trim)
-                .distinct()
-                .toList();
+        List<UUID> requestedIds = java.util.stream.Stream.concat(
+                        java.util.stream.Stream.of(request.getExpectedDocumentId()),
+                        request.getExpectedDocumentIds() == null
+                                ? java.util.stream.Stream.empty()
+                                : request.getExpectedDocumentIds().stream())
+                .filter(java.util.Objects::nonNull).toList();
+        if (requestedIds.stream().distinct().count() != requestedIds.size()) {
+            throw new IllegalArgumentException("Expected document IDs must be unique");
+        }
+        List<String> clientSnapshots = java.util.stream.Stream.concat(
+                        java.util.stream.Stream.of(blankToNull(request.getExpectedFileName())),
+                        normalizeSnapshots(request.getExpectedFileNames()).stream())
+                .filter(java.util.Objects::nonNull).toList();
+        if (requestedIds.isEmpty() && clientSnapshots.isEmpty()) {
+            evalCase.setExpectedDocumentId(null);
+            evalCase.setExpectedDocumentIds(List.of());
+            evalCase.setExpectedFileName(null);
+            evalCase.setExpectedFileNames(List.of());
+            return;
+        }
+        Map<UUID, Document> documentsById = new LinkedHashMap<>();
+        if (requestedIds.isEmpty()) {
+            if (clientSnapshots.stream().distinct().count() != clientSnapshots.size()) {
+                throw new IllegalArgumentException("Expected filenames must be unique");
+            }
+            Map<String, List<Document>> documentsByName = documentRepository
+                    .findByKbIdOrderByIdAsc(kbId).stream()
+                    .collect(java.util.stream.Collectors.groupingBy(
+                            Document::getFileName, LinkedHashMap::new, java.util.stream.Collectors.toList()));
+            List<UUID> resolvedIds = new ArrayList<>();
+            for (String filename : clientSnapshots) {
+                List<Document> matches = documentsByName.getOrDefault(filename, List.of());
+                if (matches.isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "Expected filename was not found in the knowledge base: " + filename);
+                }
+                if (matches.size() > 1) {
+                    throw new IllegalArgumentException(
+                            "Expected filename is ambiguous in the knowledge base: " + filename);
+                }
+                Document document = matches.get(0);
+                resolvedIds.add(document.getId());
+                documentsById.put(document.getId(), document);
+            }
+            requestedIds = List.copyOf(resolvedIds);
+        } else {
+            documentRepository.findAllById(requestedIds)
+                    .forEach(document -> documentsById.put(document.getId(), document));
+        }
+        if (documentsById.size() != requestedIds.size()
+                || requestedIds.stream().map(documentsById::get)
+                        .anyMatch(document -> document == null || !kbId.equals(document.getKbId()))) {
+            throw new IllegalArgumentException("Expected document does not belong to the knowledge base");
+        }
+        List<String> snapshots = requestedIds.stream().map(id -> documentsById.get(id).getFileName()).toList();
+        if (!clientSnapshots.isEmpty() && !clientSnapshots.equals(snapshots)) {
+            throw new IllegalArgumentException("Expected filename does not match the document snapshot");
+        }
+        if (requestedIds.size() == 1) {
+            evalCase.setExpectedDocumentId(requestedIds.get(0));
+            evalCase.setExpectedDocumentIds(List.of());
+            evalCase.setExpectedFileName(snapshots.get(0));
+            evalCase.setExpectedFileNames(List.of());
+        } else {
+            evalCase.setExpectedDocumentId(null);
+            evalCase.setExpectedDocumentIds(List.copyOf(requestedIds));
+            evalCase.setExpectedFileName(null);
+            evalCase.setExpectedFileNames(List.copyOf(snapshots));
+        }
+    }
+
+    private List<String> normalizeSnapshots(List<String> values) {
+        if (values == null) return List.of();
+        return values.stream().filter(value -> value != null && !value.isBlank())
+                .map(String::trim).toList();
     }
 
     private String blankToNull(String value) {
@@ -1270,6 +1376,13 @@ public class RagEvalService {
     }
 
     private RagEvalCaseResponse toCaseResponse(RagEvalCase evalCase) {
+        return toCaseResponse(evalCase, null);
+    }
+
+    private RagEvalCaseResponse toCaseResponse(
+            RagEvalCase evalCase,
+            RagEvalCaseValidationService.CaseValidity validity
+    ) {
         return RagEvalCaseResponse.builder()
                 .id(evalCase.getId())
                 .kbId(evalCase.getKbId())
@@ -1278,12 +1391,30 @@ public class RagEvalService {
                 .minHits(evalCase.getMinHits())
                 .topK(evalCase.getTopK())
                 .category(evalCase.getCategory())
+                .expectedDocumentId(evalCase.getExpectedDocumentId())
+                .expectedDocumentIds(evalCase.getExpectedDocumentIds())
                 .expectedFileName(evalCase.getExpectedFileName())
                 .expectedFileNames(evalCase.getExpectedFileNames())
                 .mustContainAny(evalCase.getMustContainAny())
+                .sourceValid(validity == null || validity.sourceValid())
+                .missingExpectedFileNames(validity == null ? List.of() : validity.missingExpectedFileNames())
                 .createdAt(evalCase.getCreatedAt())
                 .updatedAt(evalCase.getUpdatedAt())
                 .build();
+    }
+
+    private void assertSourcesValid(UUID kbId, List<RagEvalCase> cases) {
+        RagEvalCaseValidationService.ValidationReport validation = caseValidationService.validate(kbId, cases);
+        if (!validation.hasInvalidCases()) {
+            return;
+        }
+        List<String> details = validation.invalidCases().stream()
+                .map(evalCase -> {
+                    RagEvalCaseValidationService.CaseValidity validity = validation.byCaseId().get(evalCase.getId());
+                    return evalCase.getCaseKey() + ": " + String.join(", ", validity.missingExpectedFileNames());
+                })
+                .toList();
+        throw RagEvalCaseConflictException.invalidSources(details);
     }
 
     private RagEvalRunResponse toRunResponse(RagEvalRun run, List<RagEvalRunResult> results) {
@@ -1465,14 +1596,17 @@ public class RagEvalService {
     }
 
     private RankEvidence rankEvidence(RagEvalCase evalCase, List<RetrievalHit> hits) {
-        List<String> expectedFiles = expectedFiles(evalCase);
+        List<UUID> expectedIds = expectedDocumentIds(evalCase);
+        List<String> legacyExpectedFiles = expectedFiles(evalCase);
         for (int index = 0; index < hits.size(); index++) {
             RetrievalHit hit = hits.get(index);
-            boolean matchesFile = hit.getFileName() != null && expectedFiles.contains(hit.getFileName());
+            boolean matchesFile = expectedIds.isEmpty()
+                    ? hit.getFileName() != null && legacyExpectedFiles.contains(hit.getFileName())
+                    : hit.getDocId() != null && expectedIds.contains(hit.getDocId());
             boolean matchesToken = evalCase.getMustContainAny() != null && hit.getContent() != null
                     && evalCase.getMustContainAny().stream().filter(java.util.Objects::nonNull)
                     .anyMatch(token -> hit.getContent().toLowerCase(Locale.ROOT).contains(token.toLowerCase(Locale.ROOT)));
-            boolean unconstrained = expectedFiles.isEmpty()
+            boolean unconstrained = expectedIds.isEmpty() && legacyExpectedFiles.isEmpty()
                     && (evalCase.getMustContainAny() == null || evalCase.getMustContainAny().isEmpty());
             if (matchesFile || matchesToken || unconstrained) {
                 Map<?, ?> stages = hit.getMetadata() != null && hit.getMetadata().get("retrievalStages") instanceof Map<?, ?> map

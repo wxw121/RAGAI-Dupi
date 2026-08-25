@@ -1,13 +1,14 @@
 package com.dupi.rag.service;
 
-import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.config.LlmProperties;
+import com.dupi.rag.config.SecurityContext;
 import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.enums.RagEvalGateStatus;
 import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.CreateKnowledgeBaseRequest;
 import com.dupi.rag.dto.KnowledgeBaseResponse;
+import com.dupi.rag.dto.OperationJobResponse;
 import com.dupi.rag.dto.RagEvalGateDecisionResponse;
 import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.exception.RetrievalProfileConflictException;
@@ -24,17 +25,16 @@ import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
-@Slf4j
 public class KnowledgeBaseService {
 
     private final KnowledgeBaseRepository repository;
-    private final MilvusVectorService milvusVectorService;
     private final LlmProperties llmProperties;
-    private final VectorCleanupTaskService vectorCleanupTaskService;
     private final AuditLogService auditLogService;
     private final ProfileIndexStateService profileIndexStateService;
     private final RetrievalProfileGateService retrievalProfileGateService;
     private final KnowledgeBaseMaintenanceService maintenanceService;
+    private final KnowledgeBaseDeletionPersistenceService deletionPersistence;
+    private final OperationJobService operationJobs;
 
     @Transactional
     public KnowledgeBaseResponse create(CreateKnowledgeBaseRequest request) {
@@ -97,50 +97,39 @@ public class KnowledgeBaseService {
                 .toList();
     }
 
-    @Transactional
-    public void delete(UUID id) {
-        findOrThrow(id);
-        vectorCleanupTaskService.enqueueProfileKnowledgeBase(id);
-        vectorCleanupTaskService.enqueueLegacyKnowledgeBase(id);
-        boolean compensationRequired = false;
-        try {
-            milvusVectorService.deleteProfileByKbId(id);
-        } catch (Exception e) {
-            compensationRequired = true;
-            log.warn("Failed to delete profile Milvus vectors for knowledge base {}", id, e);
-        }
-        try {
-            milvusVectorService.deleteByKbId(id);
-        } catch (Exception e) {
-            compensationRequired = true;
-            log.warn("Failed to delete Milvus vectors for knowledge base {}", id, e);
-            // 知识库删除以数据库为最终事实源：外部向量库短暂不可用时不阻塞主记录删除，
-            // 避免用户被 Milvus 半加载或不可用状态卡住；残留向量由补偿任务后续清理。
-        }
-        repository.deleteById(id);
-        auditLogService.recordSuccess(
-                "KNOWLEDGE_BASE_DELETE",
-                "KNOWLEDGE_BASE",
-                id,
-                compensationRequired
-                        ? "Deleted knowledge base " + id + " with vector cleanup compensation"
-                        : "Deleted knowledge base " + id
-        );
+    public OperationJobResponse submitDelete(UUID id) {
+        String actor = SecurityContext.getPrincipal();
+        return submitDelete(id, actor == null || actor.isBlank() ? "system" : actor);
+    }
+
+    public OperationJobResponse submitDelete(UUID id, String actor) {
+        UUID jobId = deletionPersistence.submit(id, TenantContext.getTenantId(), actor);
+        return operationJobs.get(jobId);
     }
 
     public KnowledgeBase findOrThrow(UUID id) {
-        return repository.findByIdAndTenantId(id, TenantContext.getTenantId())
+        KnowledgeBase knowledgeBase = repository.findByIdAndTenantIdAnyStatus(id, TenantContext.getTenantId())
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found: " + id));
+        return KnowledgeBaseLifecyclePolicy.requireReady(knowledgeBase, id);
     }
 
     public KnowledgeBase findForUpdateOrThrow(UUID id) {
-        return repository.findByIdAndTenantIdForUpdate(id, TenantContext.getTenantId())
+        KnowledgeBase knowledgeBase = repository
+                .findByIdAndTenantIdForUpdateAnyStatus(id, TenantContext.getTenantId())
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found: " + id));
+        return KnowledgeBaseLifecyclePolicy.requireReady(knowledgeBase, id);
     }
 
     public KnowledgeBase findSystemOrThrow(UUID id) {
-        return repository.findById(id)
+        KnowledgeBase knowledgeBase = repository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found: " + id));
+        return KnowledgeBaseLifecyclePolicy.requireReady(knowledgeBase, id);
+    }
+
+    public KnowledgeBase findSystemForUpdateOrThrow(UUID id) {
+        KnowledgeBase knowledgeBase = repository.findSystemByIdForUpdate(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found: " + id));
+        return KnowledgeBaseLifecyclePolicy.requireReady(knowledgeBase, id);
     }
 
     private KnowledgeBaseResponse toResponse(KnowledgeBase kb) {

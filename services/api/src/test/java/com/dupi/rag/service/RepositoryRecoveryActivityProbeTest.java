@@ -1,12 +1,16 @@
 package com.dupi.rag.service;
 
 import com.dupi.rag.domain.enums.IngestJobStatus;
+import com.dupi.rag.domain.enums.DocumentStatus;
+import com.dupi.rag.repository.DocumentRepository;
+import com.dupi.rag.repository.DocumentTombstoneRepository;
 import com.dupi.rag.repository.IngestJobRepository;
 import com.dupi.rag.repository.RagEvalRunRepository;
 import com.dupi.rag.repository.SparseMigrationRepository;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
+import org.mockito.ArgumentCaptor;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
@@ -18,11 +22,17 @@ class RepositoryRecoveryActivityProbeTest {
         IngestJobRepository ingest = mock(IngestJobRepository.class);
         RagEvalRunRepository eval = mock(RagEvalRunRepository.class);
         SparseMigrationRepository sparse = mock(SparseMigrationRepository.class);
-        RepositoryRecoveryActivityProbe probe = new RepositoryRecoveryActivityProbe(ingest, eval, sparse);
+        DocumentRepository documents = mock(DocumentRepository.class);
+        DocumentTombstoneRepository tombstones = mock(DocumentTombstoneRepository.class);
+        RepositoryRecoveryActivityProbe probe = new RepositoryRecoveryActivityProbe(
+                ingest, eval, sparse, documents, tombstones);
         UUID kbId = UUID.randomUUID();
 
         when(ingest.existsByKbIdAndStatusIn(eq(kbId), anyList())).thenReturn(true);
         assertThat(probe.hasActiveWork(kbId)).isTrue();
+        ArgumentCaptor<java.util.List<IngestJobStatus>> activeStatuses = ArgumentCaptor.forClass(java.util.List.class);
+        verify(ingest).existsByKbIdAndStatusIn(eq(kbId), activeStatuses.capture());
+        assertThat(activeStatuses.getValue()).contains(IngestJobStatus.UPLOAD_INTENT);
         reset(ingest);
         when(eval.existsByKbIdAndStatus(any(), any())).thenReturn(true);
         assertThat(probe.hasActiveWork(kbId)).isTrue();
@@ -31,5 +41,37 @@ class RepositoryRecoveryActivityProbeTest {
         assertThat(probe.hasActiveWork(kbId)).isTrue();
         reset(sparse);
         assertThat(probe.hasActiveWork(kbId)).isFalse();
+    }
+
+    @Test
+    void deletingDocumentBlocksKnowledgeBaseDeletionUntilFinalized() {
+        IngestJobRepository ingest = mock(IngestJobRepository.class);
+        RagEvalRunRepository eval = mock(RagEvalRunRepository.class);
+        SparseMigrationRepository sparse = mock(SparseMigrationRepository.class);
+        DocumentRepository documents = mock(DocumentRepository.class);
+        DocumentTombstoneRepository tombstones = mock(DocumentTombstoneRepository.class);
+        RepositoryRecoveryActivityProbe probe = new RepositoryRecoveryActivityProbe(
+                ingest, eval, sparse, documents, tombstones);
+        UUID kbId = UUID.randomUUID();
+        when(documents.existsByKbIdAndStatus(kbId, DocumentStatus.DELETING)).thenReturn(true);
+
+        assertThat(probe.hasActiveWork(kbId)).isTrue();
+    }
+
+    @Test
+    void unresolvedLateWriterCleanupBlocksKnowledgeBaseDeletion() {
+        IngestJobRepository ingest = mock(IngestJobRepository.class);
+        RagEvalRunRepository eval = mock(RagEvalRunRepository.class);
+        SparseMigrationRepository sparse = mock(SparseMigrationRepository.class);
+        DocumentRepository documents = mock(DocumentRepository.class);
+        DocumentTombstoneRepository tombstones = mock(DocumentTombstoneRepository.class);
+        RepositoryRecoveryActivityProbe probe = new RepositoryRecoveryActivityProbe(
+                ingest, eval, sparse, documents, tombstones);
+        UUID kbId = UUID.randomUUID();
+        when(tombstones.existsByKbIdAndReasonIn(eq(kbId), anyList())).thenReturn(true);
+
+        assertThat(probe.hasActiveWork(kbId)).isTrue();
+        verify(tombstones).existsByKbIdAndReasonIn(eq(kbId), argThat(reasons ->
+                reasons.contains("UPLOAD_WRITE_ARMED") && reasons.contains("UPLOAD_ABANDONED")));
     }
 }

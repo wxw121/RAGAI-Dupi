@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { createKnowledgeBase, deleteKnowledgeBase, listKnowledgeBases } from '@/api/knowledgeBase'
-import type { KnowledgeBase } from '@/types'
+import type { KnowledgeBase, OperationJobResponse } from '@/types'
 import { AppLayout } from '@/components/AppLayout'
+import { OperationProgress } from '@/components/OperationProgress'
 import { useToast } from '@/components/Toast'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -10,7 +11,7 @@ import { Dialog } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { formatDate } from '@/lib/utils'
-import { FileText, Loader2, MessageSquare, Plus, Trash2 } from 'lucide-react'
+import { FileText, Loader2, MessageSquare, Plus, Search, Trash2, X } from 'lucide-react'
 
 export function KbListPage({ onLogout }: { onLogout?: () => void }) {
   const navigate = useNavigate()
@@ -18,6 +19,13 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
   const [loading, setLoading] = useState(true)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [batchDeleting, setBatchDeleting] = useState(false)
+  const [batchConfirmOpen, setBatchConfirmOpen] = useState(false)
+  const [pendingDeleteIds, setPendingDeleteIds] = useState<Set<string>>(new Set())
+  const pendingDeleteIdsRef = useRef<Set<string>>(new Set())
+  const [deleteOperations, setDeleteOperations] = useState<Record<string, OperationJobResponse>>({})
+  const [searchQuery, setSearchQuery] = useState('')
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [chunkSize, setChunkSize] = useState(512)
@@ -26,20 +34,44 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
   const [retrievalMode, setRetrievalMode] = useState<'VECTOR' | 'HYBRID'>('VECTOR')
   const { showError, showSuccess } = useToast()
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  const load = useCallback(async (showLoading = true) => {
+    if (showLoading) setLoading(true)
     try {
       setKbs(await listKnowledgeBases())
+      return true
     } catch (e) {
       showError(e instanceof Error ? e.message : '加载失败')
+      return false
     } finally {
-      setLoading(false)
+      if (showLoading) setLoading(false)
     }
   }, [showError])
 
   useEffect(() => {
     load()
   }, [load])
+
+  const filteredKbs = useMemo(() => {
+    const query = searchQuery.trim().toLocaleLowerCase()
+    if (!query) return kbs
+    return kbs.filter((kb) => kb.name.toLocaleLowerCase().includes(query))
+  }, [kbs, searchQuery])
+  const isDeleteBlocked = (kbId: string) => pendingDeleteIds.has(kbId) || Boolean(deleteOperations[kbId])
+  const selectableFilteredKbs = filteredKbs.filter((kb) => !isDeleteBlocked(kb.id))
+
+  const markDeletesPending = (kbIds: string[]) => {
+    const next = new Set(pendingDeleteIdsRef.current)
+    kbIds.forEach((kbId) => next.add(kbId))
+    pendingDeleteIdsRef.current = next
+    setPendingDeleteIds(next)
+  }
+
+  const clearDeletesPending = (kbIds: string[]) => {
+    const next = new Set(pendingDeleteIdsRef.current)
+    kbIds.forEach((kbId) => next.delete(kbId))
+    pendingDeleteIdsRef.current = next
+    setPendingDeleteIds(next)
+  }
 
   const handleCreate = async () => {
     if (!name.trim()) return
@@ -69,28 +101,145 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
   const handleDelete = async (kb: KnowledgeBase, e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
+    if (pendingDeleteIdsRef.current.has(kb.id) || deleteOperations[kb.id]) return
     if (!confirm(`确定删除知识库「${kb.name}」？此操作不可恢复。`)) return
+    markDeletesPending([kb.id])
+    setSelectedIds((current) => {
+      const next = new Set(current)
+      next.delete(kb.id)
+      return next
+    })
     try {
-      await deleteKnowledgeBase(kb.id)
-      showSuccess('已删除')
-      await load()
+      const job = await deleteKnowledgeBase(kb.id)
+      setDeleteOperations((current) => ({ ...current, [kb.id]: job }))
+      clearDeletesPending([kb.id])
+      setSelectedIds((current) => {
+        const next = new Set(current)
+        next.delete(kb.id)
+        return next
+      })
+      showSuccess('删除任务已提交')
     } catch (e) {
+      clearDeletesPending([kb.id])
       showError(e instanceof Error ? e.message : '删除失败')
     }
+  }
+
+  const toggleSelection = (kbId: string) => {
+    if (pendingDeleteIdsRef.current.has(kbId) || deleteOperations[kbId]) return
+    setSelectedIds((current) => {
+      const next = new Set(current)
+      if (next.has(kbId)) next.delete(kbId)
+      else next.add(kbId)
+      return next
+    })
+  }
+
+  const toggleSelectAll = () => {
+    const allFilteredSelected = selectableFilteredKbs.length > 0
+      && selectableFilteredKbs.every((kb) => selectedIds.has(kb.id))
+    setSelectedIds(allFilteredSelected ? new Set() : new Set(selectableFilteredKbs.map((kb) => kb.id)))
+  }
+
+  const handleBatchDelete = async () => {
+    const selected = kbs.filter((kb) => selectedIds.has(kb.id)
+      && !pendingDeleteIdsRef.current.has(kb.id)
+      && !deleteOperations[kb.id])
+    if (selected.length === 0) return
+
+    const selectedKbIds = selected.map((kb) => kb.id)
+    markDeletesPending(selectedKbIds)
+    setBatchConfirmOpen(false)
+    setBatchDeleting(true)
+    const results = await Promise.allSettled(selected.map((kb) => Promise.resolve().then(() => deleteKnowledgeBase(kb.id))))
+    const failedIds = new Set(
+      selected.filter((_, index) => results[index].status === 'rejected').map((kb) => kb.id),
+    )
+    const jobs = selected.reduce<Record<string, OperationJobResponse>>((current, kb, index) => {
+      const result = results[index]
+      if (result.status === 'fulfilled') current[kb.id] = result.value
+      return current
+    }, {})
+    setDeleteOperations((current) => ({ ...current, ...jobs }))
+    clearDeletesPending(selectedKbIds)
+    const queuedCount = selected.length - failedIds.size
+    setSelectedIds(failedIds)
+    setBatchDeleting(false)
+
+    if (queuedCount > 0) showSuccess(`已提交 ${queuedCount} 个知识库删除任务`)
+    if (failedIds.size > 0) showError(`${failedIds.size} 个知识库删除失败，请重试`)
+  }
+
+  const completeDelete = async (kbId: string) => {
+    setSelectedIds((current) => {
+      const next = new Set(current)
+      next.delete(kbId)
+      return next
+    })
+    if (!await load(false)) throw new Error('Knowledge base refresh failed')
+    setDeleteOperations((current) => {
+      const next = { ...current }
+      delete next[kbId]
+      return next
+    })
+    showSuccess('知识库已删除')
   }
 
   return (
     <AppLayout onLogout={onLogout}>
       <div className="mx-auto max-w-6xl px-4 py-6 md:px-8">
-      <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+      <div className="mb-6 grid gap-4 md:grid-cols-[1fr_minmax(280px,480px)_1fr] md:items-center">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">知识库</h1>
           <p className="mt-1 text-sm text-muted-foreground">管理企业文档与 RAG 问答</p>
         </div>
-        <Button onClick={() => setDialogOpen(true)} className="w-full md:w-auto">
-          <Plus className="h-4 w-4" />
-          新建知识库
-        </Button>
+        {kbs.length > 0 ? (
+          <div className="relative w-full">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              name="knowledgeBaseSearch"
+              type="text"
+              inputMode="search"
+              value={searchQuery}
+              onChange={(event) => {
+                setSearchQuery(event.target.value)
+                setSelectedIds(new Set())
+              }}
+              placeholder="按名称搜索知识库"
+              aria-label="按名称搜索知识库"
+              className="h-11 pl-10 pr-10"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('')
+                  setSelectedIds(new Set())
+                }}
+                aria-label="清空搜索"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+        ) : <div />}
+        <div className="flex w-full justify-end gap-2 md:w-auto">
+          {kbs.length > 0 && (
+            <Button
+              variant="outline"
+              onClick={() => setBatchConfirmOpen(true)}
+              disabled={selectedIds.size === 0 || batchDeleting}
+            >
+              {batchDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+              批量删除{selectedIds.size > 0 ? ` (${selectedIds.size})` : ''}
+            </Button>
+          )}
+          <Button onClick={() => setDialogOpen(true)} className="flex-1 md:flex-none">
+            <Plus className="h-4 w-4" />
+            新建知识库
+          </Button>
+        </div>
       </div>
 
       {loading ? (
@@ -139,48 +288,115 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {kbs.map((kb) => (
-            <Card
-              key={kb.id}
-              className="group relative cursor-pointer rounded-2xl border-border bg-background transition-colors hover:bg-muted/40"
-              onClick={() => navigate(`/kb/${kb.id}`)}
-            >
-              <CardHeader>
-                <CardTitle className="pr-8">{kb.name}</CardTitle>
-                <CardDescription className="line-clamp-2">
-                  {kb.description || '暂无描述'}
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <p className="text-xs text-muted-foreground">创建于 {formatDate(kb.createdAt)}</p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  分块 {kb.chunkSize} / 重叠 {kb.chunkOverlap} / TopK {kb.topK}
-                </p>
-                <div className="mt-4 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
-                  <Button variant="outline" size="sm" onClick={() => navigate(`/kb/${kb.id}`)}>
-                    <FileText className="h-3.5 w-3.5" />
-                    管理文档
-                  </Button>
-                  <Button size="sm" onClick={() => navigate(`/kb/${kb.id}?tab=chat`)}>
-                    <MessageSquare className="h-3.5 w-3.5" />
-                    去问答
-                  </Button>
-                </div>
-              </CardContent>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="absolute right-2 top-2"
-                onClick={(e) => handleDelete(kb, e)}
+        <div>
+          {filteredKbs.length > 0 ? (
+            <>
+              <label className="mb-3 inline-flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={selectableFilteredKbs.length > 0 && selectableFilteredKbs.every((kb) => selectedIds.has(kb.id))}
+                  onChange={toggleSelectAll}
+                  disabled={selectableFilteredKbs.length === 0}
+                  className="h-4 w-4 rounded border-input accent-primary"
+                />
+                全选
+              </label>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {filteredKbs.map((kb) => (
+              <Card
+                key={kb.id}
+                className="group relative cursor-pointer rounded-2xl border-border bg-background transition-colors hover:bg-muted/40"
+                onClick={() => { if (!isDeleteBlocked(kb.id)) navigate(`/kb/${kb.id}`) }}
               >
-                <Trash2 className="h-4 w-4 text-destructive" />
+                <label
+                  className="absolute left-3 top-3 z-10 flex cursor-pointer items-center"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(kb.id)}
+                    onChange={() => toggleSelection(kb.id)}
+                    disabled={isDeleteBlocked(kb.id)}
+                    aria-label={`选择知识库 ${kb.name}`}
+                    className="h-4 w-4 rounded border-input accent-primary"
+                  />
+                </label>
+                <CardHeader>
+                  <CardTitle className="px-5">{kb.name}</CardTitle>
+                  <CardDescription className="line-clamp-2">
+                    {kb.description || '暂无描述'}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-xs text-muted-foreground">创建于 {formatDate(kb.createdAt)}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    分块 {kb.chunkSize} / 重叠 {kb.chunkOverlap} / TopK {kb.topK}
+                  </p>
+                  {deleteOperations[kb.id] && (
+                    <div className="mt-3" onClick={(event) => event.stopPropagation()}>
+                      <OperationProgress
+                        initialJob={deleteOperations[kb.id]}
+                        onCompleted={() => completeDelete(kb.id)}
+                      />
+                    </div>
+                  )}
+                  <div className="mt-4 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
+                    <Button variant="outline" size="sm" disabled={isDeleteBlocked(kb.id)} onClick={() => navigate(`/kb/${kb.id}`)}>
+                      <FileText className="h-3.5 w-3.5" />
+                      管理文档
+                    </Button>
+                    <Button size="sm" disabled={isDeleteBlocked(kb.id)} onClick={() => navigate(`/kb/${kb.id}?tab=chat`)}>
+                      <MessageSquare className="h-3.5 w-3.5" />
+                      去问答
+                    </Button>
+                  </div>
+                </CardContent>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="absolute right-2 top-2"
+                  disabled={isDeleteBlocked(kb.id)}
+                  onClick={(e) => handleDelete(kb, e)}
+                >
+                  <Trash2 className="h-4 w-4 text-destructive" />
+                </Button>
+              </Card>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div className="rounded-2xl border border-dashed border-border py-16 text-center">
+              <Search className="mx-auto h-8 w-8 text-muted-foreground" />
+              <p className="mt-3 font-medium">未找到匹配的知识库</p>
+              <p className="mt-1 text-sm text-muted-foreground">请尝试其他名称关键词</p>
+              <Button variant="outline" size="sm" className="mt-4" onClick={() => setSearchQuery('')}>
+                清空搜索
               </Button>
-            </Card>
-          ))}
+            </div>
+          )}
         </div>
       )}
       </div>
+
+      <Dialog
+        open={batchConfirmOpen}
+        onClose={() => setBatchConfirmOpen(false)}
+        title="批量删除知识库"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setBatchConfirmOpen(false)}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={() => void handleBatchDelete()} disabled={batchDeleting}>
+              确认删除
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm text-muted-foreground">
+          确定删除选中的 {selectedIds.size} 个知识库？此操作不可恢复。
+        </p>
+      </Dialog>
 
       <Dialog
         open={dialogOpen}
@@ -201,7 +417,7 @@ export function KbListPage({ onLogout }: { onLogout?: () => void }) {
         <div className="space-y-4">
           <div>
             <label className="mb-1 block text-sm font-medium">名称 *</label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：产品手册" />
+            <Input name="knowledgeBaseName" value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：产品手册" />
           </div>
           <div>
             <label className="mb-1 block text-sm font-medium">描述</label>

@@ -29,6 +29,14 @@ public class IngestJobProducer {
     private final RetrievalProfileRepository retrievalProfileRepository;
 
     public void enqueue(IngestJob job, KnowledgeBase kb, String objectKey, String fileName, String mimeType) {
+        enqueue(job, kb, objectKey, fileName, mimeType, ensureExecutionId(job));
+    }
+
+    void enqueue(IngestJob job, KnowledgeBase kb, String objectKey, String fileName, String mimeType,
+                 UUID executionId) {
+        if (executionId == null || !executionId.equals(job.getExecutionId())) {
+            throw new IllegalArgumentException("Ingest execution ID must match the durable job");
+        }
         assertQueueAccepting();
         try {
             Integer sparseProfileVersion = sparseMigrationRepository
@@ -49,7 +57,7 @@ public class IngestJobProducer {
             }
             IngestJobMessage message = IngestJobMessage.builder()
                     .jobId(job.getId().toString())
-                    .executionId(ensureExecutionId(job).toString())
+                    .executionId(executionId.toString())
                     .kbId(job.getKbId().toString())
                     .docId(job.getDocId().toString())
                     .objectKey(objectKey)

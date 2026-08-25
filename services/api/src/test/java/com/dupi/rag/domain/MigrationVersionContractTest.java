@@ -37,4 +37,17 @@ class MigrationVersionContractTest {
                 .contains("jsonb_array_length(expected_file_names) = 0")
                 .contains("jsonb_array_length(must_contain_any) = 0");
     }
+
+    @Test
+    void v27BackfillsOnlyUnambiguousDocumentNamesWithinTheSameKnowledgeBase() throws IOException {
+        String migration = Files.readString(Path.of(
+                "src/main/resources/db/migration/V27__rag_eval_document_identity.sql"));
+
+        assertThat(migration)
+                .contains("expected_document_id UUID")
+                .contains("expected_document_ids JSONB")
+                .contains("GROUP BY kb_id, file_name")
+                .contains("HAVING COUNT(*) = 1")
+                .contains("unique_documents.kb_id = cases.kb_id");
+    }
 }

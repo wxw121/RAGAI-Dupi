@@ -5,6 +5,7 @@ import type {
   Document,
   DocumentIndexDetail,
   IngestJob,
+  OperationJobResponse,
   UploadQuota,
 } from '@/types'
 
@@ -40,6 +41,16 @@ export function uploadDocuments(kbId: string, files: File[]): Promise<BatchDocum
   return apiUploadMany<BatchDocumentUploadResponse>(
     `/api/v1/knowledge-bases/${kbId}/documents/batch`,
     files,
+  )
+}
+
+export function uploadMarkdownPackage(
+  kbId: string,
+  file: File,
+): Promise<OperationJobResponse> {
+  return apiUpload<OperationJobResponse>(
+    `/api/v1/knowledge-bases/${kbId}/documents/markdown-package`,
+    file,
   )
 }
 

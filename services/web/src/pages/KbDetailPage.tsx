@@ -5,10 +5,10 @@ import {
   cancelIngestJob,
   listIngestJobs,
   listOpsMetadata,
-  listVectorCleanupTasks,
+  listKnowledgeBaseVectorCleanupTasks,
   reindexKnowledgeBase,
   retryIngestJob,
-  retryVectorCleanupTask,
+  retryKnowledgeBaseVectorCleanupTask,
   updateKnowledgeBaseRetrievalProfile,
 } from '@/api/knowledgeBase'
 import {
@@ -16,13 +16,16 @@ import {
   getDocumentIndexDetail,
   getUploadQuota,
   listDocuments,
+  uploadMarkdownPackage,
   uploadDocumentsGoverned,
 } from '@/api/documents'
+import { listChatSessions } from '@/api/chatSessions'
 import type {
   Document,
   DocumentIndexDetail,
   IngestJob,
   KnowledgeBase,
+  OperationJobResponse,
   OpsGuardrails,
   RetrievalIndexMode,
   UploadQuota,
@@ -35,6 +38,7 @@ import { DocumentIndexDetailPanel } from '@/components/DocumentIndexDetailPanel'
 import { RagEvalPanel } from '@/components/RagEvalPanel'
 import { RetrievalProfilePanel } from '@/components/RetrievalProfilePanel'
 import { RecoveryPanel } from '@/components/RecoveryPanel'
+import { OperationProgress } from '@/components/OperationProgress'
 import { SparseMigrationPanel } from '@/components/SparseMigrationPanel'
 import { UploadZone } from '@/components/UploadZone'
 import { useToast } from '@/components/Toast'
@@ -70,6 +74,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const [searchParams, setSearchParams] = useSearchParams()
   const [kb, setKb] = useState<KnowledgeBase | null>(null)
   const [documents, setDocuments] = useState<Document[]>([])
+  const [sessionCount, setSessionCount] = useState(0)
   const [ingestJobs, setIngestJobs] = useState<IngestJob[]>([])
   const [vectorCleanupTasks, setVectorCleanupTasks] = useState<VectorCleanupTask[]>([])
   const [guardrails, setGuardrails] = useState<OpsGuardrails | null>(null)
@@ -86,6 +91,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const [savingRetrievalProfile, setSavingRetrievalProfile] = useState(false)
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
   const [cancellingJobId, setCancellingJobId] = useState<string | null>(null)
+  const [markdownImportOperation, setMarkdownImportOperation] = useState<OperationJobResponse | null>(null)
   const [retryingCleanupTaskId, setRetryingCleanupTaskId] = useState<string | null>(null)
   const [indexDetail, setIndexDetail] = useState<DocumentIndexDetail | null>(null)
   const [indexDetailLoadingId, setIndexDetailLoadingId] = useState<string | null>(null)
@@ -106,7 +112,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   }, [kbId, showError])
 
   const loadDocs = useCallback(async (signal?: AbortSignal) => {
-    if (!kbId) return
+    if (!kbId) return false
     try {
       const docs = await listDocuments(kbId, signal)
       setDocuments(docs)
@@ -114,14 +120,16 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       setJobStages(Object.fromEntries(
         docs.map((document) => [document.id, document.currentJob?.stage ?? null]),
       ))
+      return true
     } catch (e) {
-      if (isAbortError(e)) return
+      if (isAbortError(e)) return false
       showError(e instanceof Error ? e.message : '加载文档失败')
+      return false
     }
   }, [kbId, showError])
 
   const loadJobs = useCallback(async (signal?: AbortSignal) => {
-    if (!kbId) return
+    if (!kbId) return false
     try {
       const jobs = await listIngestJobs(kbId, signal)
       setIngestJobs(jobs)
@@ -138,19 +146,31 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
             showError(job.errorMessage ?? `Ingest job ${job.id.slice(0, 8)} failed`)
           }
         })
+      return true
     } catch (e) {
-      if (isAbortError(e)) return
+      if (isAbortError(e)) return false
       showError(e instanceof Error ? e.message : '加载摄入任务失败')
+      return false
     }
   }, [kbId, showError])
 
   const loadVectorCleanupTasks = useCallback(async () => {
+    if (!kbId) return
     try {
-      setVectorCleanupTasks(await listVectorCleanupTasks())
+      setVectorCleanupTasks(await listKnowledgeBaseVectorCleanupTasks(kbId))
     } catch (e) {
       showError(e instanceof Error ? e.message : '加载向量清理任务失败')
     }
-  }, [showError])
+  }, [kbId, showError])
+
+  const loadSessionCount = useCallback(async () => {
+    if (!kbId) return
+    try {
+      setSessionCount((await listChatSessions(kbId)).length)
+    } catch (e) {
+      showError(e instanceof Error ? e.message : '加载会话数量失败')
+    }
+  }, [kbId, showError])
 
   const loadGuardrails = useCallback(async () => {
     try {
@@ -164,9 +184,11 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const loadUploadQuota = useCallback(async (signal?: AbortSignal) => {
     try {
       setUploadQuota(await getUploadQuota(signal))
+      return true
     } catch (e) {
-      if (isAbortError(e)) return
+      if (isAbortError(e)) return false
       setUploadQuota(null)
+      return false
     }
   }, [])
 
@@ -175,6 +197,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       setLoading(true)
       await loadKb()
       await loadDocs()
+      await loadSessionCount()
       await loadJobs()
       await loadVectorCleanupTasks()
       await loadGuardrails()
@@ -182,7 +205,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       setLoading(false)
     }
     init()
-  }, [loadGuardrails, loadKb, loadDocs, loadJobs, loadUploadQuota, loadVectorCleanupTasks])
+  }, [loadGuardrails, loadKb, loadDocs, loadJobs, loadSessionCount, loadUploadQuota, loadVectorCleanupTasks])
 
   useEffect(() => {
     const urlTab = searchParams.get('tab')
@@ -193,10 +216,11 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
 
   useEffect(() => {
     const hasPending = documents.some(
-      (d) => d.status === 'PENDING' || d.status === 'PROCESSING',
+      (d) => d.status === 'UPLOADING' || d.status === 'PENDING' || d.status === 'PROCESSING',
     )
     const hasRunningJob = ingestJobs.some(
-      (job) => job.status === 'PENDING'
+      (job) => job.status === 'UPLOAD_INTENT'
+        || job.status === 'PENDING'
         || job.status === 'PROCESSING'
         || job.status === 'CANCEL_REQUESTED',
     )
@@ -268,6 +292,16 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
       )
     } else if (succeeded > 0) {
       showSuccess(`成功 ${succeeded} 个，失败 ${failed} 个`)
+    }
+  }
+
+  const handleMarkdownPackageUpload = async (file: File) => {
+    if (!kbId || markdownImportOperation) return
+    try {
+      setMarkdownImportOperation(await uploadMarkdownPackage(kbId, file))
+      showSuccess('Markdown 资源包导入已提交')
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Markdown 资源包上传失败')
     }
   }
 
@@ -348,7 +382,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
   const handleRetryCleanupTask = async (task: VectorCleanupTask) => {
     setRetryingCleanupTaskId(task.id)
     try {
-      await retryVectorCleanupTask(task.id)
+      await retryKnowledgeBaseVectorCleanupTask(kbId!, task.id)
       showSuccess('已重试向量清理任务')
       await loadVectorCleanupTasks()
     } catch (e) {
@@ -435,7 +469,7 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
               <MessageSquare className="h-4 w-4" />
               问答
               <span className="ml-1 rounded-full bg-secondary px-1.5 py-0.5 text-[11px] font-normal text-muted-foreground">
-                {completedCount}
+                {sessionCount}
               </span>
             </Button>
             <Button
@@ -520,7 +554,8 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
               <Button
                 variant={!kb.embeddingConfigCurrent ? 'default' : 'outline'}
                 size="sm"
-                disabled={reindexing || documents.length === 0}
+                disabled={reindexing || documents.length === 0
+                  || documents.some((document) => document.status === 'UPLOADING' || document.status === 'DELETING')}
                 onClick={handleReindex}
               >
                 {reindexing ? (
@@ -663,9 +698,24 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
           </div>
           <UploadZone
             onUpload={handleUpload}
+            onPackageUpload={handleMarkdownPackageUpload}
+            disabled={Boolean(markdownImportOperation)}
             guardrails={guardrails}
             quota={uploadQuota}
           />
+          {markdownImportOperation && (
+            <div className="mt-4">
+              <OperationProgress
+                initialJob={markdownImportOperation}
+                onCompleted={async () => {
+                  const refreshed = await Promise.all([loadDocs(), loadJobs(), loadUploadQuota()])
+                  if (refreshed.some((result) => !result)) throw new Error('Markdown import refresh failed')
+                  setMarkdownImportOperation(null)
+                  showSuccess('Markdown 资源包导入完成')
+                }}
+              />
+            </div>
+          )}
           <DocTable
             documents={documents}
             jobStages={jobStages}
@@ -683,7 +733,11 @@ export function KbDetailPage({ onLogout }: { onLogout?: () => void }) {
           {indexDetail && <DocumentIndexDetailPanel detail={indexDetail} />}
         </div>
       ) : tab === 'chat' ? (
-        <ChatPanel kbId={kbId!} completedDocCount={completedCount} />
+        <ChatPanel
+          kbId={kbId!}
+          completedDocCount={completedCount}
+          onSessionCountChange={setSessionCount}
+        />
       ) : (
         <><RagEvalPanel kbId={kbId!} /><RetrievalProfilePanel kbId={kbId!} /><SparseMigrationPanel kbId={kbId!} /></>
       )}

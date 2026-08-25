@@ -18,6 +18,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.Duration;
@@ -26,6 +27,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -35,6 +39,46 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class IngestJobServiceTest {
+
+    @Test
+    void queuedRecoveryRepositoryLocksJobsBeforeCheckingRunnableState() throws Exception {
+        var method = IngestJobRepository.class.getMethod(
+                "findTop20ByStatusAndStageOrderByCreatedAtAsc", IngestJobStatus.class, IngestStage.class);
+        var lock = method.getAnnotation(org.springframework.data.jpa.repository.Lock.class);
+
+        assertThat(lock).isNotNull();
+        assertThat(lock.value()).isEqualTo(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
+    }
+
+    @Test
+    void deletionCommittedAfterUnlockedPrecheckStillStopsReindexBeforeJobsOrOutbox() throws Exception {
+        UUID kbId = UUID.randomUUID();
+        CountDownLatch intentReached = new CountDownLatch(1);
+        CountDownLatch deletionCommitted = new CountDownLatch(1);
+        doAnswer(call -> {
+            intentReached.countDown();
+            if (!deletionCommitted.await(2, TimeUnit.SECONDS)) {
+                throw new AssertionError("deletion did not reach the row-lock boundary");
+            }
+            throw new com.dupi.rag.exception.OperationConflictException("deletion is in progress");
+        }).when(profileIndexStateService).lockForReindex(kbId, "default", "model", 256);
+
+        var executor = Executors.newSingleThreadExecutor();
+        try {
+            var reindex = executor.submit(() -> assertThatThrownBy(
+                    () -> service().reindexKnowledgeBase(kbId, "model", 256))
+                    .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class));
+            assertThat(intentReached.await(2, TimeUnit.SECONDS)).isTrue();
+            deletionCommitted.countDown();
+            reindex.get(2, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        verify(ingestJobRepository, never()).save(any());
+        verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
+        verify(documentRepository, never()).findByKbIdOrderByCreatedAtDesc(kbId);
+    }
 
     @Mock IngestJobRepository ingestJobRepository;
     @Mock DocumentRepository documentRepository;
@@ -55,12 +99,13 @@ class IngestJobServiceTest {
         LlmProperties llmProperties = new LlmProperties();
         llmProperties.getEmbedding().setModel("current-model");
         llmProperties.getEmbedding().setDimension(1024);
+        lenient().when(knowledgeBaseService.findSystemForUpdateOrThrow(any(UUID.class)))
+                .thenAnswer(call -> KnowledgeBase.builder().id(call.getArgument(0)).build());
         return new IngestJobService(
                 ingestJobRepository,
                 documentRepository,
                 chunkRepository,
                 knowledgeBaseService,
-                ingestJobProducer,
                 ingestOutboxService,
                 documentTombstoneService,
                 redisQueueProperties,
@@ -83,7 +128,7 @@ class IngestJobServiceTest {
         job.setStatus(IngestJobStatus.PROCESSING);
         Document doc = doc(kbId, docId);
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         IngestStatusUpdate update = IngestStatusUpdate.builder()
                 .jobId(jobId.toString())
                 .docId(docId.toString())
@@ -111,7 +156,7 @@ class IngestJobServiceTest {
         job.setStatus(IngestJobStatus.PROCESSING);
         Document doc = doc(kbId, docId);
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
 
         service().handleStatusUpdate(IngestStatusUpdate.builder()
                 .jobId(jobId.toString())
@@ -133,7 +178,7 @@ class IngestJobServiceTest {
         UUID payloadDocId = UUID.randomUUID();
         UUID jobId = UUID.randomUUID();
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job(kbId, jobDocId, jobId)));
-        when(documentRepository.findById(payloadDocId)).thenReturn(Optional.of(doc(kbId, payloadDocId)));
+        when(documentRepository.findByIdForUpdate(payloadDocId)).thenReturn(Optional.of(doc(kbId, payloadDocId)));
 
         assertThatThrownBy(() -> service().handleStatusUpdate(IngestStatusUpdate.builder()
                 .jobId(jobId.toString())
@@ -145,15 +190,16 @@ class IngestJobServiceTest {
     }
 
     @Test
-    void handleStatusUpdateLocksJobBeforeCheckingCallbackSequence() {
+    void handleStatusUpdateAcquiresKbThenJobThenDocumentLocks() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         UUID jobId = UUID.randomUUID();
         IngestJob job = job(kbId, docId, jobId);
         job.setStatus(IngestJobStatus.PROCESSING);
         Document doc = doc(kbId, docId);
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
         when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
 
         service().handleStatusUpdate(IngestStatusUpdate.builder()
                 .jobId(jobId.toString())
@@ -162,8 +208,11 @@ class IngestJobServiceTest {
                 .stage("parsing")
                 .build());
 
-        verify(ingestJobRepository).findByIdForUpdate(jobId);
-        verify(ingestJobRepository, never()).findById(jobId);
+        var order = inOrder(ingestJobRepository, knowledgeBaseService, documentRepository);
+        order.verify(ingestJobRepository).findById(jobId);
+        order.verify(knowledgeBaseService).findSystemForUpdateOrThrow(kbId);
+        order.verify(ingestJobRepository).findByIdForUpdate(jobId);
+        order.verify(documentRepository).findByIdForUpdate(docId);
     }
 
     @Test
@@ -177,19 +226,26 @@ class IngestJobServiceTest {
         Document doc = doc(kbId, docId);
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
-        when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
+        IngestJobService sut = service();
+        when(knowledgeBaseService.findSystemForUpdateOrThrow(kbId)).thenReturn(kb);
 
-        var response = service().retry(jobId);
+        var response = sut.retry(jobId);
 
         assertThat(response.getRetryCount()).isEqualTo(3);
         assertThat(response.getStatus()).isEqualTo(IngestJobStatus.PENDING);
         assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PENDING);
         verify(ingestOutboxService).record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
         verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
+        var order = inOrder(ingestJobRepository, knowledgeBaseService, documentRepository);
+        order.verify(ingestJobRepository).findById(jobId);
+        order.verify(knowledgeBaseService).findSystemForUpdateOrThrow(kbId);
+        order.verify(ingestJobRepository).findByIdForUpdate(jobId);
+        order.verify(documentRepository).findByIdForUpdate(docId);
 
         job.setRetryCount(3);
-        assertThatThrownBy(() -> service().retry(jobId)).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> sut.retry(jobId)).isInstanceOf(IllegalStateException.class);
     }
 
     @Test
@@ -208,9 +264,7 @@ class IngestJobServiceTest {
         Document doc = doc(kbId, docId);
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
-        when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
-
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         var response = service().retry(jobId);
 
         assertThat(response.getStatus()).isEqualTo(IngestJobStatus.PENDING);
@@ -230,6 +284,7 @@ class IngestJobServiceTest {
         IngestJob job = job(kbId, docId, jobId);
         job.setExecutionId(executionId);
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc(kbId, docId)));
 
         var response = service().claim(jobId, executionId, "worker-a", Duration.ofSeconds(45));
 
@@ -246,6 +301,28 @@ class IngestJobServiceTest {
     }
 
     @Test
+    void delayedClaimCannotCrossCommittedDocumentDeletionFence() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setExecutionId(executionId);
+        Document deleting = doc(kbId, docId);
+        deleting.setStatus(DocumentStatus.DELETING);
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(deleting));
+
+        assertThatThrownBy(() -> service().claim(
+                jobId, executionId, "delayed-worker", Duration.ofSeconds(30)))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
+                .hasMessageContaining("deletion");
+
+        assertThat(job.getStatus()).isEqualTo(IngestJobStatus.PENDING);
+        verify(ingestJobRepository, never()).save(job);
+    }
+
+    @Test
     void claimRejectsGeneratedExecutionMismatchAndNonQueuedJob() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
@@ -253,6 +330,7 @@ class IngestJobServiceTest {
         IngestJob job = job(kbId, docId, jobId);
         job.setExecutionId(null);
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc(kbId, docId)));
 
         assertThatThrownBy(() -> service().claim(
                 jobId, UUID.randomUUID(), "worker-a", Duration.ofSeconds(30)))
@@ -279,7 +357,7 @@ class IngestJobServiceTest {
         job.setStatus(IngestJobStatus.PROCESSING);
         job.setStage(IngestStage.EMBEDDING);
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc(kbId, docId)));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc(kbId, docId)));
 
         var response = service().refreshLease(jobId, executionId, "worker-b", null);
 
@@ -320,6 +398,7 @@ class IngestJobServiceTest {
         job.setExecutionId(executionId);
         job.setStatus(IngestJobStatus.PROCESSING);
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc(kbId, docId)));
 
         assertThat(service().isCancellationRequested(jobId, executionId)).isFalse();
         assertThat(service().isCancellationRequested(jobId, UUID.randomUUID())).isTrue();
@@ -328,6 +407,27 @@ class IngestJobServiceTest {
         assertThat(service().isCancellationRequested(jobId, executionId)).isTrue();
 
         job.setStatus(IngestJobStatus.COMPLETED);
+        assertThat(service().isCancellationRequested(jobId, executionId)).isTrue();
+    }
+
+    @Test
+    void refreshAndCancellationProbeFenceADeletingDocument() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID executionId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setExecutionId(executionId);
+        job.setStatus(IngestJobStatus.PROCESSING);
+        Document deleting = doc(kbId, docId);
+        deleting.setStatus(DocumentStatus.DELETING);
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(deleting));
+
+        assertThatThrownBy(() -> service().refreshLease(
+                jobId, executionId, "worker", Duration.ofSeconds(30)))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
+                .hasMessageContaining("deletion");
         assertThat(service().isCancellationRequested(jobId, executionId)).isTrue();
     }
 
@@ -381,14 +481,17 @@ class IngestJobServiceTest {
         Document doc = doc(kbId, docId);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
 
         var response = service().cancelForKnowledgeBase(kbId, jobId);
 
         assertThat(response.getStatus()).isEqualTo(IngestJobStatus.CANCELLED);
         assertThat(job.getStage()).isEqualTo(IngestStage.CANCELLED);
         assertThat(doc.getStatus()).isEqualTo(DocumentStatus.CANCELLED);
-        verify(ingestOutboxService).cancelPendingForJob(jobId, "ingest cancelled by user");
+        var order = inOrder(ingestJobRepository, documentRepository, ingestOutboxService);
+        order.verify(ingestJobRepository).findByIdForUpdate(jobId);
+        order.verify(documentRepository).findByIdForUpdate(docId);
+        order.verify(ingestOutboxService).cancelPendingForJob(jobId, "ingest cancelled by user");
         verify(failureNotificationService, never()).recordTerminalFailure(any(), any());
         verify(ingestJobRepository).save(job);
         verify(documentRepository).save(doc);
@@ -406,7 +509,7 @@ class IngestJobServiceTest {
         doc.setStatus(DocumentStatus.PROCESSING);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
 
         var response = service().cancelForKnowledgeBase(kbId, jobId);
 
@@ -425,12 +528,84 @@ class IngestJobServiceTest {
         Document doc = doc(kbId, docId);
         when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
         when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
 
         service().cancelForKnowledgeBase(kbId, jobId);
 
         verify(ingestJobRepository).findByIdForUpdate(jobId);
         verify(ingestJobRepository, never()).findById(jobId);
+    }
+
+    @Test
+    void cancelRejectsUploadIntentWithoutHidingItFromActivityProbe() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setStatus(IngestJobStatus.UPLOAD_INTENT);
+        job.setStage(IngestStage.UPLOAD_PENDING);
+        Document doc = doc(kbId, docId);
+        doc.setStatus(DocumentStatus.UPLOADING);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
+
+        assertThatThrownBy(() -> service().cancelForKnowledgeBase(kbId, jobId))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
+                .hasMessageContaining("upload");
+
+        assertThat(job.getStatus()).isEqualTo(IngestJobStatus.UPLOAD_INTENT);
+        assertThat(job.getStage()).isEqualTo(IngestStage.UPLOAD_PENDING);
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.UPLOADING);
+        verify(ingestJobRepository, never()).save(any());
+        verify(documentRepository, never()).save(any());
+        verify(ingestOutboxService, never()).cancelPendingForJob(any(), anyString());
+    }
+
+    @Test
+    void cancelCannotOverwriteDocumentDeletionTruthAfterBeginReleasedItsLocks() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        Document deleting = doc(kbId, docId);
+        deleting.setStatus(DocumentStatus.DELETING);
+        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(deleting));
+
+        assertThatThrownBy(() -> service().cancelForKnowledgeBase(kbId, jobId))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
+                .hasMessageContaining("deletion");
+
+        assertThat(deleting.getStatus()).isEqualTo(DocumentStatus.DELETING);
+        assertThat(job.getStatus()).isEqualTo(IngestJobStatus.PENDING);
+        verify(ingestJobRepository, never()).save(any());
+        verify(documentRepository, never()).save(any());
+        verify(ingestOutboxService, never()).cancelPendingForJob(any(), anyString());
+    }
+
+    @Test
+    void retryCannotPublishNewExecutionForDeletingDocument() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setStatus(IngestJobStatus.FAILED);
+        Document deleting = doc(kbId, docId);
+        deleting.setStatus(DocumentStatus.DELETING);
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(deleting));
+
+        assertThatThrownBy(() -> service().retry(jobId))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
+                .hasMessageContaining("deletion");
+
+        assertThat(job.getStatus()).isEqualTo(IngestJobStatus.FAILED);
+        assertThat(deleting.getStatus()).isEqualTo(DocumentStatus.DELETING);
+        verify(ingestJobRepository, never()).save(any());
+        verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -440,15 +615,15 @@ class IngestJobServiceTest {
         UUID jobId = UUID.randomUUID();
         IngestJob job = job(kbId, docId, jobId);
         job.setStatus(IngestJobStatus.PROCESSING);
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
         when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
-        when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(KnowledgeBase.builder().id(kbId).build());
 
         assertThatThrownBy(() -> service().retry(jobId))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("failed or dead-letter");
 
         verify(ingestJobRepository).findByIdForUpdate(jobId);
-        verify(ingestJobRepository, never()).findById(jobId);
+        verify(ingestJobRepository).findById(jobId);
         verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
     }
 
@@ -464,7 +639,7 @@ class IngestJobServiceTest {
         job.setCallbackSequence(5L);
         Document doc = doc(kbId, docId);
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
 
         var staleExecution = service().handleStatusUpdate(IngestStatusUpdate.builder()
                 .jobId(jobId.toString())
@@ -499,7 +674,7 @@ class IngestJobServiceTest {
         job.setStatus(IngestJobStatus.PROCESSING);
         Document doc = doc(kbId, docId);
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
 
         var missingExecution = service().handleStatusUpdate(IngestStatusUpdate.builder()
                 .jobId(jobId.toString())
@@ -535,7 +710,7 @@ class IngestJobServiceTest {
         Document doc = doc(kbId, docId);
         doc.setStatus(DocumentStatus.COMPLETED);
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
 
         var ignored = service().handleStatusUpdate(IngestStatusUpdate.builder()
                 .jobId(jobId.toString())
@@ -559,8 +734,9 @@ class IngestJobServiceTest {
         UUID pendingJobId = UUID.randomUUID();
         IngestJob pending = job(kbId, pendingDocId, pendingJobId);
         Document pendingDoc = doc(kbId, pendingDocId);
+        when(ingestJobRepository.findById(pendingJobId)).thenReturn(Optional.of(pending));
         when(ingestJobRepository.findByIdForUpdate(pendingJobId)).thenReturn(Optional.of(pending));
-        when(documentRepository.findById(pendingDocId)).thenReturn(Optional.of(pendingDoc));
+        when(documentRepository.findByIdForUpdate(pendingDocId)).thenReturn(Optional.of(pendingDoc));
 
         var unclaimedTerminal = service().handleStatusUpdate(IngestStatusUpdate.builder()
                 .jobId(pendingJobId.toString())
@@ -574,8 +750,9 @@ class IngestJobServiceTest {
         processing.setStatus(IngestJobStatus.PROCESSING);
         Document processingDoc = doc(kbId, processingDocId);
         processingDoc.setStatus(DocumentStatus.PROCESSING);
+        when(ingestJobRepository.findById(processingJobId)).thenReturn(Optional.of(processing));
         when(ingestJobRepository.findByIdForUpdate(processingJobId)).thenReturn(Optional.of(processing));
-        when(documentRepository.findById(processingDocId)).thenReturn(Optional.of(processingDoc));
+        when(documentRepository.findByIdForUpdate(processingDocId)).thenReturn(Optional.of(processingDoc));
 
         var backwards = service().handleStatusUpdate(IngestStatusUpdate.builder()
                 .jobId(processingJobId.toString())
@@ -607,8 +784,9 @@ class IngestJobServiceTest {
         job.setStage(IngestStage.COMPLETED);
         Document doc = doc(kbId, docId);
         doc.setStatus(DocumentStatus.COMPLETED);
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
         when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
 
         var ignored = service().handleStatusUpdate(IngestStatusUpdate.builder()
                 .jobId(jobId.toString())
@@ -641,7 +819,7 @@ class IngestJobServiceTest {
         job.setCallbackSequence(0L);
         Document doc = doc(kbId, docId);
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
 
         var processing = service().handleStatusUpdate(IngestStatusUpdate.builder()
                 .jobId(jobId.toString())
@@ -698,7 +876,7 @@ class IngestJobServiceTest {
         requested.setStatus(IngestJobStatus.CANCEL_REQUESTED);
         Document doc = doc(kbId, docId);
         when(ingestJobRepository.findById(requestedJobId)).thenReturn(Optional.of(requested));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
 
         var response = service().cancelForKnowledgeBase(kbId, requestedJobId);
 
@@ -717,15 +895,15 @@ class IngestJobServiceTest {
         job.setStatus(IngestJobStatus.FAILED);
         Document doc = doc(kbId, docId);
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
-        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(knowledgeBaseService.findForUpdateOrThrow(kbId)).thenReturn(kb);
         when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
 
         var response = service().retryForKnowledgeBase(kbId, jobId);
 
         assertThat(response.getId()).isEqualTo(jobId);
         assertThat(response.getStatus()).isEqualTo(IngestJobStatus.PENDING);
-        verify(knowledgeBaseService).findOrThrow(kbId);
+        verify(knowledgeBaseService).findForUpdateOrThrow(kbId);
         verify(knowledgeBaseService, never()).findSystemOrThrow(kbId);
         verify(ingestOutboxService).record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
         verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
@@ -745,7 +923,7 @@ class IngestJobServiceTest {
     }
 
     @Test
-    void recoverQueuedJobsReenqueuesPersistedJobsAndMarksDocumentsProcessing() {
+    void recoverQueuedJobsBackfillsLegacyOutboxWithoutPublishingInsideTheTransaction() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         UUID jobId = UUID.randomUUID();
@@ -754,15 +932,37 @@ class IngestJobServiceTest {
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
 
         int recovered = service().recoverQueuedJobs();
 
         assertThat(recovered).isEqualTo(1);
-        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PROCESSING);
-        verify(ingestJobProducer).enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PENDING);
+        verify(ingestOutboxService).record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
         verify(documentRepository).save(doc);
+    }
+
+    @Test
+    void recoverQueuedJobsLeavesDurableOutboxWorkExclusivelyToTheDispatcher() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        Document doc = doc(kbId, docId);
+        when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
+                IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(job));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
+        when(ingestOutboxService.hasDurableRecord(jobId)).thenReturn(true);
+
+        assertThat(service().recoverQueuedJobs()).isZero();
+
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PENDING);
+        verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
+        verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -786,7 +986,7 @@ class IngestJobServiceTest {
         when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED)).thenAnswer(ignored ->
                 job.getStatus() == IngestJobStatus.PENDING ? List.of(job) : List.of());
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
 
         int recovered = service().recoverQueuedJobs();
@@ -823,7 +1023,7 @@ class IngestJobServiceTest {
                 eq(IngestJobStatus.CANCEL_REQUESTED), any(Instant.class))).thenReturn(List.of(job));
         when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of());
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
 
         int recovered = service().recoverQueuedJobs();
 
@@ -852,8 +1052,10 @@ class IngestJobServiceTest {
         processingDoc.setStatus(DocumentStatus.PROCESSING);
         when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(missingDocJob, processingDocJob));
-        when(documentRepository.findById(missingDocId)).thenReturn(Optional.empty());
-        when(documentRepository.findById(processingDocId)).thenReturn(Optional.of(processingDoc));
+        when(ingestJobRepository.findByIdForUpdate(missingDocJob.getId())).thenReturn(Optional.of(missingDocJob));
+        when(ingestJobRepository.findByIdForUpdate(processingDocJob.getId())).thenReturn(Optional.of(processingDocJob));
+        when(documentRepository.findByIdForUpdate(missingDocId)).thenReturn(Optional.empty());
+        when(documentRepository.findByIdForUpdate(processingDocId)).thenReturn(Optional.of(processingDoc));
 
         int recovered = service().recoverQueuedJobs();
 
@@ -875,6 +1077,12 @@ class IngestJobServiceTest {
     }
 
     @Test
+    void scheduledRecoveryEntryPointRunsInsideTransaction() throws NoSuchMethodException {
+        assertThat(IngestJobService.class.getMethod("recoverQueuedJobsOnSchedule")
+                .isAnnotationPresent(Transactional.class)).isTrue();
+    }
+
+    @Test
     void recoverQueuedJobsOnScheduleLogsSuccessfulRecoveryPath() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
@@ -883,12 +1091,14 @@ class IngestJobServiceTest {
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(ingestJobRepository.findByIdForUpdate(job.getId())).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
 
         service().recoverQueuedJobsOnSchedule();
 
-        verify(ingestJobProducer).enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        verify(ingestOutboxService).record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        verify(ingestJobProducer, never()).enqueue(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -900,10 +1110,11 @@ class IngestJobServiceTest {
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(ingestJobRepository.findByIdForUpdate(job.getId())).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
         doThrow(new IllegalStateException())
-                .when(ingestJobProducer).enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+                .when(ingestOutboxService).record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
 
         assertThat(service().recoverQueuedJobs()).isZero();
 
@@ -920,10 +1131,11 @@ class IngestJobServiceTest {
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
-        doThrow(new IllegalStateException("redis down"))
-                .when(ingestJobProducer).enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        doThrow(new IllegalStateException("outbox down"))
+                .when(ingestOutboxService).record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
 
         int recovered = service().recoverQueuedJobs();
 
@@ -945,10 +1157,11 @@ class IngestJobServiceTest {
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         when(ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED)).thenReturn(List.of(job));
-        when(documentRepository.findById(docId)).thenReturn(Optional.of(doc));
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(doc));
         when(knowledgeBaseService.findSystemOrThrow(kbId)).thenReturn(kb);
-        doThrow(new IllegalStateException("redis down"))
-                .when(ingestJobProducer).enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+        doThrow(new IllegalStateException("outbox down"))
+                .when(ingestOutboxService).record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
 
         int recovered = service().recoverQueuedJobs();
 
@@ -956,7 +1169,7 @@ class IngestJobServiceTest {
         assertThat(job.getRetryCount()).isEqualTo(3);
         assertThat(job.getStatus()).isEqualTo(IngestJobStatus.DEAD_LETTER);
         assertThat(job.getStage()).isEqualTo(IngestStage.DEAD_LETTER);
-        assertThat(job.getErrorMessage()).contains("redis down");
+        assertThat(job.getErrorMessage()).contains("outbox down");
         assertThat(doc.getStatus()).isEqualTo(DocumentStatus.FAILED);
         assertThat(doc.getErrorMessage()).contains("dead-letter");
         verify(ingestJobRepository).save(job);
@@ -977,7 +1190,12 @@ class IngestJobServiceTest {
         Document second = doc(kbId, secondDocId);
         second.setObjectKey("kb/b.md");
         second.setFileName("b.md");
-        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(profileIndexStateService.lockForReindex(kbId, "default", "current-model", 1024))
+                .thenAnswer(call -> {
+                    kb.setEmbeddingModel(call.getArgument(2));
+                    kb.setEmbeddingDimension(call.getArgument(3));
+                    return kb;
+                });
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(first, second));
 
         var responses = service().reindexKnowledgeBase(kbId, "current-model", 1024);
@@ -1005,6 +1223,95 @@ class IngestJobServiceTest {
     }
 
     @Test
+    void reindexRejectsUploadingDocumentBeforeResetOrOutboxPublication() {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
+        Document uploading = doc(kbId, UUID.randomUUID());
+        uploading.setStatus(DocumentStatus.UPLOADING);
+        when(profileIndexStateService.lockForReindex(kbId, "default", "new", 256)).thenReturn(kb);
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(uploading));
+
+        assertThatThrownBy(() -> service().reindexKnowledgeBase(kbId, "new", 256))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
+                .hasMessageContaining("upload");
+
+        verify(profileIndexStateService, never()).resetForReindex(any(), anyList());
+        verify(ingestJobRepository, never()).save(any());
+        verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void reindexRejectsDeletingDocumentBeforeResetOrOutboxPublication() {
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
+        Document deleting = doc(kbId, UUID.randomUUID());
+        deleting.setStatus(DocumentStatus.DELETING);
+        when(profileIndexStateService.lockForReindex(kbId, "default", "new", 256)).thenReturn(kb);
+        when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(deleting));
+
+        assertThatThrownBy(() -> service().reindexKnowledgeBase(kbId, "new", 256))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class)
+                .hasMessageContaining("deletion");
+
+        assertThat(deleting.getStatus()).isEqualTo(DocumentStatus.DELETING);
+        verify(profileIndexStateService, never()).resetForReindex(any(), anyList());
+        verify(ingestJobRepository, never()).save(any());
+        verify(ingestOutboxService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void expiredCancellationCannotFinalizeAcrossDocumentDeletionBoundary() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        IngestJob cancelling = job(kbId, docId, UUID.randomUUID());
+        cancelling.setStatus(IngestJobStatus.CANCEL_REQUESTED);
+        cancelling.setLeaseExpiresAt(Instant.now().minusSeconds(1));
+        Document deleting = doc(kbId, docId);
+        deleting.setStatus(DocumentStatus.DELETING);
+        when(ingestJobRepository.findTop20ByStatusAndLeaseExpiresAtBeforeOrderByUpdatedAtAsc(
+                any(IngestJobStatus.class), any(Instant.class))).thenAnswer(call ->
+                call.getArgument(0) == IngestJobStatus.CANCEL_REQUESTED
+                        ? List.of(cancelling)
+                        : List.of());
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(deleting));
+
+        assertThat(service().recoverQueuedJobs()).isZero();
+
+        assertThat(cancelling.getStatus()).isEqualTo(IngestJobStatus.CANCEL_REQUESTED);
+        assertThat(deleting.getStatus()).isEqualTo(DocumentStatus.DELETING);
+        verify(vectorCleanupTaskService, never()).enqueueDocument(docId);
+        verify(ingestJobRepository, never()).save(cancelling);
+        verify(documentRepository, never()).save(deleting);
+    }
+
+    @Test
+    void ingestCallbackCannotRestoreDeletingDocumentOrChunks() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        IngestJob job = job(kbId, docId, jobId);
+        job.setStatus(IngestJobStatus.PROCESSING);
+        Document deleting = doc(kbId, docId);
+        deleting.setStatus(DocumentStatus.DELETING);
+        when(ingestJobRepository.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        when(ingestJobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(documentRepository.findByIdForUpdate(docId)).thenReturn(Optional.of(deleting));
+
+        var result = service().handleStatusUpdate(IngestStatusUpdate.builder()
+                .jobId(jobId.toString()).docId(docId.toString())
+                .status("completed").stage("completed")
+                .chunks(List.of(new IngestStatusUpdate.ChunkPayload(
+                        UUID.randomUUID().toString(), 0, "stale", 1, Map.of(), "vector")))
+                .build());
+
+        assertThat(result.isIgnored()).isTrue();
+        assertThat(deleting.getStatus()).isEqualTo(DocumentStatus.DELETING);
+        assertThat(job.getStatus()).isEqualTo(IngestJobStatus.PROCESSING);
+        verify(chunkRepository, never()).deleteByDocId(any());
+        verify(chunkRepository, never()).save(any());
+    }
+
+    @Test
     void reindexKnowledgeBaseDefaultOverloadUsesConfiguredEmbeddingAndKeepsRecoveryStateWhenQueueFails() {
         UUID kbId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
@@ -1014,7 +1321,8 @@ class IngestJobServiceTest {
                 .embeddingDimension(128)
                 .build();
         Document doc = doc(kbId, docId);
-        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(profileIndexStateService.lockForReindex(kbId, "default", "current-model", 1024))
+                .thenReturn(kb);
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc));
         doThrow(new IllegalStateException("redis unavailable"))
                 .when(ingestOutboxService).record(any(IngestJob.class), eq(kb), eq(doc.getObjectKey()), eq(doc.getFileName()), eq(doc.getMimeType()));
@@ -1036,7 +1344,8 @@ class IngestJobServiceTest {
         UUID docId = UUID.randomUUID();
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).build();
         Document doc = doc(kbId, docId);
-        when(knowledgeBaseService.findOrThrow(kbId)).thenReturn(kb);
+        when(profileIndexStateService.lockForReindex(kbId, "default", "model", 256))
+                .thenReturn(kb);
         when(documentRepository.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(doc));
         var responses = service().reindexKnowledgeBase(kbId, "model", 256);
 
@@ -1133,6 +1442,25 @@ class IngestJobServiceTest {
         assertThat(response.getDiagnosis().getNextAction()).contains("队列").contains("Worker");
         assertThat(response.getDiagnosis().isRetryable()).isFalse();
         assertThat(response.getDiagnosis().getLastUpdatedSeconds()).isGreaterThanOrEqualTo(1_200);
+    }
+
+    @Test
+    void getLatestDiagnosisKeepsUploadIntentOutOfQueuedRecoveryGuidance() {
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        IngestJob intent = job(kbId, docId, UUID.randomUUID());
+        intent.setStatus(IngestJobStatus.UPLOAD_INTENT);
+        intent.setStage(IngestStage.UPLOAD_PENDING);
+        Document uploading = doc(kbId, docId);
+        uploading.setStatus(DocumentStatus.UPLOADING);
+        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(docId)).thenReturn(Optional.of(intent));
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(uploading));
+
+        var diagnosis = service().getLatestByDoc(docId).getDiagnosis();
+
+        assertThat(diagnosis.getSummary()).contains("上传");
+        assertThat(diagnosis.getNextAction()).doesNotContain("Redis", "队列");
+        assertThat(diagnosis.isRetryable()).isFalse();
     }
 
     @Test

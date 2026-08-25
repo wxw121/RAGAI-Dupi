@@ -4,6 +4,8 @@ import com.dupi.rag.config.RecoveryProperties;
 import com.dupi.rag.domain.entity.*;
 import com.dupi.rag.domain.enums.RecoveryArchiveStatus;
 import com.dupi.rag.domain.enums.RecoveryItemStatus;
+import com.dupi.rag.domain.enums.RecoveryRestoreStatus;
+import com.dupi.rag.exception.RecoveryConflictException;
 import com.dupi.rag.dto.recovery.VectorSnapshotPage;
 import com.dupi.rag.repository.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -11,11 +13,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.InOrder;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.ByteArrayInputStream;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
 import java.util.Optional;
 import java.util.UUID;
 import java.io.ByteArrayOutputStream;
@@ -30,8 +35,10 @@ import static org.mockito.Mockito.*;
 class RecoveryArchiveServiceTest {
     @Mock RecoveryArchiveRepository archives;
     @Mock RecoveryArchiveItemRepository items;
+    @Mock RecoveryRestoreJobRepository restoreJobs;
     @Mock KnowledgeBaseService knowledgeBases;
     @Mock DocumentRepository documents;
+    @Mock DocumentAssetRepository documentAssets;
     @Mock ChunkRepository chunks;
     @Mock RagEvalCaseRepository evalCases;
     @Mock RagQualityPolicyRepository qualityPolicies;
@@ -51,7 +58,7 @@ class RecoveryArchiveServiceTest {
         properties.setBucket("dupi-recovery");
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         service = new RecoveryArchiveService(
-                archives, items, knowledgeBases, documents, chunks, evalCases, qualityPolicies, profiles,
+                archives, items, restoreJobs, knowledgeBases, documents, documentAssets, chunks, evalCases, qualityPolicies, profiles,
                 documentStorage, recoveryStorage, maintenance, properties,
                 new RecoveryManifestService(mapper), recoveryVectors, mapper, auditLogService);
         lenient().when(recoveryVectors.readDense(any(), any(), anyInt()))
@@ -69,7 +76,7 @@ class RecoveryArchiveServiceTest {
     void createBindsTenantSourceRevisionAndStablePrefix() {
         UUID kbId = UUID.randomUUID();
         KnowledgeBase kb = knowledgeBase(kbId, Instant.parse("2026-07-15T12:00:00Z"));
-        when(knowledgeBases.findOrThrow(kbId)).thenReturn(kb);
+        when(knowledgeBases.findForUpdateOrThrow(kbId)).thenReturn(kb);
         when(archives.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
 
         RecoveryArchive archive = service.create(kbId, null);
@@ -80,6 +87,7 @@ class RecoveryArchiveServiceTest {
         assertThat(archive.getCreatedBy()).isEqualTo("system");
         assertThat(archive.getObjectPrefix()).isEqualTo(
                 "archives/tenant-a/" + archive.getId() + "/");
+        verify(knowledgeBases).findForUpdateOrThrow(kbId);
     }
 
     @Test
@@ -90,10 +98,14 @@ class RecoveryArchiveServiceTest {
         RecoveryArchive archive = archive(archiveId, kb);
         Document document = Document.builder().id(UUID.randomUUID()).kbId(kbId).fileName("guide.md")
                 .objectKey("tenant-a/kb/guide.md").mimeType("text/markdown").fileSize(5L).build();
+        DocumentAsset asset = DocumentAsset.builder().id(UUID.randomUUID()).kbId(kbId).docId(document.getId())
+                .relativePath("../image/diagram.png").objectKey("source/assets/diagram.png")
+                .mimeType("image/png").fileName("diagram.png").fileSize(5L).build();
         Chunk chunk = Chunk.builder().id(UUID.randomUUID()).kbId(kbId).docId(document.getId())
                 .chunkIndex(0).content("guide").build();
         RagEvalCase evalCase = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
-                .caseKey("case").query("guide").minHits(1).topK(3).build();
+                .caseKey("case").query("guide").minHits(1).topK(3)
+                .expectedDocumentId(document.getId()).expectedFileName(document.getFileName()).build();
         RetrievalProfile profile = RetrievalProfile.builder().id(UUID.randomUUID()).kbId(kbId)
                 .name("hybrid").version(2).vectorCandidateCount(10).sparseCandidateCount(10)
                 .rrfConstant(60).rerankCandidateLimit(5).finalTopK(3).build();
@@ -102,19 +114,25 @@ class RecoveryArchiveServiceTest {
         when(archives.findById(archiveId)).thenReturn(Optional.of(archive));
         when(knowledgeBases.findSystemOrThrow(kbId)).thenReturn(kb);
         when(documents.findByKbIdOrderByCreatedAtDesc(kbId)).thenReturn(List.of(document));
+        when(documentAssets.findByKbId(kbId)).thenReturn(List.of(asset));
         when(chunks.findByKbIdOrderByChunkIndexAsc(kbId)).thenReturn(List.of(chunk));
         when(evalCases.findByKbIdOrderByCreatedAtAsc(kbId)).thenReturn(List.of(evalCase));
         when(profiles.findByKbIdOrderByVersionDesc(kbId)).thenReturn(List.of(profile));
         when(documentStorage.download(document.getObjectKey()))
                 .thenReturn(new ByteArrayInputStream("guide".getBytes()));
+        when(documentStorage.download(asset.getObjectKey()))
+                .thenReturn(new ByteArrayInputStream("image".getBytes()));
         when(items.findByArchiveIdAndItemKey(any(), anyString())).thenReturn(Optional.empty());
         when(items.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(archives.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        Map<String, byte[]> capturedPayloads = new HashMap<>();
         when(recoveryStorage.put(anyString(), eq(archiveId), anyString(), any()))
                 .thenAnswer(invocation -> {
                     String relative = invocation.getArgument(2);
+                    byte[] bytes = ((java.io.InputStream) invocation.getArgument(3)).readAllBytes();
+                    capturedPayloads.put(relative, bytes);
                     return new StoredRecoveryObject("dupi-recovery",
-                            "archives/tenant-a/" + archiveId + "/" + relative, 5, "abc123");
+                            "archives/tenant-a/" + archiveId + "/" + relative, bytes.length, "abc123");
                 });
         when(recoveryStorage.verify(any())).thenReturn(true);
         when(recoveryVectors.sparseCollection(kbId, 2)).thenReturn("chunks_sparse_2");
@@ -132,9 +150,13 @@ class RecoveryArchiveServiceTest {
         verify(maintenance).acquire(kbId, archiveId);
         verify(archives, atLeast(2)).findById(archiveId);
         verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("objects/" + document.getId() + "/guide.md"), any());
+        verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("records/document-assets.ndjson"), any());
+        verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("assets/" + asset.getId() + "/diagram.png"), any());
         verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("vectors/dense.ndjson"), any());
         verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("vectors/profile.ndjson"), any());
         verify(recoveryStorage).put(eq("tenant-a"), eq(archiveId), eq("vectors/sparse.ndjson"), any());
+        assertThat(new String(capturedPayloads.get("records/evaluation-cases.ndjson"), java.nio.charset.StandardCharsets.UTF_8))
+                .contains("\"expectedDocumentId\":\"" + document.getId() + "\"");
         verify(maintenance).release(archiveId, RecoveryArchiveStatus.COMPLETED);
     }
 
@@ -233,6 +255,51 @@ class RecoveryArchiveServiceTest {
                 .hasMessageContaining("completed");
         assertThatThrownBy(() -> service.getSystem(UUID.randomUUID()))
                 .hasMessageContaining("Recovery archive not found");
+        TenantContext.clear();
+    }
+
+    @Test
+    void deleteRemovesCompletedRestoreHistoryBeforeArchive() {
+        UUID kbId = UUID.randomUUID();
+        RecoveryArchive archive = archive(UUID.randomUUID(), knowledgeBase(kbId, Instant.now()));
+        archive.setStatus(RecoveryArchiveStatus.COMPLETED);
+        RecoveryRestoreJob restore = RecoveryRestoreJob.builder()
+                .id(UUID.randomUUID()).archiveId(archive.getId()).tenantId("tenant-a")
+                .status(RecoveryRestoreStatus.COMPLETED).build();
+        TenantContext.setTenantId("tenant-a");
+        when(knowledgeBases.findOrThrow(kbId)).thenReturn(knowledgeBase(kbId, Instant.now()));
+        when(archives.findByIdAndTenantId(archive.getId(), "tenant-a")).thenReturn(Optional.of(archive));
+        when(restoreJobs.findByTenantIdAndArchiveIdOrderByCreatedAtDesc("tenant-a", archive.getId()))
+                .thenReturn(List.of(restore));
+
+        service.delete(kbId, archive.getId());
+
+        InOrder order = inOrder(restoreJobs, recoveryStorage, archives);
+        order.verify(restoreJobs).deleteAll(List.of(restore));
+        order.verify(restoreJobs).flush();
+        order.verify(recoveryStorage).deleteArchive("tenant-a", archive.getId());
+        order.verify(archives).delete(archive);
+        TenantContext.clear();
+    }
+
+    @Test
+    void deleteRejectsArchiveWithUnfinishedRestore() {
+        UUID kbId = UUID.randomUUID();
+        RecoveryArchive archive = archive(UUID.randomUUID(), knowledgeBase(kbId, Instant.now()));
+        archive.setStatus(RecoveryArchiveStatus.COMPLETED);
+        RecoveryRestoreJob restore = RecoveryRestoreJob.builder()
+                .id(UUID.randomUUID()).archiveId(archive.getId()).tenantId("tenant-a")
+                .status(RecoveryRestoreStatus.FAILED).build();
+        TenantContext.setTenantId("tenant-a");
+        when(knowledgeBases.findOrThrow(kbId)).thenReturn(knowledgeBase(kbId, Instant.now()));
+        when(archives.findByIdAndTenantId(archive.getId(), "tenant-a")).thenReturn(Optional.of(archive));
+        when(restoreJobs.findByTenantIdAndArchiveIdOrderByCreatedAtDesc("tenant-a", archive.getId()))
+                .thenReturn(List.of(restore));
+
+        assertThatThrownBy(() -> service.delete(kbId, archive.getId()))
+                .isInstanceOf(RecoveryConflictException.class)
+                .hasMessageContaining("1 restore job");
+        verify(recoveryStorage, never()).deleteArchive(anyString(), any());
         TenantContext.clear();
     }
 

@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 
 @Service
 public class RagQualityGateService {
@@ -118,13 +119,23 @@ public class RagQualityGateService {
                 .filter(value -> !value.isBlank())
                 .toList();
         boolean hasAdditionalSources = !additionalSources.isEmpty();
+        List<UUID> stableSources = definition.expectedDocumentIds() == null
+                ? List.of()
+                : definition.expectedDocumentIds().stream()
+                        .filter(java.util.Objects::nonNull)
+                        .toList();
+        if (stableSources.isEmpty() && definition.expectedDocumentId() != null) {
+            stableSources = List.of(definition.expectedDocumentId());
+        }
         boolean hasNonDefaultCategory = definition.category() != null
                 && definition.category() != RagEvalCaseCategory.REAL_QUERY;
         StringBuilder canonical = new StringBuilder();
         append(canonical, normalizeText(definition.query()));
         append(canonical, Integer.toString(definition.minHits()));
         append(canonical, Integer.toString(definition.topK()));
-        if (!hasAdditionalSources && !hasNonDefaultCategory) {
+        if (!stableSources.isEmpty()) {
+            stableSources.forEach(documentId -> append(canonical, "expectedDocumentId=" + documentId));
+        } else if (!hasAdditionalSources && !hasNonDefaultCategory) {
             append(canonical, normalizeText(definition.expectedFileName()));
         } else {
             expectedSourceUnion(definition.expectedFileName(), additionalSources)
@@ -186,11 +197,19 @@ public class RagQualityGateService {
 
     public record CaseDefinition(String query, int minHits, int topK, String expectedFileName,
                                  List<String> mustContainAny, RagEvalCaseCategory category,
-                                 List<String> expectedFileNames) {
+                                 List<String> expectedFileNames, UUID expectedDocumentId,
+                                 List<UUID> expectedDocumentIds) {
         public CaseDefinition(String query, int minHits, int topK, String expectedFileName,
                               List<String> mustContainAny) {
             this(query, minHits, topK, expectedFileName, mustContainAny,
-                    RagEvalCaseCategory.REAL_QUERY, List.of());
+                    RagEvalCaseCategory.REAL_QUERY, List.of(), null, List.of());
+        }
+
+        public CaseDefinition(String query, int minHits, int topK, String expectedFileName,
+                              List<String> mustContainAny, RagEvalCaseCategory category,
+                              List<String> expectedFileNames) {
+            this(query, minHits, topK, expectedFileName, mustContainAny,
+                    category, expectedFileNames, null, List.of());
         }
     }
 

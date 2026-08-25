@@ -148,7 +148,7 @@ Worker 的 `embed_batch` 会按 `EMBEDDING_BATCH_SIZE`（默认 `32`）拆分 Em
 
 ```
 
-`/retrieve` 响应包含 `diagnostics`（检索模式、TopK、命中数、embedding 模型/维度、fallback 原因）。Chat HTTP 与 SSE 失败统一返回 `ApiErrorResponse`（`error`、`message`、`stage`、`suggestion`、`requestId`）；同步错误和流式入口都区分 retrieval/llm 阶段，前端按 retrieval/llm/auth/unknown 展示可执行建议并兼容旧纯文本错误事件。V1.2 的 `RAG 评估` 使用 PostgreSQL `rag_eval_cases`、`rag_eval_runs`、`rag_eval_run_results` 持久化用户用例和最近 10 次运行历史，空库自动写入内置用例，每库最多 100 条；知识库级悲观锁避免初始化与创建并发冲突。评估运行需要 `MAINTENANCE + KB_READ`，状态为 `RUNNING/COMPLETED/FAILED`，可选择 Rerank，并保存命中、文件、token、检索模式、embedding、失败原因及运行失败信息；脚本侧评估仍保留为独立 CI/运维入口。
+`/retrieve` 响应包含 `diagnostics`（检索模式、TopK、命中数、embedding 模型/维度、fallback 原因）。Chat HTTP 与 SSE 失败统一返回 `ApiErrorResponse`（`error`、`message`、`stage`、`suggestion`、`requestId`）；同步错误和流式入口都区分 retrieval/llm 阶段，前端按 retrieval/llm/auth/unknown 展示可执行建议并兼容旧纯文本错误事件。`RAG 评估` 使用 PostgreSQL `rag_eval_cases`、`rag_eval_runs`、`rag_eval_run_results` 持久化用户用例和最近 10 次运行历史；空用例集保持为空，用户需按知识库真实文档显式创建用例，每库最多 100 条。评估运行需要 `MAINTENANCE + KB_READ`，状态为 `RUNNING/COMPLETED/FAILED`，可选择 Rerank，并保存命中、文件、token、检索模式、embedding、失败原因及运行失败信息；脚本侧评估仍保留为独立 CI/运维入口。
 
 ### 混合检索与 Rerank
 
@@ -215,3 +215,15 @@ V1.2 JSON导出仍然是一种元数据迁移格式。它不包含原始对象�
 | `worker` | 内部网络 | Python 摄入与检索增强 |
 
 默认 Compose 仅将 `web:80` 映射到宿主机 `8080`，其余服务使用 Docker 内部网络通信；如需数据库、MinIO、Milvus、API 或 Worker 直连调试，应通过临时 override 文件显式暴露端口。
+
+## 持久化资源工作流
+
+PostgreSQL 是耗时资源变更的最终事实源。知识库删除、Recovery ZIP 导入和 Markdown 包导入返回带 `operation_jobs` 的 `202 Accepted`，不再把请求线程完成等同于业务完成。Runner 使用 token/epoch 与 lease 围栏领取到期工作，以幂等 `operation_steps` 记录进度，状态依次在 `PREPARED`、`RUNNING`、`RETRY_WAIT`、`COMPENSATING`、`COMPLETED`、`FAILED` 中转换。具有 `KB_READ` 权限时可通过 `GET /api/v1/operations/{jobId}` 查看脱敏进度；只有失败作业能开启新的人工 retry epoch，且需要 `MAINTENANCE` 与 `KB_READ`。
+
+领域可见性与 operation 状态在同一事务中提交。知识库在清理前先进入 `DELETING`，正常读取不会观察到半删除资源。Markdown 导入先准备隐藏文档行和确定性对象目标；所有对象验证后，一个有围栏的 publish 事务同时公开全部文档并完成操作。Recovery 导入对新归档身份采用相同原则。submit、retry、complete、compensate、fail 审计只与真实的围栏状态转换同事务写入。
+
+外部对象 I/O 不持有数据库锁。intake 在 staging I/O 前获取持久化 owner token、epoch 和可续租 lease。Flyway V28 新增 `operation_staging_attempts`，以唯一对象 key 和 `ACTIVE`、`CLEANUP_PENDING`、`CLEANED` 状态跨崩溃保留 cleanup truth。租约接管会原子围栏旧 owner，并把其 active attempts 转为待清理。保留扫描把遗弃且不可运行的 intake 转入补偿；有界 replayer 执行 checked delete，并在对象暂时不存在时保留任务，防止迟到 writer 产生无追踪孤儿。
+
+Flyway V27 将 RAG 评估身份从可变文件名迁移为文档 UUID，只回填同一知识库内能唯一解析的名称；有歧义的旧用例有意保持未解析，等待复核或重新生成。V25 引入持久化 operation job/step，V26 增加文档导入可见性状态，V28 增加 staging attempts；生产升级必须按顺序应用并 validate。
+
+可执行的 PostgreSQL V24→V28 迁移演练与 MinIO 故障/重启矩阵见 [Recovery 手册](v1.4-recovery-runbook.md)。

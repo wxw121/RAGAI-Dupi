@@ -47,12 +47,25 @@ public class ProfileIndexStateService {
         return knowledgeBaseRepository.findById(kbId).isPresent() && !isV2Ready(kbId);
     }
 
+    /**
+     * Establishes the reindex mutation intent under the tenant-owned knowledge-base row lock.
+     * Callers must use the returned managed aggregate for every subsequent reindex mutation.
+     */
+    @Transactional
+    public KnowledgeBase lockForReindex(
+            UUID kbId, String tenantId, String embeddingModel, int embeddingDimension) {
+        KnowledgeBase locked = knowledgeBaseRepository
+                .findByIdAndTenantIdForUpdateAnyStatus(kbId, tenantId)
+                .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found: " + kbId));
+        KnowledgeBaseLifecyclePolicy.requireReady(locked, kbId);
+        locked.setEmbeddingModel(embeddingModel);
+        locked.setEmbeddingDimension(embeddingDimension);
+        return locked;
+    }
+
     @Transactional
     public void activateV2Index(KnowledgeBase kb) {
-        KnowledgeBase locked = knowledgeBaseRepository.findByIdForUpdate(kb.getId())
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "Knowledge base not found: " + kb.getId()
-                ));
+        KnowledgeBase locked = lockReady(kb);
         locked.setProfileIndexActivated(true);
         knowledgeBaseRepository.save(locked);
         kb.setProfileIndexActivated(true);
@@ -60,10 +73,7 @@ public class ProfileIndexStateService {
 
     @Transactional
     public void bumpRevision(KnowledgeBase kb) {
-        KnowledgeBase locked = knowledgeBaseRepository.findByIdForUpdate(kb.getId())
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "Knowledge base not found: " + kb.getId()
-                ));
+        KnowledgeBase locked = lockReady(kb);
         long current = locked.getIndexRevision() == null ? 0L : locked.getIndexRevision();
         locked.setIndexRevision(current + 1);
         knowledgeBaseRepository.save(locked);
@@ -74,6 +84,16 @@ public class ProfileIndexStateService {
     public void resetForReindex(KnowledgeBase kb, List<Document> documents) {
         documents.forEach(document -> document.setIndexSchemaVersion(1));
         documentRepository.saveAll(documents);
-        bumpRevision(kb);
+        long current = kb.getIndexRevision() == null ? 0L : kb.getIndexRevision();
+        kb.setIndexRevision(current + 1);
+        knowledgeBaseRepository.save(kb);
+    }
+
+    private KnowledgeBase lockReady(KnowledgeBase kb) {
+        KnowledgeBase locked = knowledgeBaseRepository
+                .findByIdAndTenantIdForUpdateAnyStatus(kb.getId(), kb.getTenantId())
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Knowledge base not found: " + kb.getId()));
+        return KnowledgeBaseLifecyclePolicy.requireReady(locked, kb.getId());
     }
 }

@@ -76,9 +76,15 @@ See [the V1.4.1 release runbook](docs/v1.4.1-release-runbook.md) and the design�
 
 ## V1.4 Verifiable Recovery
 
-Operators with `KB_RECOVERY` use the **Recovery** tab to create, inspect, download, retry, and delete archives, and to create, retry, or abandon restores. Archive objects are sealed under `archives/{tenantId}/{archiveId}/` in a private recovery bucket; `manifest.json` is written last. A target stays hidden as `RESTORING` until objects, records, dense/sparse vectors, counts, schemas, and checksums verify.
+Operators with `KB_RECOVERY` use the **Recovery** tab to create, inspect, download, import, retry, and delete archives, and to create, retry, or abandon restores. A downloaded Recovery ZIP can be uploaded with **Import ZIP**; the service validates `manifest.json`, tenant/knowledge-base identity, required items, and every file's size and SHA-256 before staging a durable import. After its operation completes, the verified archive is exposed under a new internal archive ID as `COMPLETED`. New archives also capture image assets referenced by Markdown documents and remap them into the restore target. Restored knowledge bases are named `source (restored · Archive {first 8 archive ID characters} · yyyy-MM-dd HH:mm:ss.SSS UTC)`, so repeated restores remain distinguishable. Archive objects are sealed under `archives/{tenantId}/{archiveId}/` in a private recovery bucket. A target stays hidden as `RESTORING` until objects, records, dense/sparse vectors, counts, schemas, and checksums verify.
 
-Routes are below `/api/v1/knowledge-bases/{kbId}/recovery`. Commands return `202 Accepted`; the Web panel polls non-terminal jobs every three seconds. See [the recovery runbook](docs/v1.4-recovery-runbook.md).
+Long-running destructive and package-import requests use a durable operation contract. Knowledge-base deletion, Recovery ZIP import, and Markdown package import return `202 Accepted` with an operation job. Poll `GET /api/v1/operations/{jobId}` with `KB_READ`; the status is one of `PREPARED`, `RUNNING`, `RETRY_WAIT`, `COMPENSATING`, `COMPLETED`, or `FAILED`, and the response includes step progress and sanitized failure details. Only a `FAILED` operation can be retried with `POST /api/v1/operations/{jobId}/retry`, which requires `MAINTENANCE` and `KB_READ`. Deleting a knowledge base first moves it to `DELETING`, making it unavailable to normal reads while idempotent cleanup continues.
+
+Recovery and Markdown intake bytes are staged under an owner token, epoch, and lease before an operation becomes runnable. Flyway V28 stores every unique staging attempt as `ACTIVE`, `CLEANUP_PENDING`, or `CLEANED`; expired intake is moved to bounded compensation after `OPERATION_STAGING_RETENTION_HOURS` (values below 1 are clamped to 1), and the cleanup replayer uses checked deletion so a late writer cannot leave an untracked object. `OPERATION_STAGING_CLEANUP_LIMIT` is also clamped to at least 1. Markdown metadata remains invisible until every target object is verified and the publish transaction commits; compensation removes prepared metadata and objects instead of exposing a partial package.
+
+RAG evaluation cases now persist expected document UUIDs rather than relying on mutable file names. Flyway V27 backfills only names that resolve to exactly one document in the same knowledge base; ambiguous legacy cases remain unresolved and must be reviewed or regenerated.
+
+Routes are below `/api/v1/knowledge-bases/{kbId}/recovery`. Background archive/restore commands and durable ZIP import return `202 Accepted`. The Web panel polls non-terminal jobs every three seconds. See [the recovery runbook](docs/en/v1.4-recovery-runbook.md).
 
 | Variable | Default | Purpose |
 |---|---:|---|
@@ -86,6 +92,12 @@ Routes are below `/api/v1/knowledge-bases/{kbId}/recovery`. Commands return `202
 | `DUPI_RECOVERY_QUIESCENCE_TIMEOUT_SECONDS` | `300` | Wait for active KB mutations |
 | `DUPI_RECOVERY_PAGE_SIZE` | `500` | Bounded vector snapshot page size |
 | `DUPI_RECOVERY_MAX_CONCURRENT_JOBS` | `2` | Bounded archive/restore concurrency |
+| `DUPI_MULTIPART_MAX_FILE_SIZE` / `DUPI_MULTIPART_MAX_REQUEST_SIZE` | `1GB` | API per-file and per-request upload limits; the reverse proxy also allows 1 GiB |
+| `DUPI_RECOVERY_MAX_IMPORT_ZIP_BYTES` | `1073741824` | Maximum compressed Recovery ZIP size |
+| `DUPI_RECOVERY_MAX_IMPORT_UNCOMPRESSED_BYTES` | `8589934592` | Maximum total uncompressed ZIP size |
+| `DUPI_RECOVERY_MAX_IMPORT_ENTRY_BYTES` | `4294967296` | Maximum uncompressed size of one ZIP entry |
+| `DUPI_RECOVERY_MAX_IMPORT_ENTRIES` | `20000` | Maximum ZIP file-entry count |
+| `DUPI_RECOVERY_MAX_IMPORT_COMPRESSION_RATIO` | `100` | Maximum ZIP compression ratio |
 
 ### V1.4.0 Release Gate
 
@@ -213,7 +225,7 @@ Open **http://localhost:8080** in the browser
 1. **Create a New Knowledge Base** → Select vector search or hybrid search, and click the card to enter the details
 2. **Document Management** → Upload a file, wait for status `COMPLETED`, then click the View button to inspect objects, ingest tasks, total chunk count, up to 20 chunk samples, and index readiness status
 3. **Intelligent Q&A** → Ask questions based on ingested documents (`CHAT_API_KEY` and `EMBEDDING_API_KEY` need to be configured)
-4. **RAG Evaluation** → Manage persistent use cases (automatically create built-in use cases for empty libraries, with a maximum of 100 cases per library), select whether to enable Rerank, run evaluations, and inspect the latest 10 runs plus per-case diagnostics
+4. **RAG Evaluation** → Create and manage persistent cases against the knowledge base's actual documents (an empty case set stays empty; maximum 100 cases per knowledge base), select whether to enable Rerank, run evaluations, and inspect the latest 10 runs plus per-case diagnostics
 
 4. Verification
 

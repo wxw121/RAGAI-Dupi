@@ -1,9 +1,9 @@
 package com.dupi.rag.service;
 
 import com.dupi.rag.client.MilvusVectorService;
+import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.IngestJob;
-import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.entity.UploadQuotaReservation;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
@@ -13,15 +13,14 @@ import com.dupi.rag.dto.BatchDocumentUploadResponse;
 import com.dupi.rag.dto.BatchDocumentUploadResult;
 import com.dupi.rag.dto.DocumentResponse;
 import com.dupi.rag.dto.IngestJobResponse;
+import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.exception.ResourceNotFoundException;
-import com.dupi.rag.repository.ChunkRepository;
+import com.dupi.rag.exception.UploadIdempotencyConflictException;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
-import com.dupi.rag.repository.RetrievalProfileRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -41,19 +40,19 @@ public class DocumentService {
 
     private final DocumentRepository documentRepository;
     private final IngestJobRepository ingestJobRepository;
-    private final ChunkRepository chunkRepository;
     private final KnowledgeBaseService knowledgeBaseService;
     private final MinioStorageService minioStorageService;
     private final MilvusVectorService milvusVectorService;
     private final IngestJobProducer ingestJobProducer;
-    private final IngestOutboxService ingestOutboxService;
     private final DocumentTombstoneService documentTombstoneService;
     private final VectorCleanupTaskService vectorCleanupTaskService;
     private final AuditLogService auditLogService;
-    private final RetrievalProfileRepository retrievalProfileRepository;
     private final KnowledgeBaseMaintenanceService maintenanceService;
     private final UploadQuotaService uploadQuotaService;
-    private final ProfileIndexStateService profileIndexStateService;
+    private final DocumentAssetService documentAssetService;
+    private final DocumentUploadIntentService uploadIntents;
+    private final UploadAttemptLeaseCoordinator uploadLeases;
+    private final DocumentDeletionPersistenceService documentDeletions;
 
     public DocumentResponse upload(UUID kbId, MultipartFile file) {
         return upload(kbId, file, null);
@@ -61,19 +60,19 @@ public class DocumentService {
 
     public DocumentResponse upload(UUID kbId, MultipartFile file, String idempotencyKey) {
         maintenanceService.assertMutationAllowed(kbId);
-        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
-        return upload(kb, kbId, file, idempotencyKey);
+        knowledgeBaseService.findOrThrow(kbId);
+        return performUpload(kbId, file, idempotencyKey);
     }
 
     public BatchDocumentUploadResponse uploadBatch(UUID kbId, List<MultipartFile> files) {
         maintenanceService.assertMutationAllowed(kbId);
-        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
+        knowledgeBaseService.findOrThrow(kbId);
         if (files == null || files.isEmpty()) {
             throw new IllegalArgumentException("Files are empty");
         }
 
         List<BatchDocumentUploadResult> results = files.stream()
-                .map(file -> uploadOneForBatch(kb, kbId, file))
+                .map(file -> uploadOneForBatch(kbId, file))
                 .toList();
         int succeeded = (int) results.stream().filter(BatchDocumentUploadResult::isSuccess).count();
         return BatchDocumentUploadResponse.builder()
@@ -84,13 +83,13 @@ public class DocumentService {
                 .build();
     }
 
-    private BatchDocumentUploadResult uploadOneForBatch(KnowledgeBase kb, UUID kbId, MultipartFile file) {
+    private BatchDocumentUploadResult uploadOneForBatch(UUID kbId, MultipartFile file) {
         String fileName = file != null && file.getOriginalFilename() != null ? file.getOriginalFilename() : "unknown";
         try {
             return BatchDocumentUploadResult.builder()
                     .fileName(fileName)
                     .success(true)
-                    .document(upload(kb, kbId, file, null))
+                    .document(performUpload(kbId, file, null))
                     .build();
         } catch (Exception e) {
             return BatchDocumentUploadResult.builder()
@@ -101,7 +100,7 @@ public class DocumentService {
         }
     }
 
-    private DocumentResponse upload(KnowledgeBase kb, UUID kbId, MultipartFile file, String idempotencyKey) {
+    private DocumentResponse performUpload(UUID kbId, MultipartFile file, String idempotencyKey) {
         if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("File is empty");
         }
@@ -131,64 +130,72 @@ public class DocumentService {
                 .createdAt(now)
                 .updatedAt(now)
                 .build();
-        boolean objectUploaded = false;
-        IngestJob job = null;
-        boolean jobSaved = false;
+        IngestJob job = IngestJob.builder()
+                .id(UUID.randomUUID())
+                .kbId(kbId)
+                .docId(doc.getId())
+                .status(IngestJobStatus.PENDING)
+                .stage(IngestStage.QUEUED)
+                .createdAt(now)
+                .updatedAt(now)
+                .build();
+        boolean intentPrepared = false;
+        boolean writerLeaseAcquired = false;
+        boolean objectWriteAttempted = false;
+        DocumentResponse response;
         try {
-            documentRepository.save(doc);
-            profileIndexStateService.bumpRevision(kb);
-            uploadQuotaService.refreshAttemptLease(reservation);
-            minioStorageService.upload(objectKey, file.getInputStream(), file.getSize(), doc.getMimeType());
-            objectUploaded = true;
-            uploadQuotaService.refreshAttemptLease(reservation);
+            uploadIntents.prepare(TenantContext.getTenantId(), doc, job);
+            intentPrepared = true;
+            UploadAttemptLease writerLease = uploadLeases.acquire(reservation);
+            writerLeaseAcquired = true;
+            documentTombstoneService.armUploadCleanup(doc);
+            try (UploadAttemptHeartbeat heartbeat = uploadLeases.start(writerLease)) {
+                objectWriteAttempted = true;
+                minioStorageService.upload(objectKey, file.getInputStream(), file.getSize(), doc.getMimeType());
+                if (heartbeat.ownershipLost() || !uploadLeases.owns(writerLease)) {
+                    documentTombstoneService.recordAbandonedUpload(doc);
+                    throw new OperationConflictException(
+                            "Upload writer ownership was lost; object cleanup was scheduled");
+                }
 
-            job = IngestJob.builder()
-                    .id(UUID.randomUUID())
-                    .kbId(kbId)
-                    .docId(doc.getId())
-                    .status(IngestJobStatus.PENDING)
-                    .stage(IngestStage.QUEUED)
-                    .createdAt(now)
-                    .updatedAt(now)
-                    .build();
-            ingestJobRepository.save(job);
-            jobSaved = true;
-            uploadQuotaService.refreshAttemptLease(reservation);
-
-            ingestOutboxService.record(job, kb, objectKey, doc.getFileName(), doc.getMimeType());
-            uploadQuotaService.commit(reservation, doc);
-            doc.setStatus(DocumentStatus.PENDING);
-            doc.setErrorMessage(null);
-            documentRepository.save(doc);
-
-            return toResponse(doc, job);
+                DocumentUploadPublication publication = uploadIntents.publish(
+                        TenantContext.getTenantId(), doc, job, reservation);
+                doc = publication.document();
+                job = publication.job();
+                response = toResponse(doc, job);
+            }
         } catch (Exception e) {
-            if (objectUploaded) {
+            if (intentPrepared && !writerLeaseAcquired) {
+                throw uploadFailure(e);
+            }
+            if (objectWriteAttempted && intentPrepared) {
                 try {
-                    minioStorageService.delete(objectKey);
-                } catch (Exception objectCleanupFailure) {
-                    if (objectCleanupFailure != e) {
-                        e.addSuppressed(objectCleanupFailure);
+                    DocumentUploadPublicationResolution resolution = uploadIntents.reconcilePublication(
+                            TenantContext.getTenantId(), doc, job);
+                    if (resolution.isPublished()) {
+                        doc = resolution.document();
+                        job = resolution.job();
+                        response = toResponse(doc, job);
+                        auditLogService.recordSuccess(
+                                "DOCUMENT_UPLOAD", "DOCUMENT", doc.getId(),
+                                "Uploaded document " + doc.getFileName());
+                        return response;
+                    }
+                    documentTombstoneService.recordAbandonedUpload(doc);
+                } catch (Exception reconciliationFailure) {
+                    if (reconciliationFailure != e) {
+                        e.addSuppressed(reconciliationFailure);
                     }
                 }
+                throw uploadFailure(e);
             }
-            if (jobSaved) {
+            if (intentPrepared) {
                 try {
-                    ingestJobRepository.delete(job);
-                } catch (Exception jobCleanupFailure) {
-                    if (jobCleanupFailure != e) {
-                        e.addSuppressed(jobCleanupFailure);
+                    uploadIntents.fail(doc, job, e.getMessage());
+                } catch (Exception statusFailure) {
+                    if (statusFailure != e) {
+                        e.addSuppressed(statusFailure);
                     }
-                }
-            }
-            doc.setStatus(DocumentStatus.FAILED);
-            doc.setErrorMessage(e.getMessage());
-            doc.setQuotaReservationId(null);
-            try {
-                documentRepository.save(doc);
-            } catch (Exception statusFailure) {
-                if (statusFailure != e) {
-                    e.addSuppressed(statusFailure);
                 }
             }
             try {
@@ -198,11 +205,31 @@ public class DocumentService {
                     e.addSuppressed(releaseFailure);
                 }
             }
-            if (e.getMessage() != null && e.getMessage().contains("database down")) {
-                throw new IllegalStateException(e.getMessage(), e);
-            }
-            throw new IllegalStateException("Upload failed", e);
+            throw uploadFailure(e);
         }
+        auditLogService.recordSuccess(
+                "DOCUMENT_UPLOAD",
+                "DOCUMENT",
+                doc.getId(),
+                "Uploaded document " + doc.getFileName()
+        );
+        return response;
+    }
+
+    private RuntimeException uploadFailure(Exception error) {
+        if (error instanceof OperationConflictException conflict) {
+            return conflict;
+        }
+        if (error instanceof ResourceNotFoundException notFound) {
+            return notFound;
+        }
+        if (error instanceof UploadIdempotencyConflictException conflict) {
+            return conflict;
+        }
+        if (error.getMessage() != null && error.getMessage().contains("database down")) {
+            return new IllegalStateException(error.getMessage(), error);
+        }
+        return new IllegalStateException("Upload failed", error);
     }
 
     String fileFingerprint(MultipartFile file) {
@@ -254,47 +281,35 @@ public class DocumentService {
         return toResponse(doc, job);
     }
 
-    @Transactional
     public void delete(UUID kbId, UUID docId) {
         maintenanceService.assertMutationAllowed(kbId);
-        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
-        Document doc = findOrThrow(kbId, docId);
-        documentTombstoneService.recordDeleted(doc);
-        vectorCleanupTaskService.enqueueProfileDocument(docId);
-        vectorCleanupTaskService.enqueueLegacyDocument(docId);
+        DocumentDeletionClaim claim = documentDeletions.begin(kbId, docId);
         try {
-            milvusVectorService.deleteProfileByDocId(docId);
+            if (milvusVectorService.deleteProfileByDocId(docId)) {
+                vectorCleanupTaskService.completePendingProfileDocument(docId);
+            }
         } catch (Exception e) {
             log.warn("Failed to delete profile Milvus vectors for doc {}", docId, e);
         }
         try {
-            milvusVectorService.deleteByDocId(docId);
-            milvusVectorService.deleteSparseByDocId(kbId, docId,
-                    retrievalProfileRepository.findByKbIdOrderByVersionDesc(kbId).stream()
-                            .map(profile -> profile.getVersion()).toList());
+            boolean legacyDeleted = milvusVectorService.deleteByDocId(docId);
+            milvusVectorService.deleteSparseByDocId(
+                    kbId, docId, claim.sparseProfileVersions());
+            if (legacyDeleted) {
+                vectorCleanupTaskService.completePendingLegacyDocument(docId);
+            }
         } catch (Exception e) {
             log.warn("Failed to delete Milvus vectors for doc {}", docId, e);
         }
-        chunkRepository.deleteByDocId(docId);
-        try {
-            minioStorageService.delete(doc.getObjectKey());
-        } catch (Exception e) {
-            log.warn("Failed to delete object {} for doc {}", doc.getObjectKey(), docId, e);
-        }
-        uploadQuotaService.releaseCommitted(doc.getQuotaReservationId(), "Document deleted");
-        documentRepository.delete(doc);
-        profileIndexStateService.bumpRevision(kb);
-        auditLogService.recordSuccess(
-                "DOCUMENT_DELETE",
-                "DOCUMENT",
-                docId,
-                "Deleted document " + doc.getFileName()
-        );
+        minioStorageService.deleteChecked(claim.objectKey());
+        documentAssetService.deleteObjectsByDocument(docId);
+        documentDeletions.complete(claim);
     }
 
     public Document findOrThrow(UUID kbId, UUID docId) {
+        knowledgeBaseService.findOrThrow(kbId);
         return documentRepository.findById(docId)
-                .filter(d -> d.getKbId().equals(kbId))
+                .filter(d -> d.getKbId().equals(kbId) && d.getStatus() != DocumentStatus.IMPORTING)
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found: " + docId));
     }
 

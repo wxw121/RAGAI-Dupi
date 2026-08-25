@@ -33,14 +33,14 @@ describe('SparseMigrationPanel', () => {
       baselineP95Ms: 100, candidateP95Ms: 110, baselineFallbackRate: 0.01,
       candidateFallbackRate: 0, legacyBm25Enabled: true, updatedAt: '2026-07-15T00:00:00Z',
     })
-    expect(container.textContent).toContain('SHADOW_VALIDATING')
+    expect(container.textContent).toContain('影子验证')
     expect(container.textContent).toContain('100 / 100')
-    expect(container.querySelector('[role="switch"][aria-label="Legacy BM25 fallback"]')).not.toBeNull()
-    const cutover = container.querySelector('button[aria-label="Cutover sparse migration"]') as HTMLButtonElement
+    expect(container.querySelector('[role="switch"][aria-label="保留旧版关键词检索兜底"]')).not.toBeNull()
+    const cutover = container.querySelector('button[aria-label="切换到新索引"]') as HTMLButtonElement
     expect(cutover.disabled).toBe(false)
     await act(async () => { cutover.click() })
     expect(document.body.textContent).toContain('1.10x')
-    expect(document.body.textContent).toContain('Confirm Cutover')
+    expect(document.body.textContent).toContain('确认切换到新索引')
     act(() => root.unmount())
   })
 
@@ -51,7 +51,7 @@ describe('SparseMigrationPanel', () => {
       baselineP95Ms: 100, candidateP95Ms: 110, baselineFallbackRate: 0,
       candidateFallbackRate: 0, legacyBm25Enabled: false,
     })
-    expect((container.querySelector('button[aria-label="Cutover sparse migration"]') as HTMLButtonElement).disabled).toBe(true)
+    expect((container.querySelector('button[aria-label="切换到新索引"]') as HTMLButtonElement).disabled).toBe(true)
     act(() => root.unmount())
   })
 

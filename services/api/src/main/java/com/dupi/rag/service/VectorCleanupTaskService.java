@@ -43,43 +43,49 @@ public class VectorCleanupTaskService {
 
     @Transactional
     public void enqueueProfileKnowledgeBase(UUID kbId) {
-        enqueue(VectorCleanupTargetType.PROFILE_KNOWLEDGE_BASE, kbId);
+        enqueue(VectorCleanupTargetType.PROFILE_KNOWLEDGE_BASE, kbId, kbId);
     }
 
     @Transactional
     public void enqueueLegacyKnowledgeBase(UUID kbId) {
-        enqueue(VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE, kbId);
+        enqueue(VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE, kbId, kbId);
     }
 
     @Transactional
     public void enqueueProfileDocument(UUID docId) {
-        enqueue(VectorCleanupTargetType.PROFILE_DOCUMENT, docId);
+        enqueue(VectorCleanupTargetType.PROFILE_DOCUMENT, docId, resolveDocumentKnowledgeBaseId(docId));
     }
 
     @Transactional
     public void enqueueLegacyDocument(UUID docId) {
-        enqueue(VectorCleanupTargetType.LEGACY_DOCUMENT, docId);
+        enqueue(VectorCleanupTargetType.LEGACY_DOCUMENT, docId, resolveDocumentKnowledgeBaseId(docId));
     }
 
     @Transactional
     public void completePendingProfileKnowledgeBase(UUID kbId) {
-        repository.findByTargetTypeAndTargetIdAndStatus(
-                        VectorCleanupTargetType.PROFILE_KNOWLEDGE_BASE,
-                        kbId,
-                        VectorCleanupStatus.PENDING
-                )
-                .ifPresent(task -> {
-                    task.setStatus(VectorCleanupStatus.COMPLETED);
-                    task.setLastError(null);
-                    repository.save(task);
-                });
+        completePending(VectorCleanupTargetType.PROFILE_KNOWLEDGE_BASE, kbId);
     }
 
-    @Scheduled(cron = "${dupi.cleanup.orphan-vectors-cron:0 30 3 * * *}")
+    @Transactional
+    public void completePendingLegacyKnowledgeBase(UUID kbId) {
+        completePending(VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE, kbId);
+    }
+
+    @Transactional
+    public void completePendingProfileDocument(UUID docId) {
+        completePending(VectorCleanupTargetType.PROFILE_DOCUMENT, docId);
+    }
+
+    @Transactional
+    public void completePendingLegacyDocument(UUID docId) {
+        completePending(VectorCleanupTargetType.LEGACY_DOCUMENT, docId);
+    }
+
+    @Scheduled(cron = "${dupi.cleanup.orphan-vectors-cron:0 * * * * *}")
     @Transactional
     public void processPendingTasks() {
         Instant now = Instant.now();
-        repository.findTop50ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
+        repository.findTop5ByStatusAndNextAttemptAtLessThanEqualOrderByCreatedAtAsc(
                 VectorCleanupStatus.PENDING,
                 now
         ).forEach(task -> process(task, now));
@@ -90,6 +96,18 @@ public class VectorCleanupTaskService {
                         VectorCleanupStatus.PENDING,
                         VectorCleanupStatus.FAILED
                 ))
+                .stream()
+                .filter(this::canAccessTask)
+                .map(this::toResponse)
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public java.util.List<VectorCleanupTaskResponse> listOpenTasks(UUID kbId) {
+        return repository.findTop50ByKnowledgeBaseIdAndStatusInOrderByUpdatedAtDesc(
+                        kbId,
+                        java.util.List.of(VectorCleanupStatus.PENDING, VectorCleanupStatus.FAILED)
+                )
                 .stream()
                 .filter(this::canAccessTask)
                 .map(this::toResponse)
@@ -133,15 +151,54 @@ public class VectorCleanupTaskService {
         return toResponse(task);
     }
 
-    private void enqueue(VectorCleanupTargetType targetType, UUID targetId) {
+    @Transactional
+    public VectorCleanupTaskResponse retry(UUID kbId, UUID taskId) {
+        VectorCleanupTask task = repository.findById(taskId)
+                .filter(candidate -> kbId.equals(candidate.getKnowledgeBaseId()))
+                .orElseThrow(() -> new ResourceNotFoundException("Vector cleanup task not found: " + taskId));
+        if (!canAccessTask(task)) {
+            throw new IllegalArgumentException("vector cleanup task access denied: " + taskId);
+        }
+        process(task, Instant.now());
+        if (task.getStatus() == VectorCleanupStatus.COMPLETED) {
+            auditLogService.recordSuccess(
+                    "VECTOR_CLEANUP_RETRY",
+                    "VECTOR_CLEANUP_TASK",
+                    task.getId(),
+                    "Retried vector cleanup for " + task.getTargetType() + " " + task.getTargetId()
+            );
+        }
+        return toResponse(task);
+    }
+
+    private void enqueue(VectorCleanupTargetType targetType, UUID targetId, UUID knowledgeBaseId) {
         repository.findByTargetTypeAndTargetIdAndStatus(targetType, targetId, VectorCleanupStatus.PENDING)
-                .orElseGet(() -> repository.save(VectorCleanupTask.builder()
+                .ifPresentOrElse(task -> {
+                    if (task.getKnowledgeBaseId() == null && knowledgeBaseId != null) {
+                        task.setKnowledgeBaseId(knowledgeBaseId);
+                        repository.save(task);
+                    }
+                }, () -> repository.save(VectorCleanupTask.builder()
                         .targetType(targetType)
                         .targetId(targetId)
+                        .knowledgeBaseId(knowledgeBaseId)
                         .status(VectorCleanupStatus.PENDING)
                         .attemptCount(0)
                         .nextAttemptAt(Instant.now())
                         .build()));
+    }
+
+    private UUID resolveDocumentKnowledgeBaseId(UUID docId) {
+        return repository.resolveKnowledgeBaseIdForDocumentTarget(docId).orElse(null);
+    }
+
+    private void completePending(VectorCleanupTargetType targetType, UUID targetId) {
+        repository.findByTargetTypeAndTargetIdAndStatus(targetType, targetId, VectorCleanupStatus.PENDING)
+                .ifPresent(task -> {
+                    task.setStatus(VectorCleanupStatus.COMPLETED);
+                    task.setLastError(null);
+                    repository.save(task);
+                });
     }
 
     private void process(VectorCleanupTask task, Instant now) {
@@ -190,6 +247,9 @@ public class VectorCleanupTaskService {
         if (SecurityContext.hasPermission("*") || SecurityContext.getPrincipal() == null) {
             return true;
         }
+        if (task.getKnowledgeBaseId() != null) {
+            return SecurityContext.canAccessKnowledgeBase(task.getKnowledgeBaseId().toString());
+        }
         if (task.getTargetType() == VectorCleanupTargetType.KNOWLEDGE_BASE
                 || task.getTargetType() == VectorCleanupTargetType.PROFILE_KNOWLEDGE_BASE
                 || task.getTargetType() == VectorCleanupTargetType.LEGACY_KNOWLEDGE_BASE) {
@@ -205,6 +265,7 @@ public class VectorCleanupTaskService {
                 .id(task.getId())
                 .targetType(task.getTargetType())
                 .targetId(task.getTargetId())
+                .knowledgeBaseId(task.getKnowledgeBaseId())
                 .status(task.getStatus())
                 .attemptCount(task.getAttemptCount())
                 .lastError(task.getLastError())

@@ -1,6 +1,5 @@
 package com.dupi.rag.service;
 
-import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.config.LlmProperties;
 import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.KnowledgeBase;
@@ -8,14 +7,20 @@ import com.dupi.rag.domain.enums.RagEvalGateStatus;
 import com.dupi.rag.domain.enums.RetrievalProfile;
 import com.dupi.rag.dto.CreateKnowledgeBaseRequest;
 import com.dupi.rag.dto.KnowledgeBaseResponse;
+import com.dupi.rag.dto.OperationJobResponse;
 import com.dupi.rag.dto.RagEvalGateDecisionResponse;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.exception.OperationConflictException;
 import com.dupi.rag.exception.RetrievalProfileConflictException;
 import com.dupi.rag.repository.KnowledgeBaseRepository;
+import com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus;
+import com.dupi.rag.domain.enums.OperationStatus;
+import com.dupi.rag.domain.enums.OperationType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.InOrder;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
@@ -34,10 +39,6 @@ class KnowledgeBaseServiceTest {
     @Mock
     KnowledgeBaseRepository repository;
     @Mock
-    MilvusVectorService milvusVectorService;
-    @Mock
-    VectorCleanupTaskService vectorCleanupTaskService;
-    @Mock
     AuditLogService auditLogService;
     @Mock
     ProfileIndexStateService profileIndexStateService;
@@ -45,6 +46,10 @@ class KnowledgeBaseServiceTest {
     RetrievalProfileGateService retrievalProfileGateService;
     @Mock
     KnowledgeBaseMaintenanceService maintenanceService;
+    @Mock
+    KnowledgeBaseDeletionPersistenceService deletionPersistence;
+    @Mock
+    OperationJobService operationJobService;
 
     LlmProperties llmProperties;
     KnowledgeBaseService service;
@@ -56,13 +61,13 @@ class KnowledgeBaseServiceTest {
         llmProperties.getEmbedding().setDimension(1024);
         service = new KnowledgeBaseService(
                 repository,
-                milvusVectorService,
                 llmProperties,
-                vectorCleanupTaskService,
                 auditLogService,
                 profileIndexStateService,
                 retrievalProfileGateService,
-                maintenanceService
+                maintenanceService,
+                deletionPersistence,
+                operationJobService
         );
     }
 
@@ -130,14 +135,14 @@ class KnowledgeBaseServiceTest {
                 .name("KB")
                 .retrievalProfile(RetrievalProfile.QA_ASSISTED)
                 .build();
-        when(repository.findByIdAndTenantIdForUpdate(id, "default")).thenReturn(Optional.of(kb));
+        when(repository.findByIdAndTenantIdForUpdateAnyStatus(id, "default")).thenReturn(Optional.of(kb));
         when(repository.save(any(KnowledgeBase.class))).thenAnswer(inv -> inv.getArgument(0));
 
         var response = service.updateRetrievalProfile(id, RetrievalProfile.CLASSIC);
 
         assertThat(response.getRetrievalProfile()).isEqualTo(RetrievalProfile.CLASSIC);
         verify(retrievalProfileGateService, never()).assertCanActivate(any(), any());
-        verify(repository).findByIdAndTenantIdForUpdate(id, "default");
+        verify(repository).findByIdAndTenantIdForUpdateAnyStatus(id, "default");
         verify(repository).save(argThat(saved -> saved.getRetrievalProfile() == RetrievalProfile.CLASSIC));
     }
 
@@ -149,14 +154,14 @@ class KnowledgeBaseServiceTest {
                 .name("KB")
                 .retrievalProfile(RetrievalProfile.CLASSIC)
                 .build();
-        when(repository.findByIdAndTenantIdForUpdate(id, "default")).thenReturn(Optional.of(kb));
+        when(repository.findByIdAndTenantIdForUpdateAnyStatus(id, "default")).thenReturn(Optional.of(kb));
         when(repository.save(any(KnowledgeBase.class))).thenAnswer(inv -> inv.getArgument(0));
 
         var response = service.updateRetrievalProfile(id, RetrievalProfile.PARENT_CHILD);
 
         assertThat(response.getRetrievalProfile()).isEqualTo(RetrievalProfile.PARENT_CHILD);
         verify(retrievalProfileGateService).assertCanActivate(id, RetrievalProfile.PARENT_CHILD);
-        verify(repository).findByIdAndTenantIdForUpdate(id, "default");
+        verify(repository).findByIdAndTenantIdForUpdateAnyStatus(id, "default");
         verify(repository).save(argThat(saved -> saved.getRetrievalProfile() == RetrievalProfile.PARENT_CHILD));
         verify(maintenanceService).assertMutationAllowed(id);
         verify(auditLogService).recordSuccessInCurrentTransaction(
@@ -175,7 +180,7 @@ class KnowledgeBaseServiceTest {
                 .embeddingModel("text-embedding-3-small")
                 .embeddingDimension(1536)
                 .build();
-        when(repository.findByIdAndTenantId(id, "default")).thenReturn(Optional.of(kb));
+        when(repository.findByIdAndTenantIdAnyStatus(id, "default")).thenReturn(Optional.of(kb));
 
         var response = service.get(id);
 
@@ -202,7 +207,7 @@ class KnowledgeBaseServiceTest {
                 .status(RagEvalGateStatus.PASSED)
                 .reason("passed")
                 .build();
-        when(repository.findByIdAndTenantId(id, "default")).thenReturn(Optional.of(kb));
+        when(repository.findByIdAndTenantIdAnyStatus(id, "default")).thenReturn(Optional.of(kb));
         when(profileIndexStateService.isV2Ready(id)).thenReturn(true);
         when(retrievalProfileGateService.latestDecision(id, RetrievalProfile.PARENT_CHILD)).thenReturn(gate);
 
@@ -227,8 +232,8 @@ class KnowledgeBaseServiceTest {
     void findOrThrowReturnsEntityOrRaisesNotFound() {
         UUID id = UUID.randomUUID();
         KnowledgeBase kb = KnowledgeBase.builder().id(id).name("A").build();
-        when(repository.findByIdAndTenantId(id, "default")).thenReturn(Optional.of(kb));
-        when(repository.findByIdAndTenantId(new UUID(0, 1), "default")).thenReturn(Optional.empty());
+        when(repository.findByIdAndTenantIdAnyStatus(id, "default")).thenReturn(Optional.of(kb));
+        when(repository.findByIdAndTenantIdAnyStatus(new UUID(0, 1), "default")).thenReturn(Optional.empty());
 
         assertThat(service.findOrThrow(id)).isSameAs(kb);
         assertThatThrownBy(() -> service.findOrThrow(new UUID(0, 1)))
@@ -251,7 +256,7 @@ class KnowledgeBaseServiceTest {
                     KnowledgeBase.builder().id(UUID.randomUUID()).tenantId("tenant-a").name("Tenant KB").build()
             ));
             UUID hiddenId = UUID.randomUUID();
-            when(repository.findByIdAndTenantId(hiddenId, "tenant-a")).thenReturn(Optional.empty());
+            when(repository.findByIdAndTenantIdAnyStatus(hiddenId, "tenant-a")).thenReturn(Optional.empty());
 
             assertThat(service.create(request).getTenantId()).isEqualTo("tenant-a");
             assertThat(service.list()).extracting("tenantId").containsExactly("tenant-a");
@@ -260,47 +265,56 @@ class KnowledgeBaseServiceTest {
 
             verify(repository).save(argThat(kb -> "tenant-a".equals(kb.getTenantId())));
             verify(repository).findByTenantIdOrderByCreatedAtDesc("tenant-a");
-            verify(repository).findByIdAndTenantId(hiddenId, "tenant-a");
+            verify(repository).findByIdAndTenantIdAnyStatus(hiddenId, "tenant-a");
         } finally {
             TenantContext.clear();
         }
     }
 
     @Test
-    void deleteRemovesVectorsBeforeDatabaseRow() {
+    void repeatedDeleteSubmissionReturnsTheSameDurableJob() {
         UUID id = UUID.randomUUID();
-        when(repository.findByIdAndTenantId(id, "default")).thenReturn(Optional.of(KnowledgeBase.builder().id(id).build()));
+        UUID jobId = UUID.randomUUID();
+        OperationJobResponse response = OperationJobResponse.builder().id(jobId)
+                .operationType(OperationType.KNOWLEDGE_BASE_DELETE).aggregateId(id)
+                .status(OperationStatus.PREPARED).build();
+        when(deletionPersistence.submit(id, "default", "alice")).thenReturn(jobId);
+        when(operationJobService.get(jobId)).thenReturn(response);
 
-        service.delete(id);
+        assertThat(service.submitDelete(id, "alice")).isSameAs(response);
+        assertThat(service.submitDelete(id, "alice")).isSameAs(response);
 
-        verify(vectorCleanupTaskService).enqueueProfileKnowledgeBase(id);
-        verify(vectorCleanupTaskService).enqueueLegacyKnowledgeBase(id);
-        verify(milvusVectorService).deleteByKbId(id);
-        verify(repository).deleteById(id);
-        verify(auditLogService).recordSuccess(
-                eq("KNOWLEDGE_BASE_DELETE"),
-                eq("KNOWLEDGE_BASE"),
-                eq(id),
-                contains(id.toString())
-        );
+        verify(deletionPersistence, times(2)).submit(id, "default", "alice");
+        verify(operationJobService, times(2)).get(jobId);
     }
 
     @Test
-    void deleteStillRemovesDatabaseRowWhenVectorCleanupFails() {
+    void ordinaryReadReportsConflictForDeletingKnowledgeBase() {
         UUID id = UUID.randomUUID();
-        when(repository.findByIdAndTenantId(id, "default")).thenReturn(Optional.of(KnowledgeBase.builder().id(id).build()));
-        doThrow(new IllegalStateException("milvus down")).when(milvusVectorService).deleteByKbId(id);
+        when(repository.findByIdAndTenantIdAnyStatus(id, "default")).thenReturn(Optional.of(
+                KnowledgeBase.builder().id(id).tenantId("default")
+                        .lifecycleStatus(KnowledgeBaseLifecycleStatus.DELETING).build()));
 
-        service.delete(id);
+        assertThatThrownBy(() -> service.get(id))
+                .isInstanceOf(OperationConflictException.class)
+                .hasMessageContaining("deletion");
+    }
 
-        verify(vectorCleanupTaskService).enqueueProfileKnowledgeBase(id);
-        verify(vectorCleanupTaskService).enqueueLegacyKnowledgeBase(id);
-        verify(repository).deleteById(id);
-        verify(auditLogService).recordSuccess(
-                eq("KNOWLEDGE_BASE_DELETE"),
-                eq("KNOWLEDGE_BASE"),
-                eq(id),
-                contains("compensation")
-        );
+    @Test
+    void lockedAndSystemLookupsAlsoReportDeletingAsConflictInsteadOfNotFoundOrUsable() {
+        UUID id = UUID.randomUUID();
+        KnowledgeBase deleting = KnowledgeBase.builder().id(id).tenantId("default")
+                .lifecycleStatus(KnowledgeBaseLifecycleStatus.DELETING).build();
+        when(repository.findByIdAndTenantIdForUpdateAnyStatus(id, "default"))
+                .thenReturn(Optional.of(deleting));
+        when(repository.findById(id)).thenReturn(Optional.of(deleting));
+        when(repository.findSystemByIdForUpdate(id)).thenReturn(Optional.of(deleting));
+
+        assertThatThrownBy(() -> service.findForUpdateOrThrow(id))
+                .isInstanceOf(OperationConflictException.class);
+        assertThatThrownBy(() -> service.findSystemOrThrow(id))
+                .isInstanceOf(OperationConflictException.class);
+        assertThatThrownBy(() -> service.findSystemForUpdateOrThrow(id))
+                .isInstanceOf(OperationConflictException.class);
     }
 }

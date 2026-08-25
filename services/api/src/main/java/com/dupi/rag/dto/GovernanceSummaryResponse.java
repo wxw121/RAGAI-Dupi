@@ -2,6 +2,9 @@ package com.dupi.rag.dto;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
+import com.dupi.rag.domain.enums.OperationStatus;
+import com.dupi.rag.domain.enums.OperationType;
 import lombok.Builder;
 import lombok.Getter;
 import lombok.Setter;
@@ -16,6 +19,7 @@ public class GovernanceSummaryResponse {
     private IngestOutbox ingestOutbox;
     private FailureNotifications failureNotifications;
     private VectorCleanup vectorCleanup;
+    private Operations operations;
     private List<AuditAlertResponse> alerts;
 
     @Getter
@@ -71,5 +75,18 @@ public class GovernanceSummaryResponse {
         private long pendingTasks;
         private long failedTasks;
         private long openTasks;
+    }
+
+    @Getter
+    @Setter
+    @Builder
+    public static class Operations {
+        private Map<OperationType, Long> countsByType;
+        private Map<OperationStatus, Long> countsByStatus;
+        private long due;
+        private long oldestDueAgeSeconds;
+        /** Claimed attempts after the first claim of each entered execution phase. */
+        private long retryCount;
+        private long compensationFailures;
     }
 }

@@ -333,16 +333,16 @@ public class MilvusVectorService {
                 || normalized.contains("wait for loading collection timeout");
     }
 
-    public void deleteByDocId(UUID docId) {
-        deleteLegacyByDocId(docId);
+    public boolean deleteByDocId(UUID docId) {
+        return deleteLegacyByDocId(docId);
     }
 
-    public void deleteLegacyByDocId(UUID docId) {
-        deleteByDocId(properties.getCollection(), docId, false);
+    public boolean deleteLegacyByDocId(UUID docId) {
+        return deleteByDocId(properties.getCollection(), docId, false);
     }
 
-    public void deleteProfileByDocId(UUID docId) {
-        deleteByDocId(properties.getProfileCollection(), docId, false);
+    public boolean deleteProfileByDocId(UUID docId) {
+        return deleteByDocId(properties.getProfileCollection(), docId, false);
     }
 
     public void deleteByDocIdForCleanup(UUID docId) {
@@ -357,15 +357,16 @@ public class MilvusVectorService {
         deleteByDocId(properties.getProfileCollection(), docId, true);
     }
 
-    private void deleteByDocId(String collection, UUID docId, boolean strict) {
+    private boolean deleteByDocId(String collection, UUID docId, boolean strict) {
         DeleteParam param = DeleteParam.newBuilder()
                 .withCollectionName(collection)
                 .withExpr("doc_id == \"" + docId + "\"")
                 .build();
         if (strict) {
             deleteStrict(param);
+            return true;
         } else {
-            deleteIgnoringUnloadedCollection(param, collection, "doc", docId);
+            return deleteIgnoringUnloadedCollection(param, collection, "doc", docId);
         }
     }
 
@@ -389,21 +390,43 @@ public class MilvusVectorService {
         }
     }
 
+    /** Missing sparse collections are an idempotent cleanup success; discovery failures remain retryable. */
+    public void deleteSparseByKbIdForCleanup(
+            UUID kbId, java.util.Collection<Integer> profileVersions) {
+        for (Integer version : profileVersions) {
+            String collection = sparseCollection(kbId, version);
+            R<Boolean> exists = client.hasCollection(HasCollectionParam.newBuilder()
+                    .withCollectionName(collection).build());
+            if (exists == null || exists.getStatus() != R.Status.Success.getCode()) {
+                throw new IllegalStateException("Milvus sparse collection lookup failed: "
+                        + (exists != null ? exists.getMessage() : "empty response"));
+            }
+            if (!Boolean.TRUE.equals(exists.getData())) {
+                continue;
+            }
+            DeleteParam param = DeleteParam.newBuilder()
+                    .withCollectionName(collection)
+                    .withExpr("kb_id == \"" + kbId + "\"")
+                    .build();
+            deleteStrict(param);
+        }
+    }
+
     private String sparseCollection(UUID kbId, Integer version) {
         return properties.getCollection() + "_sparse_" + kbId.toString().replace("-", "").toLowerCase()
                 + "_v" + version;
     }
 
-    public void deleteByKbId(UUID kbId) {
-        deleteLegacyByKbId(kbId);
+    public boolean deleteByKbId(UUID kbId) {
+        return deleteLegacyByKbId(kbId);
     }
 
-    public void deleteLegacyByKbId(UUID kbId) {
-        deleteByKbId(properties.getCollection(), kbId, false);
+    public boolean deleteLegacyByKbId(UUID kbId) {
+        return deleteByKbId(properties.getCollection(), kbId, false);
     }
 
-    public void deleteProfileByKbId(UUID kbId) {
-        deleteByKbId(properties.getProfileCollection(), kbId, false);
+    public boolean deleteProfileByKbId(UUID kbId) {
+        return deleteByKbId(properties.getProfileCollection(), kbId, false);
     }
 
     public void deleteByKbIdForCleanup(UUID kbId) {
@@ -418,15 +441,16 @@ public class MilvusVectorService {
         deleteByKbId(properties.getProfileCollection(), kbId, true);
     }
 
-    private void deleteByKbId(String collection, UUID kbId, boolean strict) {
+    private boolean deleteByKbId(String collection, UUID kbId, boolean strict) {
         DeleteParam param = DeleteParam.newBuilder()
                 .withCollectionName(collection)
                 .withExpr("kb_id == \"" + kbId + "\"")
                 .build();
         if (strict) {
             deleteStrict(param);
+            return true;
         } else {
-            deleteIgnoringUnloadedCollection(param, collection, "kb", kbId);
+            return deleteIgnoringUnloadedCollection(param, collection, "kb", kbId);
         }
     }
 
@@ -438,14 +462,14 @@ public class MilvusVectorService {
         }
     }
 
-    private void deleteIgnoringUnloadedCollection(
+    private boolean deleteIgnoringUnloadedCollection(
             DeleteParam param,
             String collection,
             String scope,
             UUID id
     ) {
         if (!isCollectionLoadedForDelete(collection, scope, id)) {
-            return;
+            return false;
         }
         try {
             R<MutationResult> response = client.delete(param);
@@ -456,14 +480,16 @@ public class MilvusVectorService {
                 // 向量残留只影响后续后台清理，不应该阻塞用户删除文档或知识库主记录。
                 log.warn("Skip Milvus vector delete because collection is not ready, scope={} id={} message={}",
                         scope, id, response.getMessage());
+                return false;
             }
+            return response != null && response.getStatus() == R.Status.Success.getCode();
         } catch (Exception e) {
             if (isCollectionLoading(e.getMessage())) {
                 // Milvus Java SDK 在集合未完全加载时可能直接抛异常，而不是返回失败响应。
                 // 这里把该基础设施瞬时状态降级为告警，保持删除接口对用户可用。
                 log.warn("Skip Milvus vector delete because collection is not ready, scope={} id={} message={}",
                         scope, id, e.getMessage());
-                return;
+                return false;
             }
             throw e;
         }

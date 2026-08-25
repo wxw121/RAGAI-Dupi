@@ -4,6 +4,7 @@ import com.dupi.rag.config.MinioProperties;
 import com.dupi.rag.exception.ResourceNotFoundException;
 import io.minio.GetObjectResponse;
 import io.minio.MinioClient;
+import io.minio.PutObjectArgs;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
@@ -80,6 +81,42 @@ class MinioStorageServiceTest {
         service.delete("obj");
 
         verify(minioClient).removeObject(any());
+    }
+
+    @Test
+    void checkedWorkflowDownloadPreservesTransportCause() throws Exception {
+        MinioClient minioClient = mock(MinioClient.class);
+        when(minioClient.getObject(any())).thenThrow(new RuntimeException("transport down"));
+
+        assertThatThrownBy(() -> new MinioStorageService(minioClient, props()).downloadChecked("staging/object"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("staging/object")
+                .hasRootCauseMessage("transport down");
+    }
+
+    @Test
+    void checkedDeletePropagatesNonMissingStorageFailures() throws Exception {
+        MinioClient minioClient = mock(MinioClient.class);
+        doThrow(new RuntimeException("network down")).when(minioClient).removeObject(any());
+
+        assertThatThrownBy(() -> new MinioStorageService(minioClient, props()).deleteChecked("obj"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to delete MinIO object")
+                .hasRootCauseMessage("network down");
+    }
+
+    @Test
+    void conditionalUploadPlacesIfNoneMatchOnThePublishingPut() throws Exception {
+        MinioClient minioClient = mock(MinioClient.class);
+        when(minioClient.bucketExists(any())).thenReturn(true);
+        MinioStorageService service = new MinioStorageService(minioClient, props());
+
+        assertThat(service.uploadIfAbsent("obj", new ByteArrayInputStream("abc".getBytes()), 3L, "text/plain"))
+                .isEqualTo(MinioStorageService.ObjectWriteResult.CREATED);
+
+        var captor = org.mockito.ArgumentCaptor.forClass(PutObjectArgs.class);
+        verify(minioClient).putObject(captor.capture());
+        assertThat(captor.getValue().extraHeaders().get("If-None-Match")).containsExactly("*");
     }
 
     private static MinioProperties props() {

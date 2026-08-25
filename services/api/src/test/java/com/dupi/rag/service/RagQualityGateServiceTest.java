@@ -6,6 +6,7 @@ import com.dupi.rag.domain.enums.RagQualityGateStatus;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -155,6 +156,31 @@ class RagQualityGateServiceTest {
 
         assertThat(service.fingerprint(first)).isEqualTo(service.fingerprint(swappedPrimary));
         assertThat(service.fingerprint(first)).isEqualTo(service.fingerprint(duplicatePrimary));
+    }
+
+    @Test
+    void fingerprintsSameNameSourcesByStableDocumentIdentity() {
+        UUID documentA = UUID.randomUUID();
+        UUID documentB = UUID.randomUUID();
+        var boundToA = new RagQualityGateService.CaseDefinition(
+                "How to install?", 1, 5, "guide.md", List.of("install"),
+                RagEvalCaseCategory.REAL_QUERY, List.of(), documentA, List.of());
+        var boundToB = new RagQualityGateService.CaseDefinition(
+                "How to install?", 1, 5, "guide.md", List.of("install"),
+                RagEvalCaseCategory.REAL_QUERY, List.of(), documentB, List.of());
+
+        assertThat(service.fingerprint(boundToA)).isNotEqualTo(service.fingerprint(boundToB));
+        assertThat(service.compare("install", service.fingerprint(boundToA),
+                "install", service.fingerprint(boundToB), true, true))
+                .isEqualTo(RagEvalComparisonStatus.NEW);
+
+        var ordered = new RagQualityGateService.CaseDefinition(
+                "Compare", 2, 5, null, List.of(), RagEvalCaseCategory.MULTI_DOCUMENT,
+                List.of("guide.md", "guide.md"), null, List.of(documentA, documentB));
+        var reversed = new RagQualityGateService.CaseDefinition(
+                "Compare", 2, 5, null, List.of(), RagEvalCaseCategory.MULTI_DOCUMENT,
+                List.of("guide.md", "guide.md"), null, List.of(documentB, documentA));
+        assertThat(service.fingerprint(ordered)).isNotEqualTo(service.fingerprint(reversed));
     }
 
     @Test

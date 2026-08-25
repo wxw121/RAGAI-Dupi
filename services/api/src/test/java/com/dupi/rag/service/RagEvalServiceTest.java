@@ -1,5 +1,6 @@
 package com.dupi.rag.service;
 
+import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.RagEvalCase;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.entity.RagEvalRunResult;
@@ -18,10 +19,12 @@ import com.dupi.rag.dto.RetrievalHit;
 import com.dupi.rag.dto.RetrieveRequest;
 import com.dupi.rag.dto.RetrieveResponse;
 import com.dupi.rag.repository.RagEvalCaseRepository;
+import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.RagEvalRunRepository;
 import com.dupi.rag.repository.RagEvalRunResultRepository;
 import com.dupi.rag.repository.RagQualityPolicyRepository;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
@@ -65,6 +68,20 @@ class RagEvalServiceTest {
     @Mock AuditLogService auditLogService;
     @Mock RetrievalProfileService retrievalProfileService;
     @Mock KnowledgeBaseMaintenanceService maintenanceService;
+    @Mock RagEvalCaseValidationService caseValidationService;
+    @Mock DocumentRepository documentRepository;
+
+    @BeforeEach
+    void defaultCasesAreSourceValid() {
+        org.mockito.Mockito.lenient().when(caseValidationService.validate(any(), any())).thenAnswer(invocation -> {
+            List<RagEvalCase> cases = invocation.getArgument(1);
+            Map<UUID, RagEvalCaseValidationService.CaseValidity> validity = cases.stream().collect(
+                    java.util.stream.Collectors.toMap(
+                            RagEvalCase::getId,
+                            ignored -> new RagEvalCaseValidationService.CaseValidity(true, List.of())));
+            return new RagEvalCaseValidationService.ValidationReport(validity, List.of(), "valid");
+        });
+    }
 
     @Test
     void runAgainstBaselineLoadsEvidenceAndPersistsComparisonStatus() {
@@ -78,7 +95,7 @@ class RagEvalServiceTest {
         RagEvalRun baseline = RagEvalRun.builder().id(baselineId).kbId(kbId).passedCount(1).totalCount(1).build();
         RagEvalRunResult baselineResult = RagEvalRunResult.builder().caseKey(evalCase.getCaseKey())
                 .caseFingerprint(fingerprint).passed(true).failureReasons(List.of()).latencyMs(1L).build();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(evalCase));
         when(policyRepository.findByKbId(kbId)).thenReturn(Optional.of(policy));
         when(runRepository.findById(baselineId)).thenReturn(Optional.of(baseline));
         when(resultRepository.findByRunIdOrderByCaseKeyAsc(baselineId)).thenReturn(List.of(baselineResult));
@@ -111,15 +128,21 @@ class RagEvalServiceTest {
         when(resultRepository.findByRunIdOrderByCaseKeyAsc(runId)).thenReturn(List.of());
         assertThat(service().listRuns(kbId)).singleElement().satisfies(item -> assertThat(item.getId()).isEqualTo(runId));
 
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of());
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of());
         when(runRepository.save(any())).thenAnswer(invocation -> {
             RagEvalRun value = invocation.getArgument(0);
             value.setId(runId);
             return value;
         });
         var empty = service().run(kbId, false, null, null);
+        assertThat(empty.getTotalCount()).isZero();
+        assertThat(empty.getResults()).isEmpty();
         assertThat(empty.getMetrics()).containsEntry("passRate", 0.0)
                 .containsEntry("averageHitCount", 0.0).containsEntry("latencyP95Ms", 0L);
+        assertThat((Map<String, Object>) empty.getMetrics().get("releaseGate"))
+                .containsEntry("status", "NO_CASES")
+                .containsEntry("total", 0)
+                .containsEntry("passed", 0);
     }
 
     @Test
@@ -185,13 +208,19 @@ class RagEvalServiceTest {
     }
 
     @Test
-    void listCasesSeedsBuiltInCasesWhenKnowledgeBaseHasNoPersistedCases() {
+    void listCasesReturnsPersistedCasesFromCoordinator() {
         UUID kbId = UUID.randomUUID();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(
+        List<RagEvalCase> persisted = List.of(
                 builtInCase(kbId, "formats-supported"),
                 builtInCase(kbId, "core-capabilities"),
-                builtInCase(kbId, "chunk-strategies")
-        ));
+                builtInCase(kbId, "chunk-strategies"));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(persisted);
+        when(caseValidationService.validate(kbId, persisted)).thenReturn(new RagEvalCaseValidationService.ValidationReport(
+                Map.of(
+                        persisted.get(0).getId(), new RagEvalCaseValidationService.CaseValidity(false, List.of("sample-knowledge.md")),
+                        persisted.get(1).getId(), new RagEvalCaseValidationService.CaseValidity(true, List.of()),
+                        persisted.get(2).getId(), new RagEvalCaseValidationService.CaseValidity(true, List.of())),
+                List.of(persisted.get(0)), "fingerprint"));
 
         var cases = service().listCases(kbId);
 
@@ -200,7 +229,26 @@ class RagEvalServiceTest {
                 "core-capabilities",
                 "chunk-strategies"
         );
-        verify(caseCoordinator).loadOrSeed(kbId);
+        assertThat(cases.get(0).isSourceValid()).isFalse();
+        assertThat(cases.get(0).getMissingExpectedFileNames()).containsExactly("sample-knowledge.md");
+        assertThat(cases.get(1).isSourceValid()).isTrue();
+        verify(caseCoordinator).loadCases(kbId);
+    }
+
+    @Test
+    void runRejectsInvalidSourcesBeforeCreatingRunHistory() {
+        UUID kbId = UUID.randomUUID();
+        RagEvalCase invalid = caseEntity(kbId, UUID.randomUUID());
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(invalid));
+        when(caseValidationService.validate(kbId, List.of(invalid))).thenReturn(
+                new RagEvalCaseValidationService.ValidationReport(
+                        Map.of(invalid.getId(), new RagEvalCaseValidationService.CaseValidity(false, List.of("guide.md"))),
+                        List.of(invalid), "fingerprint"));
+
+        assertThatThrownBy(() -> service().run(kbId, new RagEvalRunRequest()))
+                .isInstanceOf(com.dupi.rag.exception.RagEvalCaseConflictException.class)
+                .hasMessageContaining("guide.md");
+        verify(runRepository, never()).save(any());
     }
 
     @Test
@@ -237,9 +285,109 @@ class RagEvalServiceTest {
     }
 
     @Test
+    void createCaseRejectsDocumentIdsFromAnotherKnowledgeBase() {
+        UUID kbId = UUID.randomUUID();
+        UUID otherKbId = UUID.randomUUID();
+        UUID documentId = UUID.randomUUID();
+        when(documentRepository.findAllById(List.of(documentId))).thenReturn(List.of(
+                Document.builder().id(documentId).kbId(otherKbId).fileName("guide.md").build()));
+        RagEvalCaseRequest request = new RagEvalCaseRequest();
+        request.setCaseKey("cross-kb");
+        request.setQuery("question");
+        request.setExpectedDocumentId(documentId);
+        request.setExpectedFileName("guide.md");
+
+        assertThatThrownBy(() -> service().createCase(kbId, request))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("knowledge base");
+        verify(caseRepository, never()).save(any());
+    }
+
+    @Test
+    void createCaseResolvesUniqueFilenameOnlyWebPayloadToStableId() {
+        UUID kbId = UUID.randomUUID();
+        Document guide = Document.builder().id(UUID.randomUUID()).kbId(kbId).fileName("guide.md").build();
+        when(documentRepository.findByKbIdOrderByIdAsc(kbId)).thenReturn(List.of(guide));
+        when(caseRepository.save(any(RagEvalCase.class))).thenAnswer(invocation -> {
+            RagEvalCase saved = invocation.getArgument(0);
+            saved.setId(UUID.randomUUID());
+            return saved;
+        });
+        RagEvalCaseRequest request = new RagEvalCaseRequest();
+        request.setCaseKey("legacy-web-single");
+        request.setQuery("question");
+        request.setExpectedFileName("guide.md");
+
+        var response = service().createCase(kbId, request);
+
+        assertThat(response.getExpectedDocumentId()).isEqualTo(guide.getId());
+        assertThat(response.getExpectedFileName()).isEqualTo("guide.md");
+    }
+
+    @Test
+    void createCaseResolvesUniqueMultiFilenameOnlyWebPayloadInOrder() {
+        UUID kbId = UUID.randomUUID();
+        Document guide = Document.builder().id(UUID.randomUUID()).kbId(kbId).fileName("guide.md").build();
+        Document operations = Document.builder().id(UUID.randomUUID()).kbId(kbId).fileName("operations.md").build();
+        when(documentRepository.findByKbIdOrderByIdAsc(kbId)).thenReturn(List.of(operations, guide));
+        when(caseRepository.save(any(RagEvalCase.class))).thenAnswer(invocation -> {
+            RagEvalCase saved = invocation.getArgument(0);
+            saved.setId(UUID.randomUUID());
+            return saved;
+        });
+        RagEvalCaseRequest request = new RagEvalCaseRequest();
+        request.setCaseKey("legacy-web-multi");
+        request.setQuery("question");
+        request.setCategory(RagEvalCaseCategory.MULTI_DOCUMENT);
+        request.setMinHits(2);
+        request.setExpectedFileName("guide.md");
+        request.setExpectedFileNames(List.of("operations.md"));
+
+        assertThat(request.isValidCategoryAssertions()).isTrue();
+        var response = service().createCase(kbId, request);
+
+        assertThat(response.getExpectedDocumentIds()).containsExactly(guide.getId(), operations.getId());
+        assertThat(response.getExpectedFileNames()).containsExactly("guide.md", "operations.md");
+    }
+
+    @Test
+    void createCaseRejectsAmbiguousFilenameOnlyWebPayload() {
+        UUID kbId = UUID.randomUUID();
+        when(documentRepository.findByKbIdOrderByIdAsc(kbId)).thenReturn(List.of(
+                Document.builder().id(UUID.randomUUID()).kbId(kbId).fileName("guide.md").build(),
+                Document.builder().id(UUID.randomUUID()).kbId(kbId).fileName("guide.md").build()));
+        RagEvalCaseRequest request = new RagEvalCaseRequest();
+        request.setCaseKey("ambiguous");
+        request.setQuery("question");
+        request.setExpectedFileName("guide.md");
+
+        assertThatThrownBy(() -> service().createCase(kbId, request))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ambiguous")
+                .hasMessageContaining("guide.md");
+        verify(caseRepository, never()).save(any());
+    }
+
+    @Test
+    void createCaseRejectsMissingFilenameOnlyWebPayload() {
+        UUID kbId = UUID.randomUUID();
+        when(documentRepository.findByKbIdOrderByIdAsc(kbId)).thenReturn(List.of());
+        RagEvalCaseRequest request = new RagEvalCaseRequest();
+        request.setCaseKey("missing");
+        request.setQuery("question");
+        request.setExpectedFileName("gone.md");
+
+        assertThatThrownBy(() -> service().createCase(kbId, request))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not found")
+                .hasMessageContaining("gone.md");
+        verify(caseRepository, never()).save(any());
+    }
+
+    @Test
     void runRejectsKnowledgeBasesAboveTheCaseLimit() {
         UUID kbId = UUID.randomUUID();
-        when(caseCoordinator.loadOrSeed(kbId))
+        when(caseCoordinator.loadCases(kbId))
                 .thenThrow(new IllegalArgumentException("at most 100 RAG eval cases"));
 
         assertThatThrownBy(() -> service().run(kbId, false))
@@ -251,7 +399,12 @@ class RagEvalServiceTest {
     void createUpdateDeleteAndListCasesAreScopedToKnowledgeBase() {
         UUID kbId = UUID.randomUUID();
         UUID caseId = UUID.randomUUID();
+        UUID guideId = UUID.randomUUID();
+        UUID operationsId = UUID.randomUUID();
         RagEvalCase existing = caseEntity(kbId, caseId);
+        when(documentRepository.findAllById(List.of(guideId, operationsId))).thenReturn(List.of(
+                Document.builder().id(guideId).kbId(kbId).fileName("guide.md").build(),
+                Document.builder().id(operationsId).kbId(kbId).fileName("operations.md").build()));
         when(caseRepository.save(any(RagEvalCase.class))).thenAnswer(inv -> {
             RagEvalCase saved = inv.getArgument(0);
             if (saved.getId() == null) {
@@ -260,7 +413,7 @@ class RagEvalServiceTest {
             return saved;
         });
         when(caseRepository.findByIdAndKbId(caseId, kbId)).thenReturn(Optional.of(existing));
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(existing));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(existing));
 
         RagEvalCaseRequest request = new RagEvalCaseRequest();
         request.setCaseKey("install");
@@ -268,8 +421,8 @@ class RagEvalServiceTest {
         request.setMinHits(2);
         request.setTopK(3);
         request.setCategory(RagEvalCaseCategory.MULTI_DOCUMENT);
-        request.setExpectedFileName("guide.md");
-        request.setExpectedFileNames(List.of("operations.md"));
+        request.setExpectedDocumentIds(List.of(guideId, operationsId));
+        request.setExpectedFileNames(List.of("guide.md", "operations.md"));
         request.setMustContainAny(List.of("install", "setup"));
 
         var created = service().createCase(kbId, request);
@@ -280,7 +433,8 @@ class RagEvalServiceTest {
 
         assertThat(created.getId()).isEqualTo(caseId);
         assertThat(created.getCategory()).isEqualTo(RagEvalCaseCategory.MULTI_DOCUMENT);
-        assertThat(created.getExpectedFileNames()).containsExactly("operations.md");
+        assertThat(created.getExpectedDocumentIds()).containsExactly(guideId, operationsId);
+        assertThat(created.getExpectedFileNames()).containsExactly("guide.md", "operations.md");
         assertThat(updated.getQuery()).isEqualTo("How to setup?");
         assertThat(listed).hasSize(1);
         verify(knowledgeBaseService, times(2)).findOrThrow(kbId);
@@ -296,7 +450,7 @@ class RagEvalServiceTest {
         UUID chunkId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         RagEvalCase evalCase = caseEntity(kbId, caseId);
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(evalCase));
         when(retrievalService.retrieve(argThat(id -> id.equals(kbId)), any())).thenAnswer(inv -> {
             RetrieveRequest request = inv.getArgument(1);
             return RetrieveResponse.builder()
@@ -351,7 +505,7 @@ class RagEvalServiceTest {
         UUID chunkId = UUID.randomUUID();
         UUID docId = UUID.randomUUID();
         RagEvalCase evalCase = caseEntity(kbId, caseId);
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(evalCase));
         when(retrievalService.retrieve(argThat(id -> id.equals(kbId)), any())).thenReturn(RetrieveResponse.builder()
                 .query("How to install?")
                 .retrievalMode("hybrid_rerank")
@@ -422,7 +576,7 @@ class RagEvalServiceTest {
         UUID kbId = UUID.randomUUID();
         UUID runId = UUID.randomUUID();
         RagEvalCase evalCase = caseEntity(kbId, UUID.randomUUID());
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(evalCase));
         when(retrievalService.retrieve(eq(kbId), any())).thenAnswer(invocation -> {
             RetrieveRequest request = invocation.getArgument(1);
             return RetrieveResponse.builder()
@@ -471,7 +625,7 @@ class RagEvalServiceTest {
         UUID kbId = UUID.randomUUID();
         UUID runId = UUID.randomUUID();
         RagEvalCase evalCase = caseEntity(kbId, UUID.randomUUID());
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(evalCase));
         when(retrievalService.retrieve(eq(kbId), any())).thenAnswer(invocation -> {
             RetrieveRequest request = invocation.getArgument(1);
             if (request.getRetrievalProfile() == RetrievalProfile.PARENT_CHILD) {
@@ -532,7 +686,7 @@ class RagEvalServiceTest {
         RagEvalCase evalCase = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
                 .caseKey("no-answer").query("unknown").minHits(0).topK(5)
                 .expectedFileName(null).mustContainAny(List.of()).build();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(evalCase));
         when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder()
                 .hits(List.of(RetrievalHit.builder().chunkId(UUID.randomUUID()).docId(UUID.randomUUID())
                         .fileName("unrelated.md").content("unrelated evidence").score(0.1).build()))
@@ -563,7 +717,7 @@ class RagEvalServiceTest {
         RagEvalCase evalCase = RagEvalCase.builder().id(UUID.randomUUID()).kbId(kbId)
                 .caseKey("missing-evidence").query("How to install?").minHits(2).topK(5)
                 .expectedFileName("guide.md").mustContainAny(List.of("install")).build();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(evalCase));
         when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder()
                 .hits(List.of(RetrievalHit.builder().chunkId(UUID.randomUUID()).docId(UUID.randomUUID())
                         .fileName("other.md").content("unrelated evidence").score(0.1).build()))
@@ -596,7 +750,7 @@ class RagEvalServiceTest {
                 .category(RagEvalCaseCategory.MULTI_DOCUMENT).minHits(2).topK(5)
                 .expectedFileName("release.md").expectedFileNames(List.of("recovery.md"))
                 .mustContainAny(List.of("rollback")).build();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(evalCase));
         when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder()
                 .hits(List.of(
                         RetrievalHit.builder().chunkId(UUID.randomUUID()).docId(UUID.randomUUID())
@@ -633,7 +787,7 @@ class RagEvalServiceTest {
                 .category(RagEvalCaseCategory.MULTI_DOCUMENT).minHits(2).topK(5)
                 .expectedFileName("release.md").expectedFileNames(List.of("recovery.md"))
                 .mustContainAny(List.of("rollback")).build();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(evalCase));
         when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder()
                 .hits(List.of(
                         RetrievalHit.builder().chunkId(UUID.randomUUID()).docId(UUID.randomUUID())
@@ -668,7 +822,7 @@ class RagEvalServiceTest {
                 .category(RagEvalCaseCategory.REAL_QUERY).minHits(1).topK(5)
                 .expectedFileName(null).expectedFileNames(List.of("recovery.md"))
                 .mustContainAny(List.of()).build();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(evalCase));
         when(retrievalService.retrieve(eq(kbId), any())).thenReturn(RetrieveResponse.builder()
                 .hits(List.of(
                         RetrievalHit.builder().chunkId(UUID.randomUUID()).docId(UUID.randomUUID())
@@ -702,7 +856,7 @@ class RagEvalServiceTest {
     void runClassifiesRetrievalExceptions() {
         UUID kbId = UUID.randomUUID();
         UUID runId = UUID.randomUUID();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(caseEntity(kbId, UUID.randomUUID())));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(caseEntity(kbId, UUID.randomUUID())));
         when(retrievalService.retrieve(eq(kbId), any())).thenThrow(new IllegalStateException("retrieval unavailable"));
         when(resultRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(runRepository.save(any())).thenAnswer(invocation -> {
@@ -743,7 +897,7 @@ class RagEvalServiceTest {
                 .caseKey("ambiguous-version").query("Which version is current?")
                 .category(RagEvalCaseCategory.AMBIGUOUS).minHits(1).topK(5)
                 .expectedFileName("release.md").mustContainAny(List.of("2.5.4")).build();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(realQuery, hardNegative, multiDocument, ambiguous));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(realQuery, hardNegative, multiDocument, ambiguous));
         when(profileIndexStateService.currentRevision(kbId)).thenReturn(7L);
         when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
         when(retrievalProfileGateService.calculate(any(), eq(7L), eq(7L), eq(true))).thenReturn(Map.of(
@@ -872,7 +1026,7 @@ class RagEvalServiceTest {
                 .caseKey("correct-no-answer").query("What is the moon password?")
                 .category(RagEvalCaseCategory.HARD_NEGATIVE).minHits(0).topK(5)
                 .mustContainAny(List.of()).build();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(grounded, noAnswer));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(grounded, noAnswer));
         when(profileIndexStateService.currentRevision(kbId)).thenReturn(9L);
         when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
         when(retrievalProfileGateService.calculate(any(), eq(9L), eq(9L), eq(true))).thenReturn(Map.of(
@@ -941,7 +1095,7 @@ class RagEvalServiceTest {
                 .caseKey("grounded-answer").query("How do I install?")
                 .category(RagEvalCaseCategory.REAL_QUERY).minHits(1).topK(5)
                 .expectedFileName("guide.md").mustContainAny(List.of("install")).build();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(grounded));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(grounded));
         when(profileIndexStateService.currentRevision(kbId)).thenReturn(9L);
         when(profileIndexStateService.isV2Ready(kbId)).thenReturn(true);
         when(retrievalProfileGateService.calculate(any(), eq(9L), eq(9L), eq(true))).thenReturn(Map.of(
@@ -979,7 +1133,7 @@ class RagEvalServiceTest {
     void runCanExplicitlyEvaluateVectorModeAndRejectsVectorProfileCombination() {
         UUID kbId = UUID.randomUUID();
         UUID runId = UUID.randomUUID();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(caseEntity(kbId, UUID.randomUUID())));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(caseEntity(kbId, UUID.randomUUID())));
         when(retrievalService.retrieveForEvaluation(eq(kbId), any(),
                 eq(com.dupi.rag.domain.enums.RetrievalMode.VECTOR)))
                 .thenReturn(RetrieveResponse.builder().retrievalMode("vector").hits(List.of()).build());
@@ -1121,7 +1275,7 @@ class RagEvalServiceTest {
     void runMarksHistoryFailedWhenResultPersistenceBreaks() {
         UUID kbId = UUID.randomUUID();
         UUID runId = UUID.randomUUID();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(caseEntity(kbId, UUID.randomUUID())));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(caseEntity(kbId, UUID.randomUUID())));
         List<RagEvalRunStatus> savedStatuses = new ArrayList<>();
         List<String> savedFailures = new ArrayList<>();
         when(runRepository.save(any(RagEvalRun.class))).thenAnswer(inv -> {
@@ -1146,7 +1300,7 @@ class RagEvalServiceTest {
     void legacyRunMarksHistoryFailedWhenResultPersistenceBreaks() {
         UUID kbId = UUID.randomUUID();
         UUID runId = UUID.randomUUID();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(caseEntity(kbId, UUID.randomUUID())));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(caseEntity(kbId, UUID.randomUUID())));
         List<RagEvalRunStatus> savedStatuses = new ArrayList<>();
         when(runRepository.save(any(RagEvalRun.class))).thenAnswer(invocation -> {
             RagEvalRun run = invocation.getArgument(0);
@@ -1165,7 +1319,7 @@ class RagEvalServiceTest {
     }
 
     @Test
-    void runWithCandidateProfilePersistsExactProfileSnapshot() {
+    void runRequestWithCandidateProfilePersistsExactProfileSnapshot() {
         UUID kbId = UUID.randomUUID();
         UUID profileId = UUID.randomUUID();
         UUID runId = UUID.randomUUID();
@@ -1175,7 +1329,7 @@ class RagEvalServiceTest {
                         .id(profileId).kbId(kbId).name("candidate").version(3)
                         .vectorCandidateCount(40).sparseCandidateCount(25).rrfConstant(50)
                         .rerankEnabled(false).rerankCandidateLimit(15).finalTopK(4).build();
-        when(caseCoordinator.loadOrSeed(kbId)).thenReturn(List.of(evalCase));
+        when(caseCoordinator.loadCases(kbId)).thenReturn(List.of(evalCase));
         when(retrievalProfileService.find(kbId, profileId)).thenReturn(profile);
         when(retrievalService.retrieveForProfile(eq(kbId), any(), eq(profileId)))
                 .thenReturn(RetrieveResponse.builder().retrievalMode("hybrid").hits(List.of()).build());
@@ -1185,7 +1339,10 @@ class RagEvalServiceTest {
             return saved;
         });
 
-        var response = service().run(kbId, true, profileId);
+        RagEvalRunRequest request = new RagEvalRunRequest();
+        request.setUseRerank(true);
+        request.setProfileId(profileId);
+        var response = service().run(kbId, request);
 
         assertThat(response.getProfileSnapshot()).isEqualTo(profile.snapshot());
         assertThat(response.isUseRerank()).isFalse();
@@ -1206,7 +1363,9 @@ class RagEvalServiceTest {
                 retrievalProfileService,
                 maintenanceService,
                 profileIndexStateService,
-                retrievalProfileGateService
+                retrievalProfileGateService,
+                caseValidationService,
+                documentRepository
         );
     }
 

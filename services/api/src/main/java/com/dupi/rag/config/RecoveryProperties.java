@@ -14,4 +14,9 @@ public class RecoveryProperties {
     private int quiescenceTimeoutSeconds = 300;
     private int pageSize = 500;
     private int maxConcurrentJobs = 2;
+    private long maxImportZipBytes = 1024L * 1024 * 1024;
+    private long maxImportUncompressedBytes = 8L * 1024 * 1024 * 1024;
+    private long maxImportEntryBytes = 4L * 1024 * 1024 * 1024;
+    private int maxImportEntries = 20_000;
+    private int maxImportCompressionRatio = 100;
 }

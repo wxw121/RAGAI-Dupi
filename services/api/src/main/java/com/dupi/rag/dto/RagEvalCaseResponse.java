@@ -23,8 +23,12 @@ public class RagEvalCaseResponse {
     private Integer topK;
     private RagEvalCaseCategory category;
     private String expectedFileName;
+    private UUID expectedDocumentId;
     private List<String> expectedFileNames;
+    private List<UUID> expectedDocumentIds;
     private List<String> mustContainAny;
+    private boolean sourceValid;
+    private List<String> missingExpectedFileNames;
     private Instant createdAt;
     private Instant updatedAt;
 }

@@ -35,7 +35,7 @@ public class ChatService {
             如果上下文中没有足够信息，请明确说明「根据现有知识库资料无法回答」。
             
             上下文中的每个片段已是 Markdown 格式，并标注 section（章节）与 type（prose/table/code）。
-            回答时请保持与上下文相同的 Markdown 结构，不要压成一行。
+            回答时请综合多个片段重新组织答案，不要逐段拼接或照抄原文章节结构。
             
             输出格式要求（必须遵守）：
             1. 使用标准 Markdown；章节标题用「## 标题」（# 后必须有空格），禁止使用一级标题「#」
@@ -50,6 +50,9 @@ public class ChatService {
             10. 行内代码必须完整闭合在同一行，例如 `python -m venv .venv`；不要把命令拆成多行、列表项或半截反引号
             11. Python 版本号（如 3.12）必须保留为普通文本或代码，不要拆成有序列表编号
             12. 禁止输出空列表项；小节标题直接写 `## 标题`，不要写成 `1. 4标题`
+            13. 忽略只有标题而没有正文的片段；不得输出没有正文的小节
+            14. 不要沿用原文的章节编号（如 1、2.1、3.2）；标题只保留有意义的文字，且不得出现编号跳跃
+            15. 对“是什么”等简短定义问题，先用一至三段直接回答；只有确有多个独立要点时才使用小节标题
             
             保持准确、结构清晰、便于阅读与逐步执行。
             """;
@@ -61,6 +64,7 @@ public class ChatService {
     private final RedisQueueProperties queueProperties;
     private final ObjectMapper objectMapper;
     private final ChatSessionService chatSessionService;
+    private final AuditLogService auditLogService;
 
     private final Set<String> cancelledSessions = ConcurrentHashMap.newKeySet();
     private final Map<String, Set<CancellationRegistration>> cancellationSignals = new ConcurrentHashMap<>();
@@ -70,6 +74,12 @@ public class ChatService {
         KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
         UUID persistedSessionId = resolveSessionId(kbId, request);
         String sessionId = persistedSessionId.toString();
+        auditLogService.recordSuccess(
+                "CHAT_QUERY",
+                "CHAT_SESSION",
+                persistedSessionId,
+                "Submitted a knowledge base question"
+        );
 
         return Flux.defer(() -> {
             CancellationRegistration cancellation = new CancellationRegistration();
@@ -94,7 +104,7 @@ public class ChatService {
                                 .chunkId(hit.getChunkId())
                                 .docId(hit.getDocId())
                                 .fileName(hit.getFileName())
-                                .snippet(truncate(hit.getContent(), 200))
+                                .snippet(hit.getContent() != null ? hit.getContent() : "")
                                 .score(hit.getScore())
                                 .build())
                         .collect(Collectors.toList());
@@ -171,11 +181,19 @@ public class ChatService {
             throw pipelineException("retrieval", ex);
         }
         String userPrompt = "上下文：\n" + context + "\n\n问题：" + request.getQuery();
+        String answer;
         try {
-            return llmClient.chat(SYSTEM_PROMPT, userPrompt);
+            answer = llmClient.chat(SYSTEM_PROMPT, userPrompt);
         } catch (Exception ex) {
             throw pipelineException("llm", ex);
         }
+        auditLogService.recordSuccess(
+                "CHAT_QUERY",
+                "KNOWLEDGE_BASE",
+                kbId,
+                "Submitted a knowledge base question"
+        );
+        return answer;
     }
 
     public void cancel(String sessionId) {
@@ -219,11 +237,6 @@ public class ChatService {
     private static final class CancellationRegistration {
         private final Sinks.Empty<Void> signal = Sinks.empty();
         private final AtomicBoolean cancelled = new AtomicBoolean(false);
-    }
-
-    private String truncate(String text, int max) {
-        if (text == null) return "";
-        return text.length() <= max ? text : text.substring(0, max) + "...";
     }
 
     private ServerSentEvent<String> errorEvent(String stage, Throwable ex, String requestId) {

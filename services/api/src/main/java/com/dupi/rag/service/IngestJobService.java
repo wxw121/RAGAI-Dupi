@@ -1,5 +1,6 @@
 package com.dupi.rag.service;
 
+import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.client.MilvusVectorService;
 import com.dupi.rag.config.LlmProperties;
 import com.dupi.rag.config.RedisQueueProperties;
@@ -43,7 +44,6 @@ public class IngestJobService {
     private final DocumentRepository documentRepository;
     private final ChunkRepository chunkRepository;
     private final KnowledgeBaseService knowledgeBaseService;
-    private final IngestJobProducer ingestJobProducer;
     private final IngestOutboxService ingestOutboxService;
     private final DocumentTombstoneService documentTombstoneService;
     private final RedisQueueProperties redisQueueProperties;
@@ -94,12 +94,16 @@ public class IngestJobService {
             log.info("Ignored ingest status update for tombstoned document {}, job {}", docId, jobId);
             return IngestCallbackAckResponse.ignored("document_tombstoned");
         }
-        IngestJob job = findJobForUpdate(jobId);
+        LockedIngestMutation mutation = lockSystemMutation(jobId);
+        IngestJob job = mutation.job();
 
-        Document doc = documentRepository.findById(docId)
+        Document doc = findDocumentForUpdate(docId)
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
         if (!job.getDocId().equals(doc.getId()) || !job.getKbId().equals(doc.getKbId())) {
             throw new IllegalArgumentException("Ingest status update does not match job/document");
+        }
+        if (UploadIntentLifecyclePolicy.isDeleting(doc)) {
+            return IngestCallbackAckResponse.ignored("document_deleting");
         }
         boolean wasV2Ready = completedUpdate && profileIndexStateService.isV2Ready(doc.getKbId());
         boolean wasV2Activated = completedUpdate && profileIndexStateService.isV2Activated(doc.getKbId());
@@ -186,7 +190,7 @@ public class IngestJobService {
         documentRepository.save(doc);
         ingestJobRepository.save(job);
         if (completedUpdate) {
-            KnowledgeBase kb = knowledgeBaseService.findSystemOrThrow(doc.getKbId());
+            KnowledgeBase kb = mutation.knowledgeBase();
             profileIndexStateService.bumpRevision(kb);
             if (!wasV2Activated && !wasV2Ready && profileIndexStateService.isV2Ready(doc.getKbId())) {
                 profileIndexStateService.activateV2Index(kb);
@@ -198,7 +202,9 @@ public class IngestJobService {
 
     @Transactional
     public IngestJobResponse claim(UUID jobId, UUID executionId, String workerId, Duration leaseDuration) {
-        IngestJob job = findJobForUpdate(jobId);
+        LockedWorkerMutation mutation = lockWorkerMutation(jobId);
+        IngestJob job = mutation.job();
+        UploadIntentLifecyclePolicy.requireDocumentMutationAllowed(mutation.document());
         UUID currentExecutionId = ensureExecutionId(job);
         if (!currentExecutionId.equals(executionId)) {
             throw new IllegalStateException("Ingest execution mismatch");
@@ -219,7 +225,9 @@ public class IngestJobService {
 
     @Transactional
     public IngestJobResponse refreshLease(UUID jobId, UUID executionId, String workerId, Duration leaseDuration) {
-        IngestJob job = findJobForUpdate(jobId);
+        LockedWorkerMutation mutation = lockWorkerMutation(jobId);
+        IngestJob job = mutation.job();
+        UploadIntentLifecyclePolicy.requireDocumentMutationAllowed(mutation.document());
         if (!ensureExecutionId(job).equals(executionId)) {
             throw new IllegalStateException("Ingest execution mismatch");
         }
@@ -235,11 +243,15 @@ public class IngestJobService {
         return toResponse(job);
     }
 
-    @Transactional(readOnly = true)
+    @Transactional
     public boolean isCancellationRequested(UUID jobId, UUID executionId) {
-        IngestJob job = ingestJobRepository.findById(jobId)
-                .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
+        LockedWorkerMutation mutation = lockWorkerMutation(jobId);
+        IngestJob job = mutation.job();
+        Document document = mutation.document();
         if (job.getExecutionId() == null || !job.getExecutionId().equals(executionId)) {
+            return true;
+        }
+        if (UploadIntentLifecyclePolicy.isDeleting(document)) {
             return true;
         }
         return job.getStatus() == IngestJobStatus.CANCEL_REQUESTED || isTerminal(job.getStatus());
@@ -275,8 +287,10 @@ public class IngestJobService {
         if (!job.getKbId().equals(kbId)) {
             throw new IllegalArgumentException("Ingest job does not belong to knowledge base: " + kbId);
         }
-        Document doc = documentRepository.findById(job.getDocId())
+        Document doc = findDocumentForUpdate(job.getDocId())
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
+        UploadIntentLifecyclePolicy.requireJobCancellationAllowed(job);
+        UploadIntentLifecyclePolicy.requireDocumentMutationAllowed(doc);
         if (job.getStatus() == IngestJobStatus.PENDING) {
             job.setStatus(IngestJobStatus.CANCELLED);
             job.setStage(IngestStage.CANCELLED);
@@ -300,14 +314,13 @@ public class IngestJobService {
 
     @Transactional
     public IngestJobResponse retry(UUID jobId) {
-        IngestJob job = findJobForUpdate(jobId);
-        KnowledgeBase kb = knowledgeBaseService.findSystemOrThrow(job.getKbId());
-        return retryJob(job, kb);
+        LockedIngestMutation mutation = lockSystemMutation(jobId);
+        return retryJob(mutation.job(), mutation.knowledgeBase());
     }
 
     @Transactional
     public IngestJobResponse retryForKnowledgeBase(UUID kbId, UUID jobId) {
-        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
+        KnowledgeBase kb = knowledgeBaseService.findForUpdateOrThrow(kbId);
         IngestJob job = findJobForUpdate(jobId);
         if (!job.getKbId().equals(kbId)) {
             throw new IllegalArgumentException("Ingest job does not belong to knowledge base: " + kbId);
@@ -323,6 +336,9 @@ public class IngestJobService {
         if (job.getStatus() != IngestJobStatus.DEAD_LETTER && job.getRetryCount() >= maxRecoveryAttempts()) {
             throw new IllegalStateException("Max retries exceeded");
         }
+        Document doc = findDocumentForUpdate(job.getDocId())
+                .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
+        UploadIntentLifecyclePolicy.requireDocumentMutationAllowed(doc);
         job.setRetryCount(job.getStatus() == IngestJobStatus.DEAD_LETTER ? 0 : safeRetryCount(job) + 1);
         job.setStatus(IngestJobStatus.PENDING);
         job.setStage(IngestStage.QUEUED);
@@ -330,8 +346,6 @@ public class IngestJobService {
         rotateExecution(job);
         ingestJobRepository.save(job);
 
-        Document doc = documentRepository.findById(job.getDocId())
-                .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
         doc.setStatus(DocumentStatus.PENDING);
         doc.setIndexSchemaVersion(1);
         doc.setErrorMessage(null);
@@ -359,10 +373,10 @@ public class IngestJobService {
 
     @Transactional
     public List<IngestJobResponse> reindexKnowledgeBase(UUID kbId, String embeddingModel, int embeddingDimension) {
-        KnowledgeBase kb = knowledgeBaseService.findOrThrow(kbId);
-        kb.setEmbeddingModel(embeddingModel);
-        kb.setEmbeddingDimension(embeddingDimension);
+        KnowledgeBase kb = profileIndexStateService.lockForReindex(
+                kbId, TenantContext.getTenantId(), embeddingModel, embeddingDimension);
         List<Document> documents = documentRepository.findByKbIdOrderByCreatedAtDesc(kbId);
+        UploadIntentLifecyclePolicy.requireReindexAllowed(documents);
         profileIndexStateService.resetForReindex(kb, documents);
         vectorCleanupTaskService.completePendingProfileKnowledgeBase(kbId);
         List<IngestJobResponse> responses = documents.stream()
@@ -378,6 +392,7 @@ public class IngestJobService {
     }
 
     @Scheduled(cron = "${dupi.ingest.recovery-cron:0 */2 * * * *}")
+    @Transactional
     public void recoverQueuedJobsOnSchedule() {
         int recovered = recoverQueuedJobs();
         if (recovered > 0) {
@@ -390,16 +405,22 @@ public class IngestJobService {
         List<IngestJob> jobs = ingestJobRepository.findTop20ByStatusAndStageOrderByCreatedAtAsc(
                 IngestJobStatus.PENDING, IngestStage.QUEUED);
         int recovered = recoverExpiredProcessingJobs();
-        for (IngestJob job : jobs) {
-            Document doc = documentRepository.findById(job.getDocId()).orElse(null);
-            if (doc == null || doc.getStatus() != DocumentStatus.PENDING) {
+        for (IngestJob observed : jobs) {
+            IngestJob job = findJobForUpdate(observed.getId());
+            Document doc = findDocumentForUpdate(job.getDocId()).orElse(null);
+            if (job.getStatus() != IngestJobStatus.PENDING
+                    || job.getStage() != IngestStage.QUEUED
+                    || doc == null
+                    || doc.getStatus() != DocumentStatus.PENDING) {
+                continue;
+            }
+            if (ingestOutboxService.hasDurableRecord(job.getId())) {
                 continue;
             }
             try {
                 KnowledgeBase kb = knowledgeBaseService.findSystemOrThrow(job.getKbId());
-                ingestJobProducer.enqueue(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
+                ingestOutboxService.record(job, kb, doc.getObjectKey(), doc.getFileName(), doc.getMimeType());
                 job.setErrorMessage(null);
-                doc.setStatus(DocumentStatus.PROCESSING);
                 doc.setErrorMessage(null);
                 ingestJobRepository.save(job);
                 documentRepository.save(doc);
@@ -418,7 +439,7 @@ public class IngestJobService {
                 IngestJobStatus.PROCESSING, now);
         int recovered = 0;
         for (IngestJob job : jobs) {
-            Document doc = documentRepository.findById(job.getDocId()).orElse(null);
+            Document doc = findDocumentForUpdate(job.getDocId()).orElse(null);
             if (doc == null || doc.getStatus() != DocumentStatus.PROCESSING) {
                 continue;
             }
@@ -445,7 +466,12 @@ public class IngestJobService {
     private int finalizeExpiredCancellations(Instant now) {
         List<IngestJob> jobs = ingestJobRepository.findTop20ByStatusAndLeaseExpiresAtBeforeOrderByUpdatedAtAsc(
                 IngestJobStatus.CANCEL_REQUESTED, now);
+        int finalized = 0;
         for (IngestJob job : jobs) {
+            Document doc = findDocumentForUpdate(job.getDocId()).orElse(null);
+            if (doc == null || UploadIntentLifecyclePolicy.isDeleting(doc)) {
+                continue;
+            }
             vectorCleanupTaskService.enqueueDocument(job.getDocId());
             job.setStatus(IngestJobStatus.CANCELLED);
             job.setStage(IngestStage.CANCELLED);
@@ -455,13 +481,12 @@ public class IngestJobService {
             job.setErrorMessage(null);
             ingestJobRepository.save(job);
 
-            documentRepository.findById(job.getDocId()).ifPresent(doc -> {
-                doc.setStatus(DocumentStatus.CANCELLED);
-                doc.setErrorMessage(null);
-                documentRepository.save(doc);
-            });
+            doc.setStatus(DocumentStatus.CANCELLED);
+            doc.setErrorMessage(null);
+            documentRepository.save(doc);
+            finalized++;
         }
-        return jobs.size();
+        return finalized;
     }
 
     private IngestJobResponse requeueDocumentForReindex(KnowledgeBase kb, Document doc) {
@@ -533,6 +558,36 @@ public class IngestJobService {
         }
         return ingestJobRepository.findById(jobId)
                 .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
+    }
+
+    private Optional<Document> findDocumentForUpdate(UUID documentId) {
+        return documentRepository.findByIdForUpdate(documentId);
+    }
+
+    /** Worker-only paths use the job/document suffix of the global lock order. */
+    private LockedWorkerMutation lockWorkerMutation(UUID jobId) {
+        IngestJob job = findJobForUpdate(jobId);
+        Document document = findDocumentForUpdate(job.getDocId())
+                .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
+        return new LockedWorkerMutation(job, document);
+    }
+
+    /** Global mutation lock order: knowledge base, then ingest job, then document. */
+    private LockedIngestMutation lockSystemMutation(UUID jobId) {
+        IngestJob discovered = ingestJobRepository.findById(jobId)
+                .orElseThrow(() -> new ResourceNotFoundException("Ingest job not found: " + jobId));
+        KnowledgeBase knowledgeBase = knowledgeBaseService.findSystemForUpdateOrThrow(discovered.getKbId());
+        IngestJob locked = findJobForUpdate(jobId);
+        if (!knowledgeBase.getId().equals(locked.getKbId())) {
+            throw new IllegalStateException("Ingest job knowledge base changed while acquiring locks");
+        }
+        return new LockedIngestMutation(knowledgeBase, locked);
+    }
+
+    private record LockedIngestMutation(KnowledgeBase knowledgeBase, IngestJob job) {
+    }
+
+    private record LockedWorkerMutation(IngestJob job, Document document) {
     }
 
     private void rotateExecution(IngestJob job) {
@@ -624,6 +679,17 @@ public class IngestJobService {
                     .nextAction(stalledNextAction(job))
                     .retryable(false)
                     .stalled(true)
+                    .ageSeconds(ageSeconds)
+                    .lastUpdatedSeconds(lastUpdatedSeconds)
+                    .build();
+        }
+        if (job.getStatus() == IngestJobStatus.UPLOAD_INTENT) {
+            return IngestDiagnosisResponse.builder()
+                    .severity("info")
+                    .summary("文档上传正在完成持久化")
+                    .nextAction("等待上传完成；中断的上传会在租约到期后自动清理。")
+                    .retryable(false)
+                    .stalled(false)
                     .ageSeconds(ageSeconds)
                     .lastUpdatedSeconds(lastUpdatedSeconds)
                     .build();

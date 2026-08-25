@@ -20,6 +20,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.InOrder;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.Instant;
@@ -143,8 +144,10 @@ class RecoveryRestoreServiceTest {
         assertThat(job.getErrorMessage()).contains("inspect item evidence");
         service.abandon(job.getId());
 
-        verify(writer).abandon(job);
-        verify(jobs).delete(job);
+        InOrder abandonOrder = inOrder(jobs, writer);
+        abandonOrder.verify(jobs).delete(job);
+        abandonOrder.verify(jobs).flush();
+        abandonOrder.verify(writer).abandon(job);
     }
 
     @Test

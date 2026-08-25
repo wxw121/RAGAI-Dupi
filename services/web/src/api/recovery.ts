@@ -1,10 +1,11 @@
-import { apiDelete, apiGet, apiPost } from './client'
-import type { RecoveryArchive, RecoveryRestore } from '@/types'
+import { apiDelete, apiGet, apiPost, apiUpload } from './client'
+import type { OperationJobResponse, RecoveryArchive, RecoveryRestore } from '@/types'
 
 const base = (kbId: string) => `/api/v1/knowledge-bases/${kbId}/recovery`
 
 export const listArchives = (kbId: string) => apiGet<RecoveryArchive[]>(`${base(kbId)}/archives`)
 export const createArchive = (kbId: string) => apiPost<RecoveryArchive>(`${base(kbId)}/archives`)
+export const importArchive = (kbId: string, file: File) => apiUpload<OperationJobResponse>(`${base(kbId)}/archives/import`, file)
 export const retryArchive = (kbId: string, archiveId: string) => apiPost<RecoveryArchive>(`${base(kbId)}/archives/${archiveId}/retry`)
 export const deleteArchive = (kbId: string, archiveId: string) => apiDelete(`${base(kbId)}/archives/${archiveId}`)
 export const getArchiveDownloadUrl = (kbId: string, archiveId: string) => `${base(kbId)}/archives/${archiveId}/download`

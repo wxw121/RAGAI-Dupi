@@ -4,6 +4,7 @@ import com.dupi.rag.config.RecoveryProperties;
 import com.dupi.rag.domain.entity.KnowledgeBase;
 import com.dupi.rag.domain.entity.RecoveryArchive;
 import com.dupi.rag.domain.enums.RecoveryArchiveStatus;
+import com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus;
 import com.dupi.rag.exception.KnowledgeBaseMaintenanceException;
 import com.dupi.rag.repository.KnowledgeBaseRepository;
 import com.dupi.rag.repository.RecoveryArchiveRepository;
@@ -78,6 +79,19 @@ class KnowledgeBaseMaintenanceServiceTest {
         assertThatThrownBy(() -> service.assertMutationAllowed(kbId))
                 .isInstanceOf(KnowledgeBaseMaintenanceException.class)
                 .hasMessageContaining("recovery archive");
+    }
+
+    @Test
+    void mutationGuardRejectsDeletingKnowledgeBaseBeforeCheckingRecoveryArchive() {
+        UUID kbId = UUID.randomUUID();
+        when(knowledgeBases.findById(kbId)).thenReturn(Optional.of(KnowledgeBase.builder()
+                .id(kbId).lifecycleStatus(KnowledgeBaseLifecycleStatus.DELETING).build()));
+
+        assertThatThrownBy(() -> service.assertMutationAllowed(kbId))
+                .isInstanceOf(KnowledgeBaseMaintenanceException.class)
+                .hasMessageContaining("deletion");
+
+        verifyNoInteractions(archives);
     }
 
     @Test

@@ -33,6 +33,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 @ExtendWith(MockitoExtension.class)
 class ChatSessionServiceTest {
@@ -165,6 +166,27 @@ class ChatSessionServiceTest {
                     assertThat(citation.getSnippet()).isEqualTo("片段");
                     assertThat(citation.getScore()).isEqualTo(0.73);
                 });
+    }
+
+    @Test
+    void detailAndMutationsCheckKnowledgeBaseLifecycleBeforeSessionLookup() {
+        UUID kbId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+        when(knowledgeBaseService.findOrThrow(kbId)).thenThrow(
+                new com.dupi.rag.exception.OperationConflictException("deletion in progress"));
+        UpdateChatSessionRequest request = new UpdateChatSessionRequest();
+        request.setTitle("new");
+
+        assertThatThrownBy(() -> service.getDetail(kbId, sessionId))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class);
+        assertThatThrownBy(() -> service.rename(kbId, sessionId, request))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class);
+        assertThatThrownBy(() -> service.delete(kbId, sessionId))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class);
+        assertThatThrownBy(() -> service.batchDelete(kbId, List.of(sessionId)))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class);
+
+        verifyNoInteractions(sessionRepository, messageRepository);
     }
 
     @Test

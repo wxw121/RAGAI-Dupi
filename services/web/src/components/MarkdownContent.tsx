@@ -28,6 +28,14 @@ const markdownComponents: Components = {
       {children}
     </a>
   ),
+  img: ({ src, alt }) => (
+    <img
+      src={src}
+      alt={alt ?? ''}
+      loading="lazy"
+      className="my-3 h-auto max-w-full rounded-lg border border-slate-200 object-contain"
+    />
+  ),
   p: ({ children }) => <p className="break-words [overflow-wrap:anywhere]">{children}</p>,
   li: ({ children }) => <li className="break-words [overflow-wrap:anywhere]">{children}</li>,
   td: ({ children }) => <td className="break-words [overflow-wrap:anywhere]">{children}</td>,

@@ -1,5 +1,6 @@
 package com.dupi.rag.service;
 
+import com.dupi.rag.config.TenantContext;
 import com.dupi.rag.domain.entity.RetrievalProfile;
 import com.dupi.rag.domain.entity.RagEvalRun;
 import com.dupi.rag.domain.entity.SparseMigration;
@@ -34,6 +35,7 @@ public class SparseMigrationService {
     private final RetrievalProfileService retrievalProfileService;
     private final WebClient.Builder webClientBuilder;
     private final KnowledgeBaseMaintenanceService maintenanceService;
+    private final SparseBackfillIntentService backfillIntents;
 
     @Value("${dupi.worker.base-url:http://localhost:8000}")
     private String workerBaseUrl;
@@ -59,20 +61,14 @@ public class SparseMigrationService {
 
     public SparseMigrationResponse backfill(UUID kbId, UUID migrationId) {
         maintenanceService.assertMutationAllowed(kbId);
-        SparseMigration migration = repository.findUnlockedByIdAndKbId(migrationId, kbId)
-                .orElseThrow(() -> new ResourceNotFoundException("Sparse migration not found: " + migrationId));
-        requireState(migration, SparseMigrationState.PREPARING, SparseMigrationState.BACKFILLING,
-                SparseMigrationState.FAILED);
-        RetrievalProfile profile = profile(kbId, migration.getProfileId());
-        int expectedDimension = knowledgeBaseService.findOrThrow(kbId).getEmbeddingDimension();
-        migration.setState(SparseMigrationState.BACKFILLING);
-        migration = repository.save(migration);
-        long sourceCount = chunkRepository.countByKbId(kbId);
-        migration.setSourceChunkCount(sourceCount);
-        migration = repository.save(migration);
+        SparseBackfillIntent intent = backfillIntents.begin(TenantContext.getTenantId(), kbId, migrationId);
+        RetrievalProfile profile = intent.profile();
+        int expectedDimension = intent.expectedDimension();
+        long sourceCount = intent.sourceChunkCount();
+        long collectionCount;
         try {
             long submitted = 0;
-            long collectionCount = -1;
+            collectionCount = 0;
             int page = 0;
             while (true) {
                 var chunks = chunkRepository.findByKbIdOrderByIdAsc(kbId, PageRequest.of(page++, 500));
@@ -102,19 +98,11 @@ public class SparseMigrationService {
             if (submitted != sourceCount || collectionCount != sourceCount) {
                 throw new IllegalStateException("Sparse backfill coverage is incomplete");
             }
-            migration.setIndexedChunkCount(collectionCount);
-            migration.setExpectedDimension(expectedDimension);
-            migration.setActualDimension(expectedDimension);
-            migration.setState(SparseMigrationState.DUAL_WRITING);
-            migration.setErrorMessage(null);
         } catch (RuntimeException ex) {
-            migration.setState(SparseMigrationState.FAILED);
-            migration.setErrorMessage(ex.getMessage());
-            repository.save(migration);
-            return SparseMigrationResponse.from(migration);
+            return SparseMigrationResponse.from(backfillIntents.fail(kbId, migrationId, ex.getMessage()));
         }
-        repository.save(migration);
-        return SparseMigrationResponse.from(migration);
+        return SparseMigrationResponse.from(
+                backfillIntents.complete(kbId, migrationId, collectionCount, expectedDimension));
     }
 
     @Transactional
@@ -150,6 +138,9 @@ public class SparseMigrationService {
     @Transactional
     public SparseMigrationResponse cutover(UUID kbId, UUID migrationId) {
         maintenanceService.assertMutationAllowed(kbId);
+        // RetrievalProfileService.activate also locks the knowledge base. Establish the global
+        // KB -> sparse-migration order before touching the migration row to prevent inversion.
+        knowledgeBaseService.findForUpdateOrThrow(kbId);
         SparseMigration migration = migration(kbId, migrationId);
         requireState(migration, SparseMigrationState.SHADOW_VALIDATING);
         RetrievalProfile profile = profile(kbId, migration.getProfileId());

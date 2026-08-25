@@ -1,6 +1,8 @@
 package com.dupi.rag.domain.enums;
 
 public enum IngestStage {
+    UPLOAD_PENDING,
+    UPLOAD_CLEANUP,
     QUEUED,
     PARSING,
     CHUNKING,

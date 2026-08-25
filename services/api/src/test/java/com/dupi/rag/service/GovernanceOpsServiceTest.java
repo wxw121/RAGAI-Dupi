@@ -3,12 +3,16 @@ package com.dupi.rag.service;
 import com.dupi.rag.domain.enums.IngestFailureNotificationStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
 import com.dupi.rag.domain.enums.IngestOutboxStatus;
+import com.dupi.rag.domain.enums.OperationPhase;
+import com.dupi.rag.domain.enums.OperationStatus;
+import com.dupi.rag.domain.enums.OperationType;
 import com.dupi.rag.domain.enums.UploadQuotaReservationStatus;
 import com.dupi.rag.domain.enums.VectorCleanupStatus;
 import com.dupi.rag.dto.AuditAlertResponse;
 import com.dupi.rag.repository.IngestFailureNotificationRepository;
 import com.dupi.rag.repository.IngestJobRepository;
 import com.dupi.rag.repository.IngestOutboxEventRepository;
+import com.dupi.rag.repository.OperationJobRepository;
 import com.dupi.rag.repository.UploadQuotaReservationRepository;
 import com.dupi.rag.repository.VectorCleanupTaskRepository;
 import org.junit.jupiter.api.Test;
@@ -20,6 +24,7 @@ import org.springframework.context.annotation.AnnotationConfigApplicationContext
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Optional;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -33,6 +38,7 @@ class GovernanceOpsServiceTest {
     @Mock IngestOutboxEventRepository ingestOutboxEventRepository;
     @Mock IngestFailureNotificationRepository notificationRepository;
     @Mock VectorCleanupTaskRepository vectorCleanupTaskRepository;
+    @Mock OperationJobRepository operationJobRepository;
     @Mock AuditLogService auditLogService;
     @Mock IngestJobService ingestJobService;
     @Mock VectorCleanupTaskService vectorCleanupTaskService;
@@ -45,6 +51,7 @@ class GovernanceOpsServiceTest {
             context.registerBean(IngestOutboxEventRepository.class, () -> ingestOutboxEventRepository);
             context.registerBean(IngestFailureNotificationRepository.class, () -> notificationRepository);
             context.registerBean(VectorCleanupTaskRepository.class, () -> vectorCleanupTaskRepository);
+            context.registerBean(OperationJobRepository.class, () -> operationJobRepository);
             context.registerBean(AuditLogService.class, () -> auditLogService);
             context.registerBean(IngestJobService.class, () -> ingestJobService);
             context.registerBean(VectorCleanupTaskService.class, () -> vectorCleanupTaskService);
@@ -86,6 +93,20 @@ class GovernanceOpsServiceTest {
         when(vectorCleanupTaskRepository.countByStatusIn(List.of(VectorCleanupStatus.PENDING))).thenReturn(8L);
         when(vectorCleanupTaskRepository.countByStatusIn(List.of(VectorCleanupStatus.FAILED))).thenReturn(4L);
 
+        OperationJobRepository.TypeCount recoveryCount = org.mockito.Mockito.mock(OperationJobRepository.TypeCount.class);
+        when(recoveryCount.getType()).thenReturn(OperationType.RECOVERY_ARCHIVE_IMPORT);
+        when(recoveryCount.getCount()).thenReturn(9L);
+        OperationJobRepository.StatusCount failedCount = org.mockito.Mockito.mock(OperationJobRepository.StatusCount.class);
+        when(failedCount.getStatus()).thenReturn(OperationStatus.FAILED);
+        when(failedCount.getCount()).thenReturn(2L);
+        when(operationJobRepository.countGroupedByType()).thenReturn(List.of(recoveryCount));
+        when(operationJobRepository.countGroupedByStatus()).thenReturn(List.of(failedCount));
+        when(operationJobRepository.countDueBefore(now)).thenReturn(3L);
+        when(operationJobRepository.findOldestDueAt(now)).thenReturn(Optional.of(now.minusSeconds(125)));
+        when(operationJobRepository.sumRetryCount()).thenReturn(7L);
+        when(operationJobRepository.countByPhaseAndStatus(OperationPhase.COMPENSATION, OperationStatus.FAILED))
+                .thenReturn(4L);
+
         when(auditLogService.summarizeAlerts()).thenReturn(List.of(alert("AUDIT_FAILED_SPIKE")));
         when(ingestJobService.summarizeAlerts()).thenReturn(List.of(alert("INGEST_FAILURES_OPEN")));
         when(vectorCleanupTaskService.summarizeAlerts()).thenReturn(List.of(alert("VECTOR_CLEANUP_FAILURES_OPEN")));
@@ -123,6 +144,18 @@ class GovernanceOpsServiceTest {
         assertThat(summary.getVectorCleanup().getFailedTasks()).isEqualTo(4L);
         assertThat(summary.getVectorCleanup().getOpenTasks()).isEqualTo(12L);
 
+        assertThat(summary.getOperations().getCountsByType())
+                .containsEntry(OperationType.RECOVERY_ARCHIVE_IMPORT, 9L)
+                .containsEntry(OperationType.MARKDOWN_PACKAGE_IMPORT, 0L)
+                .containsEntry(OperationType.KNOWLEDGE_BASE_DELETE, 0L);
+        assertThat(summary.getOperations().getCountsByStatus())
+                .containsEntry(OperationStatus.FAILED, 2L)
+                .containsEntry(OperationStatus.COMPLETED, 0L);
+        assertThat(summary.getOperations().getDue()).isEqualTo(3L);
+        assertThat(summary.getOperations().getOldestDueAgeSeconds()).isEqualTo(125L);
+        assertThat(summary.getOperations().getRetryCount()).isEqualTo(7L);
+        assertThat(summary.getOperations().getCompensationFailures()).isEqualTo(4L);
+
         assertThat(summary.getAlerts())
                 .extracting(AuditAlertResponse::getCode)
                 .containsExactly(
@@ -136,6 +169,19 @@ class GovernanceOpsServiceTest {
                 );
     }
 
+    @Test
+    void expiredLeaseAgeUsesTheFixedGovernanceClock() {
+        Instant now = Instant.parse("2026-08-25T10:00:00Z");
+        when(operationJobRepository.countDueBefore(now)).thenReturn(1L);
+        when(operationJobRepository.findOldestDueAt(now))
+                .thenReturn(Optional.of(now.minusSeconds(91)));
+
+        var operations = service(now).summarize().getOperations();
+
+        assertThat(operations.getDue()).isEqualTo(1L);
+        assertThat(operations.getOldestDueAgeSeconds()).isEqualTo(91L);
+    }
+
     private GovernanceOpsService service(Instant now) {
         return new GovernanceOpsService(
                 uploadQuotaReservationRepository,
@@ -143,6 +189,7 @@ class GovernanceOpsServiceTest {
                 ingestOutboxEventRepository,
                 notificationRepository,
                 vectorCleanupTaskRepository,
+                operationJobRepository,
                 auditLogService,
                 ingestJobService,
                 vectorCleanupTaskService,

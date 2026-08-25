@@ -162,7 +162,7 @@ Open **http://localhost:8080** in the browser
 1. **Create a New Knowledge Base** → Select vector search or hybrid search, and click the card to enter the details
 2. **Document Management** → Upload a file, wait for status `COMPLETED`, then click the View button to inspect objects, ingest tasks, total chunk count, up to 20 chunk samples, and index readiness status
 3. **Intelligent Q&A** → Ask questions based on ingested documents (`CHAT_API_KEY` and `EMBEDDING_API_KEY` need to be configured)
-4. **RAG Evaluation** → Manage persistent use cases (automatically create built-in use cases for empty libraries, with a maximum of 100 cases per library), select whether to enable Rerank, run evaluations, and inspect the latest 10 runs plus per-case diagnostics
+4. **RAG Evaluation** → Create and manage persistent cases against the knowledge base's actual documents (an empty case set stays empty; maximum 100 cases per knowledge base), select whether to enable Rerank, run evaluations, and inspect the latest 10 runs plus per-case diagnostics
 
 4. Verification
 

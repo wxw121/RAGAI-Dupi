@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  AUTH_EXPIRED_EVENT,
   apiDelete,
   apiGet,
   apiPatch,
@@ -150,6 +151,25 @@ describe('api client', () => {
     })
   })
 
+  it('clears local auth state and announces expired sessions on 401 responses', async () => {
+    setAuthToken('stale-token')
+    const expired = vi.fn()
+    window.addEventListener(AUTH_EXPIRED_EVENT, expired)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(
+        { error: 'unauthorized', message: 'Unauthorized API request' },
+        { status: 401, statusText: 'Unauthorized' },
+      )),
+    )
+
+    await expect(apiGet('/protected')).rejects.toMatchObject({ status: 401 })
+
+    expect(getAuthToken()).toBeNull()
+    expect(expired).toHaveBeenCalledOnce()
+    window.removeEventListener(AUTH_EXPIRED_EVENT, expired)
+  })
+
   it('covers POST, upload and generic fallback error branches', async () => {
     setAuthToken('csrf-token')
     const genericError = {
@@ -203,6 +223,16 @@ describe('api client', () => {
       headers: { 'Content-Type': 'application/json', 'X-Dupi-CSRF-Token': 'csrf-token' },
       body: undefined,
     })
+  })
+
+  it('returns DELETE JSON jobs while preserving empty legacy DELETE responses', async () => {
+    setAuthToken('csrf-token')
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ id: 'job-1' }, { status: 202 }))
+      .mockResolvedValueOnce(new Response(null, { status: 200 })))
+
+    await expect(apiDelete<{ id: string }>('/knowledge-base')).resolves.toEqual({ id: 'job-1' })
+    await expect(apiDelete('/legacy-resource')).resolves.toBeUndefined()
   })
 
   it('sends PATCH requests and parses JSON responses', async () => {

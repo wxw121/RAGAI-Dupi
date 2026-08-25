@@ -1,0 +1,181 @@
+package com.dupi.rag.service;
+
+import com.dupi.rag.domain.entity.OperationJob;
+import com.dupi.rag.domain.entity.OperationStep;
+import com.dupi.rag.domain.enums.OperationPhase;
+import com.dupi.rag.domain.enums.OperationStatus;
+import com.dupi.rag.domain.enums.OperationStepStatus;
+import com.dupi.rag.domain.enums.OperationType;
+import com.dupi.rag.exception.OperationConflictException;
+import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.repository.OperationJobRepository;
+import com.dupi.rag.repository.OperationStepRepository;
+import com.dupi.rag.repository.KnowledgeBaseRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.Instant;
+
+/** Markdown-owned transactions that keep intake non-runnable until every staged entry is durable. */
+@Service
+class MarkdownImportIntakeWriteService {
+    private final OperationJobRepository jobs;
+    private final OperationStepRepository steps;
+    private final KnowledgeBaseRepository knowledgeBases;
+    private final AuditLogService audit;
+    private final OperationStagingAttemptService stagingAttempts;
+
+    MarkdownImportIntakeWriteService(OperationJobRepository jobs, OperationStepRepository steps,
+                                     KnowledgeBaseRepository knowledgeBases, AuditLogService audit) {
+        this(jobs, steps, knowledgeBases, audit, null);
+    }
+
+    @Autowired
+    MarkdownImportIntakeWriteService(OperationJobRepository jobs, OperationStepRepository steps,
+                                     KnowledgeBaseRepository knowledgeBases, AuditLogService audit,
+                                     OperationStagingAttemptService stagingAttempts) {
+        this.jobs = jobs;
+        this.steps = steps;
+        this.knowledgeBases = knowledgeBases;
+        this.audit = audit;
+        this.stagingAttempts = stagingAttempts;
+    }
+
+    MarkdownImportIntakeWriteService(OperationJobRepository jobs, OperationStepRepository steps,
+                                     KnowledgeBaseRepository knowledgeBases) {
+        this(jobs, steps, knowledgeBases, null);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    OperationJob insert(String tenant, String key, String createdBy, MarkdownImportPlan plan) {
+        var knowledgeBase = knowledgeBases
+                .findByIdAndTenantIdForUpdateAnyStatus(plan.knowledgeBaseId(), tenant)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Knowledge base not found: " + plan.knowledgeBaseId()));
+        KnowledgeBaseLifecyclePolicy.requireReady(knowledgeBase, plan.knowledgeBaseId());
+        OperationJob job = jobs.saveAndFlush(OperationJob.builder().id(plan.jobId()).tenantId(tenant)
+                .operationType(OperationType.MARKDOWN_PACKAGE_IMPORT).aggregateType("KNOWLEDGE_BASE")
+                .aggregateId(plan.knowledgeBaseId()).status(OperationStatus.PREPARED).phase(OperationPhase.FORWARD)
+                .runnable(false).idempotencyKey(key).input(plan.toInput()).attemptCount(0)
+                .nextAttemptAt(Instant.now()).createdBy(createdBy).build());
+        int sequence = 1;
+        for (MarkdownImportPlan.Entry entry : plan.entries()) {
+            steps.save(OperationStep.builder().jobId(job.getId()).sequenceNumber(sequence++)
+                    .stepKey(stageStep(entry)).stepType("STAGE_OBJECT").resourceRef(entry.stagingKey())
+                    .status(OperationStepStatus.PENDING).attemptCount(0).nextAttemptAt(Instant.now()).build());
+        }
+        steps.flush();
+        audit(job, AuditLogService.OPERATION_SUBMIT, "Operation submitted");
+        return job;
+    }
+
+    @Transactional
+    void completeStage(java.util.UUID jobId, MarkdownImportPlan plan, MarkdownImportPlan.Entry entry) {
+        completeStage(jobId, plan, entry, null, entry.stagingKey());
+    }
+
+    @Transactional
+    void completeStage(java.util.UUID jobId, MarkdownImportPlan plan, MarkdownImportPlan.Entry entry,
+                       OperationStagingLease lease, String actualKey) {
+        OperationJob job = locked(jobId);
+        validatePlan(job, plan);
+        requireOwner(job, lease);
+        OperationStep step = required(jobId, stageStep(entry));
+        if (step.getStatus() == OperationStepStatus.COMPLETED) return;
+        requireWritable(job);
+        if (step.getStatus() != OperationStepStatus.PENDING && step.getStatus() != OperationStepStatus.RUNNING) {
+            throw new OperationConflictException("Markdown import stage cannot complete while " + step.getStatus());
+        }
+        step.setStatus(OperationStepStatus.COMPLETED);
+        step.setResourceRef(actualKey);
+        step.setCompletedAt(Instant.now()); step.setNextAttemptAt(null); step.setLastError(null);
+        steps.saveAndFlush(step);
+    }
+
+    @Transactional
+    OperationJob publishRunnable(java.util.UUID jobId, MarkdownImportPlan plan) {
+        return publishRunnable(jobId, plan, null);
+    }
+
+    @Transactional
+    OperationJob publishRunnable(java.util.UUID jobId, MarkdownImportPlan plan, OperationStagingLease lease) {
+        OperationJob job = locked(jobId);
+        validatePlan(job, plan);
+        if (Boolean.TRUE.equals(job.getRunnable())) return job;
+        requireWritable(job);
+        requireOwner(job, lease);
+        boolean incomplete = plan.entries().stream().map(entry -> required(jobId, stageStep(entry)))
+                .anyMatch(step -> step.getStatus() != OperationStepStatus.COMPLETED);
+        if (incomplete) throw new OperationConflictException("Markdown import staging is incomplete");
+        if (stagingAttempts != null && lease != null) stagingAttempts.transferToPublished(lease);
+        job.setRunnable(true); job.setNextAttemptAt(Instant.now());
+        job.setClaimToken(null); job.setLeaseExpiresAt(null);
+        return jobs.saveAndFlush(job);
+    }
+
+    @Transactional
+    void scheduleCleanup(java.util.UUID jobId, MarkdownImportPlan plan, String diagnostic) {
+        OperationJob job = locked(jobId);
+        validatePlan(job, plan);
+        if (job.getStatus() == OperationStatus.COMPLETED || Boolean.TRUE.equals(job.getRunnable())) return;
+        if (job.getStatus() != OperationStatus.PREPARED || job.getPhase() != OperationPhase.FORWARD) {
+            throw new OperationConflictException("Markdown import intake is no longer eligible for cleanup");
+        }
+        job.setPhase(OperationPhase.COMPENSATION); job.setStatus(OperationStatus.COMPENSATING);
+        job.setRunnable(true); job.setLastError(limit(diagnostic)); job.setNextAttemptAt(Instant.now());
+        jobs.saveAndFlush(job);
+        if (stagingAttempts != null) stagingAttempts.markJobCleanupPending(jobId);
+        audit(job, AuditLogService.OPERATION_COMPENSATE, job.getLastError());
+    }
+
+    void validatePlan(OperationJob job, MarkdownImportPlan plan) {
+        MarkdownImportPlan stored;
+        try { stored = MarkdownImportPlan.fromInput(job.getInput()); }
+        catch (RuntimeException invalid) {
+            throw new OperationConflictException("Markdown import idempotency key has an invalid immutable plan");
+        }
+        if (job.getOperationType() != OperationType.MARKDOWN_PACKAGE_IMPORT
+                || !"KNOWLEDGE_BASE".equals(job.getAggregateType())
+                || !plan.toInput().equals(stored.toInput())) {
+            throw new OperationConflictException("Markdown import idempotency key already belongs to different input");
+        }
+    }
+
+    static String stageStep(MarkdownImportPlan.Entry entry) {
+        return "stage-" + java.util.UUID.nameUUIDFromBytes(entry.path().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private OperationJob locked(java.util.UUID id) {
+        return jobs.findByIdForUpdate(id).orElseThrow(() -> new ResourceNotFoundException("Operation job not found: " + id));
+    }
+    private OperationStep required(java.util.UUID id, String key) {
+        return steps.findByJobIdAndStepKey(id, key)
+                .orElseThrow(() -> new OperationConflictException("Markdown import intake is missing step " + key));
+    }
+    private void requireWritable(OperationJob job) {
+        if (job.getStatus() != OperationStatus.PREPARED || job.getPhase() != OperationPhase.FORWARD
+                || Boolean.TRUE.equals(job.getRunnable())) {
+            throw new OperationConflictException("Markdown import intake is no longer writable");
+        }
+    }
+    private void requireOwner(OperationJob job, OperationStagingLease lease) {
+        if (lease == null) return;
+        if (!lease.token().equals(job.getClaimToken())
+                || lease.epoch() != (job.getClaimEpoch() == null ? 0 : job.getClaimEpoch())
+                || job.getLeaseExpiresAt() == null || !job.getLeaseExpiresAt().isAfter(Instant.now())) {
+            throw new OperationConflictException("Markdown staging ownership was lost");
+        }
+    }
+    private String limit(String value) {
+        String text = value == null || value.isBlank() ? "Markdown staging failed" : value;
+        return text.length() <= 2000 ? text : text.substring(0, 2000);
+    }
+    private void audit(OperationJob job, String action, String message) {
+        if (audit != null) {
+            audit.recordOperationInCurrentTransaction(job.getTenantId(), action, job.getId(), message);
+        }
+    }
+}

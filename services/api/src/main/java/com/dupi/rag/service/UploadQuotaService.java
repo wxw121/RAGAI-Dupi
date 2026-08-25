@@ -26,6 +26,7 @@ import java.util.UUID;
 public class UploadQuotaService {
 
     private static final String ANONYMOUS_USER = "anonymous";
+    private static final String WRITER_OWNER_PREFIX = "upload-writer:";
     public static final String LEGACY_MIGRATION_USER = "legacy-migration";
 
     private final UploadQuotaReservationRepository reservationRepository;
@@ -119,6 +120,16 @@ public class UploadQuotaService {
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void commit(UploadQuotaReservation reservation, Document doc) {
+        commitOwned(reservation, doc);
+    }
+
+    /** Joins upload publication so quota, document, ingest job, and outbox become visible atomically. */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void commitInCurrentTransaction(UploadQuotaReservation reservation, Document doc) {
+        commitOwned(reservation, doc);
+    }
+
+    private void commitOwned(UploadQuotaReservation reservation, Document doc) {
         if (reservation == null || reservation.getId() == null || doc == null || doc.getId() == null) {
             return;
         }
@@ -126,7 +137,11 @@ public class UploadQuotaService {
                 .orElseThrow(() -> new UploadIdempotencyConflictException(
                         "Upload attempt no longer owns its quota reservation"));
         if (current.getStatus() != UploadQuotaReservationStatus.PENDING
-                || !doc.getId().equals(current.getAttemptId())) {
+                || !doc.getId().equals(current.getAttemptId())
+                || reservation.getReleaseReason() == null
+                || !reservation.getReleaseReason().equals(current.getReleaseReason())
+                || current.getAttemptExpiresAt() == null
+                || !current.getAttemptExpiresAt().isAfter(Instant.now())) {
             throw new UploadIdempotencyConflictException(
                     "Upload attempt no longer owns its quota reservation");
         }
@@ -193,6 +208,207 @@ public class UploadQuotaService {
             reservation.setAttemptExpiresAt(current.getAttemptExpiresAt());
             reservationRepository.save(current);
         });
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void releaseCommittedInCurrentTransaction(UUID reservationId, String reason) {
+        if (reservationId == null) {
+            return;
+        }
+        reservationRepository.findById(reservationId).ifPresent(reservation -> {
+            if (reservation.getStatus() != UploadQuotaReservationStatus.COMMITTED) {
+                return;
+            }
+            reservation.setStatus(UploadQuotaReservationStatus.RELEASED);
+            reservation.setAttemptId(null);
+            reservation.setAttemptExpiresAt(null);
+            reservation.setReleaseReason(reason);
+            reservationRepository.save(reservation);
+        });
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public UploadAttemptLease acquireWriterLease(UploadQuotaReservation reservation) {
+        if (reservation == null || reservation.getId() == null || reservation.getAttemptId() == null) {
+            throw new UploadIdempotencyConflictException("Upload writer reservation is missing");
+        }
+        UploadQuotaReservation current = reservationRepository.findById(reservation.getId())
+                .orElseThrow(() -> new UploadIdempotencyConflictException(
+                        "Upload attempt no longer owns its quota reservation"));
+        if (current.getStatus() != UploadQuotaReservationStatus.PENDING
+                || !reservation.getAttemptId().equals(current.getAttemptId())
+                || reservation.getReleaseReason() != null
+                || current.getReleaseReason() != null
+                || current.getAttemptExpiresAt() == null
+                || !current.getAttemptExpiresAt().isAfter(Instant.now())) {
+            throw new UploadIdempotencyConflictException(
+                    "Upload attempt no longer owns its quota reservation");
+        }
+        String owner = WRITER_OWNER_PREFIX + UUID.randomUUID();
+        current.setReleaseReason(owner);
+        current.setAttemptExpiresAt(attemptExpiresAt());
+        reservation.setReleaseReason(owner);
+        reservation.setAttemptExpiresAt(current.getAttemptExpiresAt());
+        reservationRepository.save(current);
+        return new UploadAttemptLease(current.getId(), current.getAttemptId(), owner);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public boolean renewWriterLease(UploadAttemptLease lease) {
+        UploadQuotaReservation current = ownedWriterReservation(lease);
+        if (current == null) {
+            return false;
+        }
+        current.setAttemptExpiresAt(attemptExpiresAt());
+        reservationRepository.save(current);
+        return true;
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public boolean ownsWriterLease(UploadAttemptLease lease) {
+        return ownedWriterReservation(lease) != null;
+    }
+
+    private UploadQuotaReservation ownedWriterReservation(UploadAttemptLease lease) {
+        if (lease == null || lease.reservationId() == null || lease.attemptId() == null
+                || lease.ownerToken() == null) {
+            return null;
+        }
+        return reservationRepository.findById(lease.reservationId())
+                .filter(current -> current.getStatus() == UploadQuotaReservationStatus.PENDING)
+                .filter(current -> lease.attemptId().equals(current.getAttemptId()))
+                .filter(current -> lease.ownerToken().equals(current.getReleaseReason()))
+                .filter(current -> current.getAttemptExpiresAt() != null
+                        && current.getAttemptExpiresAt().isAfter(Instant.now()))
+                .orElse(null);
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public boolean claimCleanupInCurrentTransaction(
+            UploadQuotaAttemptCandidate candidate, UUID documentId, String owner,
+            Instant expiresAt, Instant now) {
+        if (candidate == null || candidate.reservationId() == null || candidate.attemptId() == null) {
+            return false;
+        }
+        UploadQuotaReservation current = reservationRepository.findById(candidate.reservationId()).orElse(null);
+        if (current == null
+                || current.getStatus() != UploadQuotaReservationStatus.PENDING
+                || !documentId.equals(current.getAttemptId())
+                || !candidate.attemptId().equals(current.getAttemptId())
+                || !java.util.Objects.equals(candidate.ownerToken(), current.getReleaseReason())
+                || current.getAttemptExpiresAt() == null
+                || current.getAttemptExpiresAt().isAfter(now)) {
+            return false;
+        }
+        current.setAttemptExpiresAt(expiresAt);
+        current.setReleaseReason(owner);
+        reservationRepository.save(current);
+        return true;
+    }
+
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void releaseCleanupInCurrentTransaction(
+            UploadQuotaReservation reservation, UUID documentId, String owner, String reason) {
+        UploadQuotaReservation current = reservationRepository.findById(reservation.getId())
+                .orElseThrow(() -> new UploadIdempotencyConflictException("Upload cleanup reservation is missing"));
+        if (current.getStatus() != UploadQuotaReservationStatus.PENDING
+                || !documentId.equals(current.getAttemptId())
+                || !owner.equals(current.getReleaseReason())) {
+            throw new UploadIdempotencyConflictException("Upload cleanup claim is stale");
+        }
+        current.setStatus(UploadQuotaReservationStatus.RELEASED);
+        current.setDocId(null);
+        current.setAttemptId(null);
+        current.setAttemptExpiresAt(null);
+        current.setReleaseReason(reason);
+        reservationRepository.save(current);
+    }
+
+    /** Joins a fenced domain transaction; Markdown import publication must not cross REQUIRES_NEW. */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public UploadQuotaReservation reserveForImport(UUID reservationId, String tenantId, String userId,
+                                                    UUID kbId, UUID docId,
+                                                    String idempotencyKey, long fileSize, String fingerprint) {
+        requireImportOwner(tenantId, userId);
+        UploadQuotaReservation existing = reservationRepository.findById(reservationId).orElse(null);
+        if (existing != null) {
+            if (!tenantId.equals(existing.getTenantId()) || !userId.equals(existing.getUserId())
+                    || !kbId.equals(existing.getKbId()) || !docId.equals(existing.getAttemptId())
+                    || !fingerprint.equals(existing.getFileFingerprint())
+                    || existing.getReservedBytes() != fileSize) {
+                throw new UploadIdempotencyConflictException("Markdown import quota reservation conflicts with its plan");
+            }
+            return existing;
+        }
+        if (properties.isEnabled()) reservationRepository.lockTenantUserScope(tenantId, userId);
+        enforceLimits(tenantId, userId, fileSize, true);
+        UploadQuotaReservation reservation = UploadQuotaReservation.builder().id(reservationId)
+                .tenantId(tenantId).userId(userId).kbId(kbId).attemptId(docId)
+                .attemptExpiresAt(attemptExpiresAt()).idempotencyKey(idempotencyKey)
+                .fileFingerprint(fingerprint).reservedBytes(fileSize)
+                .status(UploadQuotaReservationStatus.PENDING).build();
+        UploadQuotaReservation saved = reservationRepository.save(reservation);
+        recordWindowEvent(tenantId, userId, idempotencyKey, fileSize);
+        return saved;
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void commitForImport(UUID reservationId, String tenantId, String userId, UUID docId) {
+        requireImportOwner(tenantId, userId);
+        UploadQuotaReservation reservation = reservationRepository.findById(reservationId)
+                .orElseThrow(() -> new UploadIdempotencyConflictException("Markdown import quota reservation is missing"));
+        if (!tenantId.equals(reservation.getTenantId()) || !userId.equals(reservation.getUserId())) {
+            throw new UploadIdempotencyConflictException("Markdown import quota owner conflicts with its operation");
+        }
+        if (reservation.getStatus() == UploadQuotaReservationStatus.COMMITTED
+                && docId.equals(reservation.getDocId())) return;
+        if (reservation.getStatus() != UploadQuotaReservationStatus.PENDING
+                || !docId.equals(reservation.getAttemptId())) {
+            throw new UploadIdempotencyConflictException("Markdown import no longer owns its quota reservation");
+        }
+        reservation.setStatus(UploadQuotaReservationStatus.COMMITTED);
+        reservation.setDocId(docId); reservation.setAttemptId(null); reservation.setAttemptExpiresAt(null);
+        reservation.setReleaseReason(null); reservationRepository.save(reservation);
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY, readOnly = true)
+    public void verifyImportReservation(UUID reservationId, String tenantId, String userId,
+                                        UUID kbId, UUID docId, String idempotencyKey,
+                                        long fileSize, String fingerprint) {
+        requireImportOwner(tenantId, userId);
+        UploadQuotaReservation reservation = reservationRepository.findById(reservationId)
+                .orElseThrow(() -> new UploadIdempotencyConflictException("Markdown import quota reservation is missing"));
+        if (!tenantId.equals(reservation.getTenantId()) || !userId.equals(reservation.getUserId())
+                || !kbId.equals(reservation.getKbId()) || !docId.equals(reservation.getAttemptId())
+                || reservation.getDocId() != null || !idempotencyKey.equals(reservation.getIdempotencyKey())
+                || !fingerprint.equals(reservation.getFileFingerprint())
+                || reservation.getReservedBytes() == null || reservation.getReservedBytes() != fileSize
+                || reservation.getStatus() != UploadQuotaReservationStatus.PENDING) {
+            throw new UploadIdempotencyConflictException("Markdown import quota reservation conflicts with its plan");
+        }
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void releaseForImport(UUID reservationId, String tenantId, String userId, UUID docId, String reason) {
+        requireImportOwner(tenantId, userId);
+        reservationRepository.findById(reservationId).ifPresent(reservation -> {
+            if (!tenantId.equals(reservation.getTenantId()) || !userId.equals(reservation.getUserId())) {
+                throw new UploadIdempotencyConflictException("Markdown import quota owner conflicts with its operation");
+            }
+            boolean owns = reservation.getStatus() == UploadQuotaReservationStatus.PENDING
+                    && docId.equals(reservation.getAttemptId());
+            if (!owns) return;
+            reservation.setStatus(UploadQuotaReservationStatus.RELEASED);
+            reservation.setAttemptId(null); reservation.setAttemptExpiresAt(null); reservation.setReleaseReason(reason);
+            reservationRepository.save(reservation);
+        });
+    }
+
+    private void requireImportOwner(String tenantId, String userId) {
+        if (tenantId == null || tenantId.isBlank() || userId == null || userId.isBlank()) {
+            throw new UploadIdempotencyConflictException("Markdown import quota owner is missing");
+        }
     }
 
     @Transactional(readOnly = true)

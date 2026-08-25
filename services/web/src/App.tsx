@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
-import { clearAuthToken, getAuthToken, login } from '@/api/client'
+import { AUTH_EXPIRED_EVENT, clearAuthToken, getAuthToken, login } from '@/api/client'
 import { ToastProvider } from '@/components/Toast'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -9,6 +9,7 @@ import { KbDetailPage } from '@/pages/KbDetailPage'
 import { OpsAccountsPage } from '@/pages/OpsAccountsPage'
 import { OpsAuditPage } from '@/pages/OpsAuditPage'
 import { OpsRolesPage } from '@/pages/OpsRolesPage'
+import { OpsVectorCleanupPage } from '@/pages/OpsVectorCleanupPage'
 import { Database, Loader2 } from 'lucide-react'
 
 function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) {
@@ -69,13 +70,19 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) {
 export default function App() {
   const [authenticated, setAuthenticated] = useState(() => Boolean(getAuthToken()))
 
+  useEffect(() => {
+    const handleAuthExpired = () => setAuthenticated(false)
+    window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired)
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired)
+  }, [])
+
   const handleLogout = () => {
     clearAuthToken()
     setAuthenticated(false)
   }
 
   return (
-    <ToastProvider>
+    <ToastProvider key={authenticated ? 'authenticated' : 'anonymous'}>
       {authenticated ? (
         <BrowserRouter>
           <Routes>
@@ -84,6 +91,7 @@ export default function App() {
             <Route path="/ops/audit-logs" element={<OpsAuditPage onLogout={handleLogout} />} />
             <Route path="/ops/accounts" element={<OpsAccountsPage onLogout={handleLogout} />} />
             <Route path="/ops/roles" element={<OpsRolesPage onLogout={handleLogout} />} />
+            <Route path="/ops/vector-cleanup-tasks" element={<OpsVectorCleanupPage onLogout={handleLogout} />} />
           </Routes>
         </BrowserRouter>
       ) : (

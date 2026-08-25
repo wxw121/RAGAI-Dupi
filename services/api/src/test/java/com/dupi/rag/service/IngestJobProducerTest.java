@@ -61,6 +61,7 @@ class IngestJobProducerTest {
                 IngestJobMessage msg = mapper.readValue(payload, IngestJobMessage.class);
                 return mapper.readTree(payload).hasNonNull("executionId")
                         && msg.getJobId().equals(job.getId().toString())
+                        && msg.getExecutionId().equals(job.getExecutionId().toString())
                         && msg.getChunkSize() == 300
                         && msg.getChunkStrategy().equals("markdown")
                         && msg.getRetrievalProfile().equals("combined")

@@ -10,6 +10,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.UUID;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.never;
@@ -47,11 +48,15 @@ class DocumentTombstoneServiceTest {
     void recordDeletedSkipsWhenTombstoneAlreadyExists() {
         UUID docId = UUID.randomUUID();
         Document document = Document.builder().id(docId).kbId(UUID.randomUUID()).build();
-        when(repository.existsById(docId)).thenReturn(true);
+        DocumentTombstone tombstone = DocumentTombstone.builder()
+                .docId(docId)
+                .reason("DOCUMENT_DELETE")
+                .build();
+        when(repository.findByDocId(docId)).thenReturn(Optional.of(tombstone));
 
         service().recordDeleted(document);
 
-        verify(repository).existsById(docId);
+        verify(repository).findByDocId(docId);
         verify(repository, never()).save(org.mockito.ArgumentMatchers.any());
     }
 
@@ -65,8 +70,6 @@ class DocumentTombstoneServiceTest {
                 .objectKey("kb/doc/a.md")
                 .fileName("a.md")
                 .build();
-        when(repository.existsById(docId)).thenReturn(false);
-
         service().recordDeleted(document);
 
         ArgumentCaptor<DocumentTombstone> captor = ArgumentCaptor.forClass(DocumentTombstone.class);
@@ -77,6 +80,73 @@ class DocumentTombstoneServiceTest {
         assertThat(tombstone.getObjectKey()).isEqualTo("kb/doc/a.md");
         assertThat(tombstone.getFileName()).isEqualTo("a.md");
         assertThat(tombstone.getReason()).isEqualTo("DOCUMENT_DELETE");
+    }
+
+    @Test
+    void lateAbandonedWriterUpgradesDocumentDeleteTombstoneInsteadOfDroppingCleanupTruth() {
+        UUID docId = UUID.randomUUID();
+        Document document = Document.builder().id(docId).kbId(UUID.randomUUID())
+                .objectKey("kb/doc/late.md").fileName("late.md").build();
+        DocumentTombstone deletion = DocumentTombstone.builder().docId(docId)
+                .kbId(document.getKbId()).objectKey(document.getObjectKey())
+                .fileName(document.getFileName()).reason("DOCUMENT_DELETE").build();
+        when(repository.findByDocId(docId)).thenReturn(Optional.of(deletion));
+
+        service().recordAbandonedUpload(document);
+
+        assertThat(deletion.getReason()).isEqualTo("UPLOAD_ABANDONED");
+        verify(repository).save(deletion);
+    }
+
+    @Test
+    void documentDeletePreservesArmedLateWriterCleanupObligation() {
+        UUID docId = UUID.randomUUID();
+        Document document = Document.builder().id(docId).kbId(UUID.randomUUID())
+                .objectKey("kb/doc/slow.md").fileName("slow.md").build();
+        DocumentTombstone armed = DocumentTombstone.builder().docId(docId)
+                .kbId(document.getKbId()).objectKey(document.getObjectKey())
+                .fileName(document.getFileName()).reason("UPLOAD_WRITE_ARMED").build();
+        when(repository.findByDocId(docId)).thenReturn(Optional.of(armed));
+
+        service().recordDeleted(document);
+
+        assertThat(armed.getReason()).isEqualTo("UPLOAD_WRITE_ARMED");
+        verify(repository, never()).save(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void armUploadCleanupPersistsTruthBeforeRemoteWriteAndPublishDisarmsOnlyThatTruth() {
+        UUID docId = UUID.randomUUID();
+        Document document = Document.builder().id(docId).kbId(UUID.randomUUID())
+                .objectKey("kb/doc/armed.md").fileName("armed.md").build();
+        when(repository.findByDocId(docId)).thenReturn(Optional.empty());
+
+        service().armUploadCleanup(document);
+
+        ArgumentCaptor<DocumentTombstone> captor = ArgumentCaptor.forClass(DocumentTombstone.class);
+        verify(repository).save(captor.capture());
+        DocumentTombstone armed = captor.getValue();
+        assertThat(armed.getReason()).isEqualTo("UPLOAD_WRITE_ARMED");
+
+        when(repository.findByDocId(docId)).thenReturn(Optional.of(armed));
+        service().disarmUploadCleanup(document);
+
+        verify(repository).delete(armed);
+    }
+
+    @Test
+    void publishDisarmDoesNotEraseConcurrentDocumentDeletionTruth() {
+        UUID docId = UUID.randomUUID();
+        Document document = Document.builder().id(docId).kbId(UUID.randomUUID())
+                .objectKey("kb/doc/deleted.md").fileName("deleted.md").build();
+        DocumentTombstone deletion = DocumentTombstone.builder().docId(docId)
+                .kbId(document.getKbId()).objectKey(document.getObjectKey())
+                .reason("DOCUMENT_DELETE").build();
+        when(repository.findByDocId(docId)).thenReturn(Optional.of(deletion));
+
+        service().disarmUploadCleanup(document);
+
+        verify(repository, never()).delete(org.mockito.ArgumentMatchers.any());
     }
 
     @Test

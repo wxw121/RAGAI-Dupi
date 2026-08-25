@@ -3,6 +3,7 @@ package com.dupi.rag.service;
 import com.dupi.rag.config.RecoveryProperties;
 import com.dupi.rag.domain.entity.RecoveryArchive;
 import com.dupi.rag.domain.enums.RecoveryArchiveStatus;
+import com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus;
 import com.dupi.rag.exception.KnowledgeBaseMaintenanceException;
 import com.dupi.rag.exception.ResourceNotFoundException;
 import com.dupi.rag.repository.KnowledgeBaseRepository;
@@ -32,8 +33,12 @@ public class KnowledgeBaseMaintenanceService {
 
     @Transactional
     public void acquire(UUID knowledgeBaseId, UUID archiveId) {
-        knowledgeBases.findSystemByIdForUpdate(knowledgeBaseId)
+        var knowledgeBase = knowledgeBases.findSystemByIdForUpdate(knowledgeBaseId)
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found: " + knowledgeBaseId));
+        if (knowledgeBase.getLifecycleStatus() != KnowledgeBaseLifecycleStatus.READY) {
+            throw new KnowledgeBaseMaintenanceException(
+                    "Recovery maintenance cannot acquire a knowledge base during deletion or restore");
+        }
         RecoveryArchive archive = archives.findById(archiveId)
                 .orElseThrow(() -> new ResourceNotFoundException("Recovery archive not found: " + archiveId));
         if (!knowledgeBaseId.equals(archive.getSourceKnowledgeBaseId())
@@ -61,6 +66,12 @@ public class KnowledgeBaseMaintenanceService {
     }
 
     public void assertMutationAllowed(UUID knowledgeBaseId) {
+        knowledgeBases.findById(knowledgeBaseId).ifPresent(knowledgeBase -> {
+            if (knowledgeBase.getLifecycleStatus() == KnowledgeBaseLifecycleStatus.DELETING) {
+                throw new KnowledgeBaseMaintenanceException(
+                        "Knowledge base mutations are blocked while deletion is in progress");
+            }
+        });
         if (archives.existsBySourceKnowledgeBaseIdAndStatusIn(knowledgeBaseId, ACTIVE_ARCHIVE_STATES)) {
             throw new KnowledgeBaseMaintenanceException(
                     "Knowledge base mutations are blocked by an active recovery archive");

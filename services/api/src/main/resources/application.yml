@@ -20,8 +20,8 @@ spring:
     enabled: true
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 50MB
+      max-file-size: ${DUPI_MULTIPART_MAX_FILE_SIZE:1GB}
+      max-request-size: ${DUPI_MULTIPART_MAX_REQUEST_SIZE:1GB}
   data:
     redis:
       host: ${REDIS_HOST:localhost}
@@ -38,6 +38,11 @@ dupi:
     quiescence-timeout-seconds: ${DUPI_RECOVERY_QUIESCENCE_TIMEOUT_SECONDS:300}
     page-size: ${DUPI_RECOVERY_PAGE_SIZE:500}
     max-concurrent-jobs: ${DUPI_RECOVERY_MAX_CONCURRENT_JOBS:2}
+    max-import-zip-bytes: ${DUPI_RECOVERY_MAX_IMPORT_ZIP_BYTES:1073741824}
+    max-import-uncompressed-bytes: ${DUPI_RECOVERY_MAX_IMPORT_UNCOMPRESSED_BYTES:8589934592}
+    max-import-entry-bytes: ${DUPI_RECOVERY_MAX_IMPORT_ENTRY_BYTES:4294967296}
+    max-import-entries: ${DUPI_RECOVERY_MAX_IMPORT_ENTRIES:20000}
+    max-import-compression-ratio: ${DUPI_RECOVERY_MAX_IMPORT_COMPRESSION_RATIO:100}
   milvus:
     host: ${MILVUS_HOST:localhost}
     port: ${MILVUS_PORT:19530}
@@ -98,7 +103,19 @@ dupi:
     reconciliation-batch-size: ${UPLOAD_QUOTA_RECONCILIATION_BATCH_SIZE:50}
     reconciliation-cron: ${UPLOAD_QUOTA_RECONCILIATION_CRON:0 */5 * * * *}
   cleanup:
-    orphan-vectors-cron: ${ORPHAN_VECTOR_CLEANUP_CRON:0 30 3 * * *}
+    # Spread compensation work across the day: at most five tasks are processed per minute.
+    orphan-vectors-cron: ${ORPHAN_VECTOR_CLEANUP_CRON:0 * * * * *}
+  operations:
+    runner-enabled: ${OPERATION_RUNNER_ENABLED:true}
+    runner-cron: ${OPERATION_RUNNER_CRON:*/5 * * * * *}
+    runner-batch-size: ${OPERATION_RUNNER_BATCH_SIZE:10}
+    runner-cleanup-limit: ${OPERATION_RUNNER_CLEANUP_LIMIT:10}
+    staging-retention-hours: ${OPERATION_STAGING_RETENTION_HOURS:24}
+    staging-cleanup-limit: ${OPERATION_STAGING_CLEANUP_LIMIT:10}
+    staging-cleanup-cron: ${OPERATION_STAGING_CLEANUP_CRON:0 0 * * * *}
+    staging-lease-seconds: ${OPERATION_STAGING_LEASE_SECONDS:60}
+    lease-seconds: ${OPERATION_LEASE_SECONDS:60}
+    max-attempts: ${OPERATION_MAX_ATTEMPTS:5}
   audit:
     retention-days: ${AUDIT_RETENTION_DAYS:180}
     retention-cron: ${AUDIT_RETENTION_CRON:0 15 2 * * *}

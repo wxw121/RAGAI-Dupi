@@ -11,9 +11,46 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;
 
 class ProfileIndexStateServiceTest {
+
+    @Test
+    void reindexLocksBeforeMutatingTheManagedAggregate() {
+        DocumentRepository documents = mock(DocumentRepository.class);
+        KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase locked = spy(KnowledgeBase.builder().id(kbId).tenantId("tenant-a").build());
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a"))
+                .thenReturn(Optional.of(locked));
+
+        KnowledgeBase result = service(documents, knowledgeBases)
+                .lockForReindex(kbId, "tenant-a", "new-model", 2048);
+
+        var order = inOrder(knowledgeBases, locked);
+        order.verify(knowledgeBases).findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a");
+        order.verify(locked).setEmbeddingModel("new-model");
+        order.verify(locked).setEmbeddingDimension(2048);
+        assertThat(result).isSameAs(locked);
+    }
+
+    @Test
+    void deletionFirstRejectsReindexIntentBeforeDocumentsAreChanged() {
+        DocumentRepository documents = mock(DocumentRepository.class);
+        KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
+        UUID kbId = UUID.randomUUID();
+        KnowledgeBase deleting = KnowledgeBase.builder().id(kbId).tenantId("tenant-a")
+                .lifecycleStatus(com.dupi.rag.domain.enums.KnowledgeBaseLifecycleStatus.DELETING).build();
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kbId, "tenant-a"))
+                .thenReturn(Optional.of(deleting));
+
+        assertThatThrownBy(() -> service(documents, knowledgeBases)
+                .lockForReindex(kbId, "tenant-a", "new-model", 2048))
+                .isInstanceOf(com.dupi.rag.exception.OperationConflictException.class);
+
+        verifyNoInteractions(documents);
+    }
 
     @Test
     void readinessRequiresCompletedDocumentsAtTargetSchemaVersion() {
@@ -40,7 +77,8 @@ class ProfileIndexStateServiceTest {
         KnowledgeBase kb = KnowledgeBase.builder().id(UUID.randomUUID()).indexRevision(4L).build();
         Document first = Document.builder().indexSchemaVersion(2).build();
         Document second = Document.builder().indexSchemaVersion(2).build();
-        when(knowledgeBases.findByIdForUpdate(kb.getId())).thenReturn(java.util.Optional.of(kb));
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kb.getId(), kb.getTenantId()))
+                .thenReturn(java.util.Optional.of(kb));
 
         service.resetForReindex(kb, List.of(first, second));
 
@@ -58,7 +96,8 @@ class ProfileIndexStateServiceTest {
         KnowledgeBaseRepository knowledgeBases = mock(KnowledgeBaseRepository.class);
         ProfileIndexStateService service = service(documents, knowledgeBases);
         KnowledgeBase kb = KnowledgeBase.builder().id(kbId).profileIndexActivated(false).build();
-        when(knowledgeBases.findByIdForUpdate(kbId)).thenReturn(Optional.of(kb));
+        when(knowledgeBases.findByIdAndTenantIdForUpdateAnyStatus(kbId, kb.getTenantId()))
+                .thenReturn(Optional.of(kb));
 
         service.activateV2Index(kb);
 

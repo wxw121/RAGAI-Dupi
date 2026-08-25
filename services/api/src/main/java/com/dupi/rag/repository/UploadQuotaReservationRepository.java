@@ -2,7 +2,9 @@ package com.dupi.rag.repository;
 
 import com.dupi.rag.domain.entity.UploadQuotaReservation;
 import com.dupi.rag.domain.enums.UploadQuotaReservationStatus;
+import com.dupi.rag.service.UploadQuotaAttemptCandidate;
 import jakarta.persistence.LockModeType;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
@@ -25,19 +27,23 @@ public interface UploadQuotaReservationRepository extends JpaRepository<UploadQu
     @Query(value = "select pg_advisory_xact_lock(hashtext(:tenantId), hashtext(:userId))", nativeQuery = true)
     void lockTenantUserScope(@Param("tenantId") String tenantId, @Param("userId") String userId);
 
-    @Query(value = """
-            select * from upload_quota_reservations
-            where status = 'PENDING'
-              and attempt_id is not null
-              and attempt_expires_at is not null
-              and attempt_expires_at <= :now
-            order by updated_at asc
-            limit :limit
-            for update skip locked
-            """, nativeQuery = true)
-    List<UploadQuotaReservation> findStalePendingAttemptsForUpdate(
+    @Query("""
+            select new com.dupi.rag.service.UploadQuotaAttemptCandidate(
+                r.id, r.attemptId, r.releaseReason)
+            from UploadQuotaReservation r
+            where r.status = com.dupi.rag.domain.enums.UploadQuotaReservationStatus.PENDING
+              and r.attemptId is not null
+              and r.attemptExpiresAt is not null
+              and r.attemptExpiresAt <= :now
+              and not exists (
+                  select d.id from Document d
+                  where d.id = r.attemptId and d.importJobId is not null
+              )
+            order by r.updatedAt asc
+            """)
+    List<UploadQuotaAttemptCandidate> findStalePendingAttempts(
             @Param("now") Instant now,
-            @Param("limit") int limit
+            Pageable pageable
     );
 
     @Query("select coalesce(sum(r.reservedBytes), 0) from UploadQuotaReservation r " +
@@ -56,6 +62,11 @@ public interface UploadQuotaReservationRepository extends JpaRepository<UploadQu
                        @Param("status") UploadQuotaReservationStatus status);
 
     long countByStatus(UploadQuotaReservationStatus status);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select r from UploadQuotaReservation r where r.attemptId = :documentId or r.docId = :documentId")
+    Optional<UploadQuotaReservation> findByAttemptIdOrDocIdForUpdate(
+            @Param("documentId") UUID documentId);
 
     @Query("""
             select count(r) from UploadQuotaReservation r

@@ -5,11 +5,17 @@ import { RecoveryPanel } from './RecoveryPanel'
 
 const api = vi.hoisted(() => ({
   abandonRestore: vi.fn(), createArchive: vi.fn(), createRestore: vi.fn(), deleteArchive: vi.fn(),
-  getArchiveDownloadUrl: vi.fn(), listArchives: vi.fn(), listRestores: vi.fn(),
+  getArchiveDownloadUrl: vi.fn(), importArchive: vi.fn(), listArchives: vi.fn(), listRestores: vi.fn(),
   retryArchive: vi.fn(), retryRestore: vi.fn(),
 }))
+const toast = vi.hoisted(() => ({ showError: vi.fn(), showSuccess: vi.fn() }))
 vi.mock('@/api/recovery', () => api)
-vi.mock('@/components/Toast', () => ({ useToast: () => ({ showError: vi.fn(), showSuccess: vi.fn() }) }))
+vi.mock('@/components/Toast', () => ({ useToast: () => toast }))
+vi.mock('@/components/OperationProgress', () => ({
+  OperationProgress: ({ initialJob, onCompleted }: { initialJob: { id: string }; onCompleted: () => void }) => (
+    <button data-testid="operation-progress" onClick={() => { void Promise.resolve(onCompleted()).catch(() => undefined) }}>{initialJob.id}</button>
+  ),
+}))
 
 const completedArchive = {
   id: 'archive-1', sourceKnowledgeBaseId: 'kb-1', status: 'COMPLETED', schemaVersion: 1,
@@ -37,10 +43,11 @@ describe('RecoveryPanel', () => {
     api.getArchiveDownloadUrl.mockReturnValue('/download/archive-1')
     api.createArchive.mockResolvedValue({ ...completedArchive, id: 'archive-2', status: 'PREPARING' })
     api.createRestore.mockResolvedValue({ ...failedRestore, id: 'restore-2', status: 'VALIDATING' })
+    api.importArchive.mockResolvedValue(operationJob('recovery-import-job'))
     api.retryRestore.mockResolvedValue({ ...failedRestore, status: 'VALIDATING' })
     api.abandonRestore.mockResolvedValue(undefined)
   })
-  afterEach(() => { vi.clearAllMocks(); document.body.innerHTML = '' })
+  afterEach(() => { vi.resetAllMocks(); document.body.innerHTML = '' })
 
   it('shows archive evidence, download, failed restore reason and actions', async () => {
     const { container, root } = await renderPanel()
@@ -76,4 +83,87 @@ describe('RecoveryPanel', () => {
     expect(api.abandonRestore).toHaveBeenCalledWith('kb-1', 'restore-1')
     act(() => root.unmount())
   })
+
+  it('allows an in-progress restore to be abandoned', async () => {
+    api.listRestores.mockResolvedValue([{ ...failedRestore, status: 'VALIDATING' }])
+    const { container, root } = await renderPanel()
+
+    expect(container.querySelector('button[aria-label="Retry restore"]')).toBeNull()
+    expect(container.querySelector('button[aria-label="Abandon restore"]')).not.toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('tracks a Recovery ZIP operation and refreshes archives only after completion', async () => {
+    const { container, root } = await renderPanel()
+    const input = container.querySelector('input[aria-label="Recovery ZIP file"]') as HTMLInputElement
+    const file = new File(['zip-content'], 'recovery.zip', { type: 'application/zip' })
+    const listCallsBeforeImport = api.listArchives.mock.calls.length
+
+    await act(async () => {
+      Object.defineProperty(input, 'files', { configurable: true, value: [file] })
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(api.importArchive).toHaveBeenCalledWith('kb-1', file)
+    expect(container.textContent).toContain('recovery-import-job')
+    expect(api.listArchives).toHaveBeenCalledTimes(listCallsBeforeImport)
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="operation-progress"]')?.click()
+      await Promise.resolve()
+    })
+    expect(api.listArchives.mock.calls.length).toBeGreaterThan(listCallsBeforeImport)
+    act(() => root.unmount())
+  })
+
+  it('does not accept a second Recovery ZIP while the first operation is retained', async () => {
+    api.importArchive
+      .mockResolvedValueOnce(operationJob('first-import-job'))
+      .mockResolvedValueOnce(operationJob('second-import-job'))
+    const { container, root } = await renderPanel()
+    const input = container.querySelector('input[aria-label="Recovery ZIP file"]') as HTMLInputElement
+
+    for (const name of ['first.zip', 'second.zip']) {
+      await act(async () => {
+        Object.defineProperty(input, 'files', { configurable: true, value: [new File(['zip'], name)] })
+        input.dispatchEvent(new Event('change', { bubbles: true }))
+        await Promise.resolve()
+      })
+    }
+
+    expect(api.importArchive).toHaveBeenCalledTimes(1)
+    expect(container.textContent).toContain('first-import-job')
+    expect(container.textContent).not.toContain('second-import-job')
+    act(() => root.unmount())
+  })
+
+  it('retains completed import evidence when archive refresh fails', async () => {
+    const { container, root } = await renderPanel()
+    const input = container.querySelector('input[aria-label="Recovery ZIP file"]') as HTMLInputElement
+    await act(async () => {
+      Object.defineProperty(input, 'files', { configurable: true, value: [new File(['zip'], 'first.zip')] })
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+      await Promise.resolve()
+    })
+    toast.showSuccess.mockClear()
+    api.listArchives.mockRejectedValueOnce(new Error('refresh unavailable'))
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="operation-progress"]')?.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(container.textContent).toContain('recovery-import-job')
+    expect(toast.showSuccess).not.toHaveBeenCalledWith('Recovery ZIP imported and verified')
+    act(() => root.unmount())
+  })
 })
+
+function operationJob(id: string) {
+  return {
+    id, operationType: 'RECOVERY_ARCHIVE_IMPORT', aggregateType: 'KNOWLEDGE_BASE', aggregateId: 'kb-1',
+    status: 'RUNNING', attemptCount: 0, nextAttemptAt: null, errorCode: null, errorMessage: null,
+    createdAt: '2026-08-25T00:00:00Z', updatedAt: '2026-08-25T00:00:00Z', completedAt: null, steps: [],
+  }
+}

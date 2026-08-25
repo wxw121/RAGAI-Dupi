@@ -14,6 +14,8 @@ import com.dupi.rag.repository.UploadWindowEventRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -63,6 +65,73 @@ class UploadQuotaServiceTest {
         assertThat(reservation.getFileFingerprint()).isEqualTo("sha256:file-a");
         verify(reservationRepository).lockTenantUserScope("tenant-a", "alice");
         verify(windowEventRepository).save(argThat(event -> event.getBytes() == 10L && event.getIdempotencyKey().equals("key-1")));
+    }
+
+    @Test
+    void markdownImportQuotaUsesExplicitDurableOwnerForReservationAndWindow() {
+        UUID reservationId = UUID.randomUUID();
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        when(reservationRepository.sumActiveReservedBytes("tenant-enterprise", "owner@example.test")).thenReturn(0L);
+        when(reservationRepository.countActiveReservedDocuments("tenant-enterprise", "owner@example.test")).thenReturn(0L);
+        when(windowEventRepository.sumBytesSince(eq("tenant-enterprise"), eq("owner@example.test"), any(Instant.class)))
+                .thenReturn(0L);
+        when(reservationRepository.save(any(UploadQuotaReservation.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        UploadQuotaReservation reservation = service().reserveForImport(
+                reservationId, "tenant-enterprise", "owner@example.test", kbId, docId,
+                "markdown-key", 10L, "sha256:markdown");
+
+        assertThat(reservation.getTenantId()).isEqualTo("tenant-enterprise");
+        assertThat(reservation.getUserId()).isEqualTo("owner@example.test");
+        verify(reservationRepository).lockTenantUserScope("tenant-enterprise", "owner@example.test");
+        verify(windowEventRepository).save(argThat(event ->
+                "tenant-enterprise".equals(event.getTenantId())
+                        && "owner@example.test".equals(event.getUserId())
+                        && "markdown-key".equals(event.getIdempotencyKey())));
+    }
+
+    @Test
+    void markdownImportCommitAndReleaseRejectDifferentDurableOwner() {
+        UUID reservationId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UploadQuotaReservation reservation = reservation(UUID.randomUUID(), null, "markdown-key", "sha256:markdown");
+        reservation.setId(reservationId);
+        reservation.setTenantId("tenant-enterprise");
+        reservation.setUserId("owner@example.test");
+        reservation.setAttemptId(docId);
+        when(reservationRepository.findById(reservationId)).thenReturn(Optional.of(reservation));
+
+        assertThatThrownBy(() -> service().commitForImport(
+                reservationId, "other-tenant", "owner@example.test", docId))
+                .isInstanceOf(UploadIdempotencyConflictException.class);
+        assertThatThrownBy(() -> service().releaseForImport(
+                reservationId, "tenant-enterprise", "other-user", docId, "compensated"))
+                .isInstanceOf(UploadIdempotencyConflictException.class);
+
+        assertThat(reservation.getStatus()).isEqualTo(UploadQuotaReservationStatus.PENDING);
+        assertThat(reservation.getAttemptId()).isEqualTo(docId);
+        assertThat(reservation.getTenantId()).isEqualTo("tenant-enterprise");
+        assertThat(reservation.getUserId()).isEqualTo("owner@example.test");
+    }
+
+    @ParameterizedTest(name = "rejects mutated import quota field: {0}")
+    @EnumSource(ImportQuotaMutation.class)
+    void markdownImportVerificationRejectsEveryMutatedQuotaField(ImportQuotaMutation mutation) {
+        UUID reservationId = UUID.randomUUID();
+        UUID kbId = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+        UploadQuotaReservation reservation = UploadQuotaReservation.builder().id(reservationId)
+                .tenantId("tenant-enterprise").userId("owner@example.test").kbId(kbId).attemptId(docId)
+                .idempotencyKey("markdown-key").fileFingerprint("sha256:markdown").reservedBytes(10L)
+                .status(UploadQuotaReservationStatus.PENDING).build();
+        mutation.apply(reservation);
+        when(reservationRepository.findById(reservationId)).thenReturn(Optional.of(reservation));
+
+        assertThatThrownBy(() -> service().verifyImportReservation(
+                reservationId, "tenant-enterprise", "owner@example.test", kbId, docId,
+                "markdown-key", 10L, "sha256:markdown"))
+                .isInstanceOf(UploadIdempotencyConflictException.class);
     }
 
     @Test
@@ -152,6 +221,8 @@ class UploadQuotaServiceTest {
         UUID docId = UUID.randomUUID();
         UploadQuotaReservation reservation = reservation(kbId, null, "key-1", "a.md:10:text/markdown");
         reservation.setAttemptId(docId);
+        reservation.setReleaseReason("upload-writer:test");
+        reservation.setAttemptExpiresAt(Instant.now().plusSeconds(30));
         Document doc = Document.builder().id(docId).kbId(kbId).fileSize(10L).build();
         lenient().when(reservationRepository.findById(reservation.getId())).thenReturn(Optional.of(reservation));
 
@@ -288,6 +359,68 @@ class UploadQuotaServiceTest {
         service.refreshAttemptLease(stale);
 
         assertThat(current.getStatus()).isEqualTo(UploadQuotaReservationStatus.PENDING);
+        verify(reservationRepository, never()).save(any());
+    }
+
+    @Test
+    void cleanupCannotClaimWhileWriterHeartbeatHasRenewedTheCurrentAttempt() {
+        UUID attemptId = UUID.randomUUID();
+        UploadQuotaReservation current = reservation(UUID.randomUUID(), attemptId, "key", "sha256:file");
+        current.setStatus(UploadQuotaReservationStatus.PENDING);
+        current.setReleaseReason("upload-writer:live");
+        current.setAttemptExpiresAt(Instant.now().plusSeconds(30));
+        when(reservationRepository.findById(current.getId())).thenReturn(Optional.of(current));
+        UploadQuotaAttemptCandidate staleDiscovery = new UploadQuotaAttemptCandidate(
+                current.getId(), attemptId, "upload-writer:live");
+
+        boolean claimed = service().claimCleanupInCurrentTransaction(
+                staleDiscovery, attemptId, "upload-cleanup:test",
+                Instant.now().plusSeconds(60), Instant.now());
+
+        assertThat(claimed).isFalse();
+        assertThat(current.getReleaseReason()).isEqualTo("upload-writer:live");
+        verify(reservationRepository, never()).save(any());
+    }
+
+    @Test
+    void writerCannotAcquireAfterCleanupClaimedThePreparedAttempt() {
+        UUID attemptId = UUID.randomUUID();
+        UploadQuotaReservation prepared = reservation(UUID.randomUUID(), null, "key", "sha256:file");
+        prepared.setAttemptId(attemptId);
+        prepared.setReleaseReason(null);
+        prepared.setAttemptExpiresAt(Instant.now().plusSeconds(30));
+        UploadQuotaReservation claimed = reservation(prepared.getKbId(), null, "key", "sha256:file");
+        claimed.setId(prepared.getId());
+        claimed.setAttemptId(attemptId);
+        claimed.setReleaseReason("upload-cleanup:claimed");
+        claimed.setAttemptExpiresAt(Instant.now().plusSeconds(60));
+        when(reservationRepository.findById(prepared.getId())).thenReturn(Optional.of(claimed));
+
+        assertThatThrownBy(() -> service().acquireWriterLease(prepared))
+                .isInstanceOf(UploadIdempotencyConflictException.class)
+                .hasMessageContaining("no longer owns");
+
+        assertThat(claimed.getReleaseReason()).isEqualTo("upload-cleanup:claimed");
+        verify(reservationRepository, never()).save(any());
+    }
+
+    @Test
+    void expiredWriterCannotRenewOwnOrCommitTheAttempt() {
+        UUID attemptId = UUID.randomUUID();
+        UploadQuotaReservation current = reservation(UUID.randomUUID(), null, "key", "sha256:file");
+        current.setAttemptId(attemptId);
+        current.setReleaseReason("upload-writer:expired");
+        current.setAttemptExpiresAt(Instant.now().minusSeconds(1));
+        when(reservationRepository.findById(current.getId())).thenReturn(Optional.of(current));
+        UploadAttemptLease lease = new UploadAttemptLease(
+                current.getId(), attemptId, "upload-writer:expired");
+
+        assertThat(service().ownsWriterLease(lease)).isFalse();
+        assertThat(service().renewWriterLease(lease)).isFalse();
+        assertThatThrownBy(() -> service().commit(
+                current, Document.builder().id(attemptId).kbId(current.getKbId()).build()))
+                .isInstanceOf(UploadIdempotencyConflictException.class)
+                .hasMessageContaining("no longer owns");
         verify(reservationRepository, never()).save(any());
     }
 
@@ -505,5 +638,18 @@ class UploadQuotaServiceTest {
                 .createdAt(Instant.now())
                 .updatedAt(Instant.now())
                 .build();
+    }
+
+    private enum ImportQuotaMutation {
+        TENANT { @Override void apply(UploadQuotaReservation value) { value.setTenantId("other"); } },
+        USER { @Override void apply(UploadQuotaReservation value) { value.setUserId("other"); } },
+        KNOWLEDGE_BASE { @Override void apply(UploadQuotaReservation value) { value.setKbId(UUID.randomUUID()); } },
+        DOCUMENT { @Override void apply(UploadQuotaReservation value) { value.setAttemptId(UUID.randomUUID()); } },
+        IDEMPOTENCY_KEY { @Override void apply(UploadQuotaReservation value) { value.setIdempotencyKey("other"); } },
+        FINGERPRINT { @Override void apply(UploadQuotaReservation value) { value.setFileFingerprint("sha256:other"); } },
+        SIZE { @Override void apply(UploadQuotaReservation value) { value.setReservedBytes(11L); } },
+        STATUS { @Override void apply(UploadQuotaReservation value) { value.setStatus(UploadQuotaReservationStatus.RELEASED); } };
+
+        abstract void apply(UploadQuotaReservation value);
     }
 }

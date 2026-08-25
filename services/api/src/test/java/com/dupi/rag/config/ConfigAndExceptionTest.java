@@ -3,6 +3,8 @@ package com.dupi.rag.config;
 import com.dupi.rag.exception.GlobalExceptionHandler;
 import com.dupi.rag.exception.KnowledgeBaseMaintenanceException;
 import com.dupi.rag.exception.ResourceNotFoundException;
+import com.dupi.rag.exception.RecoveryConflictException;
+import com.dupi.rag.exception.RagEvalCaseConflictException;
 import com.dupi.rag.exception.UploadIdempotencyConflictException;
 import com.dupi.rag.exception.UploadPayloadTooLargeException;
 import com.dupi.rag.exception.UploadQuotaExceededException;
@@ -23,8 +25,11 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.filter.CorsFilter;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -35,6 +40,27 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
 
 class ConfigAndExceptionTest {
+
+    @Test
+    void operationRunnerAndStagingPolicyAreEnvironmentConfigurable() throws IOException {
+        String application = Files.readString(Path.of("src/main/resources/application.yml"));
+        String environment = Files.readString(Path.of("../..", "deploy", ".env.example"));
+
+        assertThat(application)
+                .contains("runner-cron: ${OPERATION_RUNNER_CRON:*/5 * * * * *}")
+                .contains("runner-batch-size: ${OPERATION_RUNNER_BATCH_SIZE:10}")
+                .contains("runner-cleanup-limit: ${OPERATION_RUNNER_CLEANUP_LIMIT:10}")
+                .contains("staging-retention-hours: ${OPERATION_STAGING_RETENTION_HOURS:24}")
+                .contains("staging-cleanup-limit: ${OPERATION_STAGING_CLEANUP_LIMIT:10}")
+                .contains("staging-cleanup-cron: ${OPERATION_STAGING_CLEANUP_CRON:0 0 * * * *}");
+        assertThat(environment)
+                .contains("OPERATION_RUNNER_CRON=*/5 * * * * *")
+                .contains("OPERATION_RUNNER_BATCH_SIZE=10")
+                .contains("OPERATION_RUNNER_CLEANUP_LIMIT=10")
+                .contains("OPERATION_STAGING_RETENTION_HOURS=24")
+                .contains("OPERATION_STAGING_CLEANUP_LIMIT=10")
+                .contains("OPERATION_STAGING_CLEANUP_CRON=0 0 * * * *");
+    }
 
     @Test
     void corsConfigAllowsLocalDevelopmentOriginsAndStandardMethods() {
@@ -416,11 +442,14 @@ class ConfigAndExceptionTest {
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/import");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/documents");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/documents/batch");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/documents/markdown-package");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/chat");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/retrieve");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/reindex");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/ingest-jobs/job/retry");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/rag-eval/cases");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/rag-eval/cases/generation-preview");
+        assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/rag-eval/cases/generation-confirm");
         assertAllowed(filter, tokenService, "operator", "PATCH", "/api/v1/knowledge-bases/kb/rag-eval/cases/case");
         assertAllowed(filter, tokenService, "operator", "DELETE", "/api/v1/knowledge-bases/kb/rag-eval/cases/case");
         assertAllowed(filter, tokenService, "operator", "POST", "/api/v1/knowledge-bases/kb/rag-eval/runs");
@@ -913,6 +942,12 @@ class ConfigAndExceptionTest {
         assertThat(badRequest.getBody().getError()).isEqualTo("bad_request");
         assertThat(badRequest.getBody().getMessage()).isEqualTo("bad input");
 
+        var evalConflict = handler.handleRagEvalCaseConflict(
+                RagEvalCaseConflictException.invalidSources(List.of("missing: guide.md")));
+        assertThat(evalConflict.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(evalConflict.getBody().getError()).isEqualTo("rag_eval_sources_invalid");
+        assertThat(evalConflict.getBody().getStage()).isEqualTo("rag_eval_cases");
+
         IllegalStateException providerFailure = new IllegalStateException("provider down");
         com.dupi.rag.exception.ChatPipelineException chatException =
                 new com.dupi.rag.exception.ChatPipelineException(
@@ -940,6 +975,12 @@ class ConfigAndExceptionTest {
             assertThat(maintenance.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
             assertThat(maintenance.getBody().getError()).isEqualTo("knowledge_base_maintenance");
 
+            var recoveryConflict = handler.handleRecoveryConflict(
+                    new RecoveryConflictException("restore is active", "Abandon it first."));
+            assertThat(recoveryConflict.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+            assertThat(recoveryConflict.getBody().getError()).isEqualTo("recovery_conflict");
+            assertThat(recoveryConflict.getBody().getSuggestion()).isEqualTo("Abandon it first.");
+
             var conflict = handler.handleUploadIdempotencyConflict(
                     new UploadIdempotencyConflictException("key reused"));
             assertThat(conflict.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
@@ -949,6 +990,10 @@ class ConfigAndExceptionTest {
                     new UploadPayloadTooLargeException("file too large"));
             assertThat(tooLarge.getStatusCode()).isEqualTo(HttpStatus.PAYLOAD_TOO_LARGE);
             assertThat(tooLarge.getBody().getError()).isEqualTo("upload_payload_too_large");
+
+            var multipartTooLarge = handler.handleMultipartTooLarge(new MaxUploadSizeExceededException(1024));
+            assertThat(multipartTooLarge.getStatusCode()).isEqualTo(HttpStatus.PAYLOAD_TOO_LARGE);
+            assertThat(multipartTooLarge.getBody().getError()).isEqualTo("multipart_payload_too_large");
 
             var throttled = handler.handleUploadQuotaExceeded(
                     new UploadQuotaExceededException("window exhausted", 30L));

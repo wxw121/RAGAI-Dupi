@@ -4,12 +4,10 @@ import com.dupi.rag.config.UploadQuotaProperties;
 import com.dupi.rag.domain.entity.Document;
 import com.dupi.rag.domain.entity.IngestJob;
 import com.dupi.rag.domain.entity.IngestOutboxEvent;
-import com.dupi.rag.domain.entity.UploadQuotaReservation;
 import com.dupi.rag.domain.enums.DocumentStatus;
 import com.dupi.rag.domain.enums.IngestJobStatus;
 import com.dupi.rag.domain.enums.IngestOutboxStatus;
 import com.dupi.rag.domain.enums.IngestStage;
-import com.dupi.rag.domain.enums.UploadQuotaReservationStatus;
 import com.dupi.rag.repository.DocumentRepository;
 import com.dupi.rag.repository.IngestJobRepository;
 import com.dupi.rag.repository.IngestOutboxEventRepository;
@@ -18,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.Query;
 
 import java.lang.reflect.Method;
@@ -28,209 +27,193 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class UploadQuotaReconciliationServiceTest {
-
-    @Mock UploadQuotaReservationRepository reservationRepository;
-    @Mock DocumentRepository documentRepository;
-    @Mock IngestJobRepository ingestJobRepository;
-    @Mock IngestOutboxEventRepository outboxRepository;
-    @Mock MinioStorageService minioStorageService;
+    @Mock UploadQuotaReservationRepository reservations;
+    @Mock DocumentRepository documents;
+    @Mock IngestJobRepository jobs;
+    @Mock IngestOutboxEventRepository outbox;
+    @Mock MinioStorageService storage;
+    @Mock UploadIntentCleanupService intentCleanup;
+    @Mock UploadQuotaReconciliationPersistenceService persistence;
+    @Mock AbandonedUploadCleanupService abandonedUploads;
 
     @Test
-    void activeAttemptLeaseIsNotClaimedByStaleReconciler() {
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
+    void activeWriterLeaseProducesNoDiscoveryCandidate() {
+        when(reservations.findStalePendingAttempts(any(Instant.class), any(Pageable.class)))
                 .thenReturn(List.of());
 
         assertThat(service().reconcileStalePendingReservations()).isZero();
 
-        verifyNoInteractions(documentRepository, ingestJobRepository, outboxRepository, minioStorageService);
+        verifyNoInteractions(documents, jobs, outbox, storage, persistence);
     }
 
     @Test
-    void stalePendingReservationWithoutDocumentIsReleased() {
-        UUID attemptId = UUID.randomUUID();
-        UploadQuotaReservation reservation = pendingReservation(attemptId);
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
-                .thenReturn(List.of(reservation));
-        when(documentRepository.findById(attemptId)).thenReturn(Optional.empty());
+    void missingDocumentUsesFencedShortTransaction() {
+        UploadQuotaAttemptCandidate candidate = candidate();
+        when(reservations.findStalePendingAttempts(any(Instant.class), any(Pageable.class)))
+                .thenReturn(List.of(candidate));
+        when(documents.findById(candidate.attemptId())).thenReturn(Optional.empty());
+        when(persistence.releaseMissing(candidate,
+                "Released stale upload attempt without durable document")).thenReturn(true);
 
         assertThat(service().reconcileStalePendingReservations()).isEqualTo(1);
 
-        assertThat(reservation.getStatus()).isEqualTo(UploadQuotaReservationStatus.RELEASED);
-        assertThat(reservation.getAttemptId()).isNull();
-        assertThat(reservation.getReleaseReason()).contains("stale upload attempt");
-        verify(reservationRepository).save(reservation);
-        verifyNoInteractions(minioStorageService);
+        verify(persistence).releaseMissing(candidate,
+                "Released stale upload attempt without durable document");
+        verifyNoInteractions(storage);
     }
 
     @Test
-    void scheduledReconcileProcessesStalePendingReservation() {
-        UUID attemptId = UUID.randomUUID();
-        UploadQuotaReservation reservation = pendingReservation(attemptId);
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
-                .thenReturn(List.of(reservation));
-        when(documentRepository.findById(attemptId)).thenReturn(Optional.empty());
-
-        service().reconcileStalePendingReservationsOnSchedule();
-
-        assertThat(reservation.getStatus()).isEqualTo(UploadQuotaReservationStatus.RELEASED);
-        verify(reservationRepository).save(reservation);
-    }
-
-    @Test
-    void durableDocumentJobAndOutboxPromotesStalePendingReservationToCommitted() {
-        UUID attemptId = UUID.randomUUID();
-        UploadQuotaReservation reservation = pendingReservation(attemptId);
-        Document doc = document(reservation.getKbId(), attemptId);
-        IngestJob job = job(reservation.getKbId(), attemptId);
-        IngestOutboxEvent outbox = outbox(job.getId(), reservation.getKbId(), attemptId, IngestOutboxStatus.PENDING);
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
-                .thenReturn(List.of(reservation));
-        when(documentRepository.findById(attemptId)).thenReturn(Optional.of(doc));
-        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(attemptId)).thenReturn(Optional.of(job));
-        when(outboxRepository.findByJobId(job.getId())).thenReturn(List.of(outbox));
+    void publishedUploadUsesFencedPersistenceBoundary() {
+        UploadQuotaAttemptCandidate candidate = candidate();
+        Document document = document(candidate.attemptId(), DocumentStatus.PENDING);
+        IngestJob job = job(candidate.attemptId(), IngestJobStatus.PENDING, IngestStage.QUEUED);
+        when(reservations.findStalePendingAttempts(any(Instant.class), any(Pageable.class)))
+                .thenReturn(List.of(candidate));
+        when(documents.findById(candidate.attemptId())).thenReturn(Optional.of(document));
+        when(jobs.findTopByDocIdOrderByCreatedAtDesc(candidate.attemptId())).thenReturn(Optional.of(job));
+        when(outbox.findByJobId(job.getId())).thenReturn(List.of(IngestOutboxEvent.builder()
+                .jobId(job.getId()).status(IngestOutboxStatus.PENDING).build()));
+        when(persistence.commitPublished(candidate, document.getId(), job.getId())).thenReturn(true);
 
         assertThat(service().reconcileStalePendingReservations()).isEqualTo(1);
 
-        assertThat(reservation.getStatus()).isEqualTo(UploadQuotaReservationStatus.COMMITTED);
-        assertThat(reservation.getDocId()).isEqualTo(attemptId);
-        assertThat(reservation.getAttemptId()).isNull();
-        verify(reservationRepository).save(reservation);
-        verifyNoInteractions(minioStorageService);
-        verify(ingestJobRepository, never()).delete(any());
+        verify(persistence).commitPublished(candidate, document.getId(), job.getId());
+        verifyNoInteractions(storage);
     }
 
     @Test
-    void partialDocumentAndJobAreCompensatedBeforeReservationRelease() {
-        UUID attemptId = UUID.randomUUID();
-        UploadQuotaReservation reservation = pendingReservation(attemptId);
-        Document doc = document(reservation.getKbId(), attemptId);
-        IngestJob job = job(reservation.getKbId(), attemptId);
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
-                .thenReturn(List.of(reservation));
-        when(documentRepository.findById(attemptId)).thenReturn(Optional.of(doc));
-        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(attemptId)).thenReturn(Optional.of(job));
-        when(outboxRepository.findByJobId(job.getId())).thenReturn(List.of());
-        when(minioStorageService.delete(doc.getObjectKey())).thenReturn(true);
+    void legacyPartialUploadClaimsBeforeStorageAndFinalizesAfterDeletion() {
+        UploadQuotaAttemptCandidate candidate = candidate();
+        Document document = document(candidate.attemptId(), DocumentStatus.FAILED);
+        IngestJob job = job(candidate.attemptId(), IngestJobStatus.FAILED, IngestStage.FAILED);
+        UploadLegacyCleanupClaim claim = new UploadLegacyCleanupClaim(
+                candidate.reservationId(), candidate.attemptId(), document.getId(), job.getId(),
+                document.getObjectKey(), "upload-reconciliation:test");
+        stubCandidate(candidate, document, job);
+        when(persistence.claimLegacyCleanup(any(), any(), any(), any(Instant.class)))
+                .thenReturn(Optional.of(claim));
+        when(storage.delete(document.getObjectKey())).thenReturn(true);
+        when(persistence.completeLegacyCleanup(claim,
+                "Released stale upload attempt after cleanup")).thenReturn(true);
 
         assertThat(service().reconcileStalePendingReservations()).isEqualTo(1);
 
-        verify(outboxRepository).deleteByJobId(job.getId());
-        verify(ingestJobRepository).delete(job);
-        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.FAILED);
-        assertThat(doc.getQuotaReservationId()).isNull();
-        verify(documentRepository).save(doc);
-        assertThat(reservation.getStatus()).isEqualTo(UploadQuotaReservationStatus.RELEASED);
-        assertThat(reservation.getDocId()).isNull();
-        assertThat(reservation.getAttemptId()).isNull();
-        verify(reservationRepository).save(reservation);
+        verify(storage).delete(document.getObjectKey());
+        verify(persistence).completeLegacyCleanup(claim,
+                "Released stale upload attempt after cleanup");
     }
 
     @Test
-    void objectCleanupFailureRetainsPendingReservationForRetry() {
-        UUID attemptId = UUID.randomUUID();
-        UploadQuotaReservation reservation = pendingReservation(attemptId);
-        Document doc = document(reservation.getKbId(), attemptId);
-        IngestJob job = job(reservation.getKbId(), attemptId);
-        when(reservationRepository.findStalePendingAttemptsForUpdate(any(Instant.class), anyInt()))
-                .thenReturn(List.of(reservation));
-        when(documentRepository.findById(attemptId)).thenReturn(Optional.of(doc));
-        when(ingestJobRepository.findTopByDocIdOrderByCreatedAtDesc(attemptId)).thenReturn(Optional.of(job));
-        when(outboxRepository.findByJobId(job.getId())).thenReturn(List.of());
-        when(minioStorageService.delete(doc.getObjectKey())).thenReturn(false);
+    void storageFailureLeavesClaimDurableForExpiryAndReplay() {
+        UploadQuotaAttemptCandidate candidate = candidate();
+        Document document = document(candidate.attemptId(), DocumentStatus.FAILED);
+        IngestJob job = job(candidate.attemptId(), IngestJobStatus.FAILED, IngestStage.FAILED);
+        UploadLegacyCleanupClaim claim = new UploadLegacyCleanupClaim(
+                candidate.reservationId(), candidate.attemptId(), document.getId(), job.getId(),
+                document.getObjectKey(), "upload-reconciliation:test");
+        stubCandidate(candidate, document, job);
+        when(persistence.claimLegacyCleanup(any(), any(), any(), any(Instant.class)))
+                .thenReturn(Optional.of(claim));
+        when(storage.delete(document.getObjectKey())).thenReturn(false);
 
         assertThat(service().reconcileStalePendingReservations()).isZero();
 
-        assertThat(reservation.getStatus()).isEqualTo(UploadQuotaReservationStatus.PENDING);
-        assertThat(reservation.getAttemptId()).isEqualTo(attemptId);
-        assertThat(reservation.getReleaseReason()).contains("object cleanup failed");
-        verify(reservationRepository).save(reservation);
-        verify(outboxRepository, never()).deleteByJobId(any());
-        verify(ingestJobRepository, never()).delete(any());
-        verify(documentRepository, never()).save(any());
+        verify(persistence, never()).completeLegacyCleanup(any(), any());
     }
 
     @Test
-    void staleClaimQueryUsesBoundedSkipLockedLeasePredicate() throws Exception {
+    void uploadIntentUsesJobAndQuotaFenceBeforeObjectCleanup() {
+        UploadQuotaAttemptCandidate candidate = candidate();
+        Document document = document(candidate.attemptId(), DocumentStatus.UPLOADING);
+        IngestJob job = job(candidate.attemptId(), IngestJobStatus.UPLOAD_INTENT, IngestStage.UPLOAD_PENDING);
+        UploadIntentCleanupClaim claim = new UploadIntentCleanupClaim(
+                candidate.reservationId(), document.getId(), job.getId(), document.getObjectKey(),
+                "upload-cleanup:test");
+        stubCandidate(candidate, document, job);
+        when(intentCleanup.claim(any(), any(Instant.class)))
+                .thenReturn(UploadIntentCleanupDecision.claimed(claim));
+        when(storage.delete(document.getObjectKey())).thenReturn(true);
+
+        assertThat(service().reconcileStalePendingReservations()).isEqualTo(1);
+
+        verify(intentCleanup).complete(claim, "Upload attempt expired after object cleanup");
+    }
+
+    @Test
+    void importOwnedReservationRemainsOutsideOrdinaryReconciliation() {
+        UploadQuotaAttemptCandidate candidate = candidate();
+        Document document = document(candidate.attemptId(), DocumentStatus.IMPORTING);
+        document.setImportJobId(UUID.randomUUID());
+        when(reservations.findStalePendingAttempts(any(Instant.class), any(Pageable.class)))
+                .thenReturn(List.of(candidate));
+        when(documents.findById(candidate.attemptId())).thenReturn(Optional.of(document));
+
+        assertThat(service().reconcileStalePendingReservations()).isZero();
+
+        verifyNoInteractions(jobs, outbox, storage, persistence);
+    }
+
+    @Test
+    void scheduledPassAlsoReplaysAbandonedWriterObjects() {
+        when(reservations.findStalePendingAttempts(any(Instant.class), any(Pageable.class)))
+                .thenReturn(List.of());
+        when(abandonedUploads.cleanup(10)).thenReturn(1);
+
+        service().reconcileStalePendingReservationsOnSchedule();
+
+        verify(abandonedUploads).cleanup(10);
+    }
+
+    @Test
+    void discoveryReturnsImmutableFenceWithoutHoldingRowsAcrossIo() throws Exception {
         Method method = UploadQuotaReservationRepository.class.getMethod(
-                "findStalePendingAttemptsForUpdate", Instant.class, int.class);
+                "findStalePendingAttempts", Instant.class, Pageable.class);
         Query query = method.getAnnotation(Query.class);
 
+        assertThat(method.getGenericReturnType().getTypeName())
+                .contains(UploadQuotaAttemptCandidate.class.getName());
         assertThat(query).isNotNull();
-        assertThat(query.nativeQuery()).isTrue();
         assertThat(query.value().toLowerCase())
-                .contains("attempt_expires_at")
-                .contains("for update skip locked")
-                .contains("limit");
+                .contains("attemptid")
+                .contains("releasereason")
+                .doesNotContain("for update");
     }
 
     private UploadQuotaReconciliationService service() {
         UploadQuotaProperties properties = new UploadQuotaProperties();
         properties.setReconciliationBatchSize(10);
         return new UploadQuotaReconciliationService(
-                reservationRepository,
-                documentRepository,
-                ingestJobRepository,
-                outboxRepository,
-                minioStorageService,
-                properties);
+                reservations, documents, jobs, outbox, storage, properties,
+                intentCleanup, persistence, abandonedUploads);
     }
 
-    private static UploadQuotaReservation pendingReservation(UUID attemptId) {
-        return UploadQuotaReservation.builder()
-                .id(UUID.randomUUID())
-                .tenantId("default")
-                .userId("anonymous")
-                .kbId(UUID.randomUUID())
-                .docId(null)
-                .attemptId(attemptId)
-                .idempotencyKey("key-1")
-                .fileFingerprint("sha256:file-a")
-                .reservedBytes(10L)
-                .status(UploadQuotaReservationStatus.PENDING)
-                .attemptExpiresAt(Instant.now().minusSeconds(1))
-                .createdAt(Instant.now().minusSeconds(120))
-                .updatedAt(Instant.now().minusSeconds(60))
-                .build();
+    private void stubCandidate(
+            UploadQuotaAttemptCandidate candidate, Document document, IngestJob job) {
+        when(reservations.findStalePendingAttempts(any(Instant.class), any(Pageable.class)))
+                .thenReturn(List.of(candidate));
+        when(documents.findById(candidate.attemptId())).thenReturn(Optional.of(document));
+        when(jobs.findTopByDocIdOrderByCreatedAtDesc(candidate.attemptId())).thenReturn(Optional.of(job));
     }
 
-    private static Document document(UUID kbId, UUID docId) {
-        return Document.builder()
-                .id(docId)
-                .kbId(kbId)
-                .fileName("a.md")
-                .objectKey(kbId + "/" + docId + "/a.md")
-                .mimeType("text/markdown")
-                .fileSize(10L)
-                .quotaReservationId(UUID.randomUUID())
-                .status(DocumentStatus.PENDING)
-                .build();
+    private UploadQuotaAttemptCandidate candidate() {
+        return new UploadQuotaAttemptCandidate(
+                UUID.randomUUID(), UUID.randomUUID(), "upload-writer:expired");
     }
 
-    private static IngestJob job(UUID kbId, UUID docId) {
-        return IngestJob.builder()
-                .id(UUID.randomUUID())
-                .kbId(kbId)
-                .docId(docId)
-                .status(IngestJobStatus.PENDING)
-                .stage(IngestStage.QUEUED)
-                .build();
+    private Document document(UUID id, DocumentStatus status) {
+        return Document.builder().id(id).kbId(UUID.randomUUID()).objectKey("objects/" + id)
+                .status(status).build();
     }
 
-    private static IngestOutboxEvent outbox(UUID jobId, UUID kbId, UUID docId, IngestOutboxStatus status) {
-        return IngestOutboxEvent.builder()
-                .id(UUID.randomUUID())
-                .jobId(jobId)
-                .kbId(kbId)
-                .docId(docId)
-                .objectKey(kbId + "/" + docId + "/a.md")
-                .fileName("a.md")
-                .mimeType("text/markdown")
-                .status(status)
-                .build();
+    private IngestJob job(UUID documentId, IngestJobStatus status, IngestStage stage) {
+        return IngestJob.builder().id(UUID.randomUUID()).docId(documentId)
+                .status(status).stage(stage).build();
     }
 }
